@@ -23,7 +23,7 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      - run: npm install --no-package-lock
+      - run: npm install --force
 
       - name: Build (public, no private folder)
         env:
