@@ -1,0 +1,57 @@
+name: Build & Deploy to Bunny CDN
+
+# Runs on the DEV repo (private) — secrets stay safe.
+# Push to public repo is done manually via /gitweb.
+on:
+  push:
+    branches: [main]
+
+env:
+  BUNNY_STORAGE_ZONE: realvitual-web
+  BUNNY_REGION: storage.bunnycdn.com
+  BUNNY_REMOTE_PATH: dev
+  BUNNY_PULL_ZONE_ID: '5489019'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Build (public, no private folder)
+        env:
+          VITE_PUBLIC_BUILD: '1'
+        run: npm run build
+
+      - name: Upload dist/ to Bunny CDN Storage
+        run: |
+          echo "Uploading to ${BUNNY_STORAGE_ZONE}/${BUNNY_REMOTE_PATH}/ on ${BUNNY_REGION}"
+
+          find dist -type f | while read FILE; do
+            REL="${FILE#dist/}"
+            URL="https://${BUNNY_REGION}/${BUNNY_STORAGE_ZONE}/${BUNNY_REMOTE_PATH}/${REL}"
+            MIME=$(file --mime-type -b "$FILE")
+            echo "  ${REL} (${MIME})"
+            curl -s -X PUT "$URL" \
+              -H "AccessKey: ${{ secrets.BUNNY_STORAGE_KEY }}" \
+              -H "Content-Type: ${MIME}" \
+              --data-binary "@${FILE}" \
+              -o /dev/null -w "%{http_code}" | grep -q "201" || echo "    WARN: non-201 response"
+          done
+
+          echo "Done. https://web.realvirtual.io/${BUNNY_REMOTE_PATH}/"
+
+      - name: Purge Bunny Pull Zone Cache
+        run: |
+          echo "Purging pull zone cache..."
+          curl -s -X POST "https://api.bunny.net/pullzone/${BUNNY_PULL_ZONE_ID}/purgeCache" \
+            -H "AccessKey: ${{ secrets.BUNNY_ACCOUNT_KEY }}" \
+            -o /dev/null -w "%{http_code}"
+          echo " Done."
