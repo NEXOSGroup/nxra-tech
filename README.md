@@ -29,8 +29,9 @@ realvirtual WEB replaces traditional desktop HMI and SCADA visualization with a 
 - **Layout Planning** *(Beta)* — Assemble factory layouts directly in the browser: drag reusable parts from a library onto a grid, connect them with typed snap points, and position them with transform gizmos. Ships with a standard parts library and can load any GLB catalog straight from a GitHub repository.
 - **Multiuser Sessions** *(Beta)* — Real-time collaboration with avatars, shared camera views, role management, and late-join state sync.
 - **Plugin Architecture** — Extend with custom plugins for project-specific HMI, KPI dashboards, maintenance workflows, and industrial interfaces.
-- **Microsoft Teams Integration** *(Beta)* — Embed interactive 3D digital twins directly in Teams meetings and channels.
 - **AI-Ready (MCP)** — Built-in [Model Context Protocol](https://modelcontextprotocol.io) bridge lets AI assistants like Claude inspect, control, and debug the running viewer — read drive states, set signals, query scene hierarchy, and automate testing through natural language. Uses the [realvirtual MCP Server](https://github.com/game4automation/realvirtual-MCP).
+
+![Layout Planner — drag parts from the library onto the grid and connect them with typed snap points](docs/images/screenshot-layout-planner.jpg)
 
 ## Use Cases
 

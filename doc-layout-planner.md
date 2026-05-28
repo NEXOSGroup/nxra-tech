@@ -11,6 +11,8 @@ fixtures, scans) onto a grid, positioning them with translate / rotate
 gizmos, and snapping them to each other or to the floor. The plugin lives
 under [`src/plugins/layout-planner/`](src/plugins/layout-planner/).
 
+![Layout Planner — the library panel (realvirtual-Library) with conveyors and pallets, placing a snap-connected chain conveyor on the grid](docs/images/screenshot-layout-planner.jpg)
+
 ---
 
 ## 1. Concepts at a glance
