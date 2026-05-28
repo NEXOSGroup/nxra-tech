@@ -31,8 +31,6 @@ realvirtual WEB replaces traditional desktop HMI and SCADA visualization with a 
 - **Plugin Architecture** — Extend with custom plugins for project-specific HMI, KPI dashboards, maintenance workflows, and industrial interfaces.
 - **AI-Ready (MCP)** — Built-in [Model Context Protocol](https://modelcontextprotocol.io) bridge lets AI assistants like Claude inspect, control, and debug the running viewer — read drive states, set signals, query scene hierarchy, and automate testing through natural language. Uses the [realvirtual MCP Server](https://github.com/game4automation/realvirtual-MCP).
 
-![Layout Planner — drag parts from the library onto the grid and connect them with typed snap points](docs/images/screenshot-layout-planner.jpg)
-
 ## Use Cases
 
 ### 3D HMI / Operator Dashboards
@@ -48,6 +46,11 @@ Interactive 3D models that let prospects explore machines live in the browser. M
 
 ### Product Configurators
 Build browser-based 3D product configurators where customers select options, variants, and accessories — and see the result rendered in real time. Combine with the plugin system to add pricing, BOM generation, or quote workflows.
+
+### Layout Planning
+Assemble factory layouts directly in the browser — drag conveyors, robots, fixtures, and pallets from a parts library onto a grid, connect them with typed snap points, and arrange them with transform gizmos. Ships with a standard parts library and loads any GLB catalog straight from a GitHub repository.
+
+![Layout Planner — the library panel with conveyors and pallets, placing a snap-connected chain conveyor on the grid](docs/images/screenshot-layout-planner.jpg)
 
 ### Training & Onboarding
 Operators learn machine behavior interactively before touching the real system. No software installation, no VPN, no IT department required.

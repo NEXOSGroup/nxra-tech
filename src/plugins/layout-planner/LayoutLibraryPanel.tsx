@@ -61,6 +61,13 @@ const PANEL_ID = 'layout-planner';
 
 // ─── Panel Component ────────────────────────────────────────────────────
 
+// Stable fallback for the cloud store's useSyncExternalStore snapshot. Must be
+// a module-level constant: returning a fresh object literal from the getSnapshot
+// fallback makes useSyncExternalStore see a new reference every render, which in
+// public builds (no cloud extension) triggers an infinite re-render loop
+// (React "Maximum update depth exceeded", minified error #185).
+const EMPTY_CLOUD_SNAPSHOT = { connections: [], activeConnectionId: null };
+
 export function LayoutLibraryPanel() {
   const viewer = useViewer();
   const isMobile = useMobileLayout();
@@ -83,7 +90,7 @@ export function LayoutLibraryPanel() {
   const cloudStore = plugin?.cloudStore ?? null;
   const cloudSnapshot = useSyncExternalStore(
     cloudStore?.subscribe ?? (() => () => {}),
-    cloudStore?.getSnapshot ?? (() => ({ connections: [], activeConnectionId: null })),
+    cloudStore?.getSnapshot ?? (() => EMPTY_CLOUD_SNAPSHOT),
   );
 
   // Active tab: either a catalog URL or "am:<connectionId>"
