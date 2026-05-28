@@ -256,3 +256,35 @@ export interface OrderManagerConfig {
    */
   metadataManufacturerLabels?: string[];
 }
+
+// ─── Measurement Types ──────────────────────────────────────────────────
+
+/** A 3D distance measurement between two surface points. */
+export interface Measurement {
+  id: string;
+  name: string;
+  pointA: [number, number, number];
+  pointB: [number, number, number];
+  normalA: [number, number, number] | null;
+  normalB: [number, number, number] | null;
+  distance: number;       // Meters
+  visible: boolean;
+  color: string;
+  timestamp: number;
+  cameraPos?: [number, number, number];
+  cameraTarget?: [number, number, number];
+}
+
+/**
+ * Public API surface of MeasurementPlugin consumed by core HMI panels.
+ */
+export interface MeasurementPluginAPI {
+  readonly id: string;
+  measurementMode: boolean;
+  addMeasurement(pointA: [number, number, number], pointB: [number, number, number]): Measurement;
+  removeMeasurement(id: string): void;
+  updateMeasurement(id: string, changes: Partial<Pick<Measurement, 'name' | 'color' | 'visible'>>): void;
+  removeAll(): void;
+  getMeasurements(): Measurement[];
+  focusMeasurement(id: string): void;
+}

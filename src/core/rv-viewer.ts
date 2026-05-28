@@ -12,7 +12,7 @@
  *   const viewer = new RVViewer(document.getElementById('app'));
  *   await viewer.loadModel('./models/demo.glb');
  *   viewer.signalStore?.subscribe('ConveyorStart', console.log);
- *   viewer.on('drive-hover', ({ drive }) => console.log(drive?.name));
+ *   viewer.on('object-hover', (data) => console.log(data?.path));
  */
 
 import {
@@ -23,39 +23,36 @@ import {
   AmbientLight,
   DirectionalLight,
   Color,
-  Vector3,
   Vector2,
+  Vector3,
   Box3,
   Object3D,
   MOUSE,
   TOUCH,
-  PlaneGeometry,
   Mesh,
-  MeshBasicMaterial,
   MeshStandardMaterial,
-  ShaderMaterial,
-  WebGLRenderTarget,
-  DoubleSide,
   NoToneMapping,
   CanvasTexture,
-  RepeatWrapping,
-  NearestFilter,
-  SRGBColorSpace,
   Spherical,
-  BufferGeometry,
   Texture,
   Matrix4,
   Frustum,
 } from 'three';
 import type { Renderer } from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import type { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import type { Pass } from 'three/addons/postprocessing/Pass.js';
+import type { AOMode } from './hmi/visual-settings-store';
+import { PostProcessingManager, type PostProcessingHost } from './rv-post-processing';
+import { createGroundFade, drawCheckerPattern } from './engine/rv-ground-plane';
 import type { ToneMappingType, ShadowQuality, ProjectionType, VisualSettings } from './hmi/visual-settings-store';
-import { loadVisualSettings } from './hmi/visual-settings-store';
+import {
+  loadVisualSettings,
+  getSourceMarkersVisible,
+  setSourceMarkersVisible as setSourceMarkersVisibleStore,
+  subscribeSourceMarkersVisible,
+} from './hmi/visual-settings-store';
 import { CameraManager, type ViewportOffset } from './rv-camera-manager';
 import { VisualSettingsManager } from './rv-visual-settings-manager';
 import Stats from 'stats-gl';
@@ -63,8 +60,14 @@ import Stats from 'stats-gl';
 import { EventEmitter } from './rv-events';
 import { debug, logInfo } from './engine/rv-debug';
 import { loadModelSettingsConfig } from './hmi/rv-settings-bundle';
-import { DRAG_THRESHOLD_PX, DEFAULT_DPR_CAP } from './engine/rv-constants';
+import { DRAG_THRESHOLD_PX, DEFAULT_DPR_CAP, NO_AO_LAYER } from './engine/rv-constants';
 import { loadGLB, type LoadResult } from './engine/rv-scene-loader';
+import type { RVExtrasOverlay } from './engine/rv-extras-overlay-store';
+import type { RvScene } from './hmi/scene/rv-scene-types';
+import type { PlacementsSnapshot } from './rv-shared-types';
+import type { MultiuserSnapshot } from '../plugins/multiuser-plugin';
+import type { McpBridgeSnapshot } from '../plugins/mcp-bridge-plugin';
+import { buildRaycastGeometries } from './engine/rv-raycast-geometry';
 import {
   loadModelJsonConfig,
   extractGlbPluginConfig,
@@ -75,6 +78,7 @@ import { loadExternalPlugin } from './engine/rv-plugin-loader';
 import type { ModelPluginManager } from './rv-model-plugin-manager';
 import { SimulationLoop } from './engine/rv-simulation-loop';
 import { RVHighlightManager } from './engine/rv-highlight-manager';
+import { RVOutlineManager } from './engine/rv-outline-manager';
 import { RaycastManager, type ObjectHoverData, type ObjectUnhoverData, type ObjectClickData, type HoverableType } from './engine/rv-raycast-manager';
 import type { RVDrive } from './engine/rv-drive';
 import type { RVTransportManager } from './engine/rv-transport-manager';
@@ -89,10 +93,22 @@ import { GizmoOverlayManager } from './engine/rv-gizmo-manager';
 import { ComponentEventDispatcher } from './engine/rv-component-event-dispatcher';
 import type { GroupRegistry } from './engine/rv-group-registry';
 import { AutoFilterRegistry } from './engine/rv-auto-filter-registry';
-import { ISOLATE_FOCUS_LAYER, HIGHLIGHT_OVERLAY_LAYER } from './engine/rv-group-registry';
+import {
+  ISOLATE_FOCUS_LAYER,
+  HIGHLIGHT_OVERLAY_LAYER,
+  disableOverlayLayers,
+  setOverlayLayersOnly,
+} from './engine/rv-group-registry';
+import {
+  detectActiveGPU, enumerateOtherAdapters, isSameAsActive,
+  analyzeGPU,
+  type GPUInfo, type GPUAnalysis,
+} from './engine/rv-gpu-info';
 import { registerFilterSubscriber, loadSearchSettings, isTypeEnabled } from './hmi/search-settings-store';
 import { getTypesWithCapability, getRegisteredCapabilities } from './engine/rv-component-registry';
 import type { RVViewerPlugin } from './rv-plugin';
+import type { ViewerEvents } from './rv-viewer-events';
+import type { ViewerHost } from './engine/rv-viewer-host';
 import { UIPluginRegistry } from './rv-ui-registry';
 import { isActiveForState } from './engine/rv-active-only';
 import { LeftPanelManager } from './hmi/left-panel-manager';
@@ -103,10 +119,38 @@ import type { SelectionSnapshot } from './engine/rv-selection-manager';
 import { isMobileDevice } from '../hooks/use-mobile-layout';
 import { resetDynamicContexts } from './hmi/ui-context-store';
 import { getAppConfig } from './rv-app-config';
+import { PluginContextImpl } from './rv-plugin-context';
+import { SceneFacadeImpl } from './facades/scene-facade';
+import { CameraFacadeImpl } from './facades/camera-facade';
+import { ControlsFacadeImpl } from './facades/controls-facade';
+import { SimLoopFacadeImpl } from './facades/sim-loop-facade';
+import { TickStage } from './rv-tick-stages';
+import { BehaviorManager } from './behaviors';
+import {
+  applyKinematicsSpec,
+  createBindContext,
+  type KinematicsSpec,
+  type KinematizeReport,
+  type RVBindContext,
+  type BindContextHost,
+} from './behavior-runtime';
 
 // Base scene-background grayscale (0x9a9a9a / 255 ≈ 0.604). Multiplied by
 // backgroundBrightness so brightness=1 reproduces the original default color.
 const BG_BASE_SCALAR = 0x9a / 255;
+
+// ─── Ground fade geometry ────────────────────────────────────────────────
+// The floor is a square plane carrying a CIRCULAR alpha map: opaque disc in
+// the middle, linear radial fade to transparent at the inscribed-circle edge.
+//
+// Both the plane SIZE and the alpha-map opaque/fade split are keyed off these
+// constants (expressed as multiples of the model's half-extent in X/Z) so the
+// two always stay in sync — change one number and the disc layout updates.
+//   - FLOOR_FADE_START: world radius where the fade starts (opaque inside).
+//   - FLOOR_FADE_END:   world radius where the fade reaches zero alpha.
+// A long, gentle fade reads better than a hard cut — hence END >> START.
+const FLOOR_FADE_START_RATIO = 1.5;  // × model max half-extent
+const FLOOR_FADE_END_RATIO   = 6.0;  // × model max half-extent (fade length = 4.5×)
 
 // ─── Plugin Error Isolation ──────────────────────────────────────────────
 
@@ -134,6 +178,20 @@ export function callPlugin(
 // Re-export ViewportOffset from CameraManager (public API backward compat)
 export type { ViewportOffset } from './rv-camera-manager';
 
+// Re-export extracted subsystems for backwards compatibility (plan-177 phase 7)
+export { PostProcessingManager } from './rv-post-processing';
+export type { PostProcessingHost } from './rv-post-processing';
+export { createGroundFade, drawCheckerPattern } from './engine/rv-ground-plane';
+
+/** @deprecated Import from './rv-viewer-events' directly. Re-exported here for
+ *  backward compatibility with existing hooks; will be removed in a future major. */
+export type { ViewerEvents } from './rv-viewer-events';
+
+// SceneSource (discriminated union of GLB vs. Layout) was retired in favour of
+// the unified `RvScene` model. The viewer now only deals with `RvScene`
+// records — see `src/core/hmi/scene/rv-scene-types.ts`. Translation between
+// any external API shapes and `RvScene` happens in `SceneStore`.
+
 export interface RVViewerOptions {
   /** Use WebGPU renderer (falls back to WebGL if unavailable). Default: false */
   useWebGPU?: boolean;
@@ -143,83 +201,6 @@ export interface RVViewerOptions {
   autoResize?: boolean;
   /** Enable native MSAA antialiasing (constructor-only, requires page reload to change). Default: false */
   antialias?: boolean;
-}
-
-export interface ViewerEvents {
-  // ── Existing events (unchanged) ──
-  'model-loaded': { result: LoadResult };
-  'model-cleared': void;
-  'drive-hover': { drive: RVDrive | null; clientX: number; clientY: number };
-  'drive-focus': { drive: RVDrive | null; node: Object3D | null };
-  'drive-chart-toggle': { open: boolean };
-  'drive-filter': { filter: string; filteredDrives: RVDrive[] };
-  'node-filter': { filter: string; filteredNodes: NodeSearchResult[]; tooMany: boolean };
-  'sensor-chart-toggle': { open: boolean };
-  'groups-overlay-toggle': { open: boolean };
-  'exclusive-hover-mode': { mode: HoverableType | null };
-
-  // ── Connection state ──
-  'connection-state-changed': { state: 'Connected' | 'Disconnected'; previous: 'Connected' | 'Disconnected' };
-
-  // ── Simulation events (emitted by plugins) ──
-  'sensor-changed': { sensorPath: string; occupied: boolean };
-  'mu-spawned': { totalSpawned: number };
-  'mu-consumed': { totalConsumed: number };
-  'drive-at-target': { drivePath: string; position: number };
-
-  // ── Interface events (emitted by interface plugins) ──
-  'interface-connected': { interfaceId: string; type: string };
-  'interface-disconnected': { interfaceId: string; reason?: string };
-  'interface-error': { interfaceId: string; error: string };
-  'interface-data': { interfaceId: string; signals: Record<string, unknown> };
-
-  // ── Generic raycast events (emitted by RaycastManager) ──
-  'object-hover': ObjectHoverData | null;
-  'object-unhover': ObjectUnhoverData;
-  'object-click': ObjectClickData;
-
-  // ── UI events (emitted by UI plugins) ──
-  'camera-animation-done': { targetPath?: string };
-  'object-clicked': { path: string; node: Object3D };
-  'selection-changed': SelectionSnapshot;
-  'object-focus': { path: string; node: Object3D };
-  'panel-opened': { panelId: string };
-  'panel-closed': { panelId: string };
-
-  // ── Safety door events (engine listens, UI emits) ──
-  /** Show or hide all safety-door gizmos at once.
-   *  UI plugins emit this to toggle visibility from a warning tile etc. */
-  'safety-door:show-all': { show: boolean };
-
-  // ── XR events ──
-  'xr-session-start': void;
-  'xr-session-end': void;
-  'xr-hit-test': { position: Float32Array; matrix: Float32Array };
-  'xr-controller-select': { hand: 'left' | 'right'; position: { x: number; y: number; z: number } };
-
-  // ── FPV events ──
-  'fpv-enter': void;
-  'fpv-exit': void;
-
-  // ── Context Menu events ──
-  'context-menu-request': { pos: { x: number; y: number }; path: string; node: Object3D };
-
-  // ── Layout events ──
-  'layout-transform-update': { path: string; position: { x: number; y: number; z: number }; rotation: { x: number; y: number; z: number } };
-
-  // ── Simulation pause events ──
-  /** Fired when the overall simulation pause state transitions (idle ↔ paused).
-   *  Plugins can subscribe to stop/resume external PLC I/O, freeze animations,
-   *  disable cursor interactions, etc. Not fired when reasons are added/removed
-   *  while already paused — only on the idle/paused transition. */
-  'simulation-pause-changed': {
-    /** New overall pause state. */
-    paused: boolean;
-    /** All currently active pause reasons (snapshot). */
-    reasons: readonly string[];
-    /** The specific reason that triggered this transition. */
-    reason: string;
-  };
 }
 
 // ─── Navigation Helper ──────────────────────────────────────────────────
@@ -236,25 +217,55 @@ export function applyNavigationSettingsToControls(
     zoomSpeed: number;
     dampingFactor: number;
   },
-  s: Pick<VisualSettings, 'orbitRotateSpeed' | 'orbitPanSpeed' | 'orbitZoomSpeed' | 'orbitDampingFactor'>,
+  s: Pick<VisualSettings, 'orbitRotateSpeed' | 'orbitPanSpeed' | 'orbitZoomSpeed' | 'orbitDampingFactor' | 'distanceAdaptiveNav'>,
 ): void {
   controls.rotateSpeed = s.orbitRotateSpeed;
-  controls.panSpeed = s.orbitPanSpeed;
-  controls.zoomSpeed = s.orbitZoomSpeed;
+  // When adaptive navigation is active, the AdaptiveNavPlugin owns zoomSpeed/panSpeed writes.
+  if (!s.distanceAdaptiveNav) {
+    controls.panSpeed = s.orbitPanSpeed;
+    controls.zoomSpeed = s.orbitZoomSpeed;
+  }
   controls.dampingFactor = s.orbitDampingFactor;
 }
 
 // ─── RVViewer ───────────────────────────────────────────────────────────
 
+// Compile-time assertion: RVViewer must satisfy ViewerHost contract.
+// Phase 2 of plan-182. If this fails, RVViewer broke the contract used by
+// engine/rv-component-event-dispatcher and engine/rv-selection-manager.
+type _RVViewer_satisfies_ViewerHost = RVViewer extends ViewerHost ? true : false;
+const _rvViewerHostCheck: _RVViewer_satisfies_ViewerHost = true;
+void _rvViewerHostCheck;  // suppress unused-warning
+
 export class RVViewer extends EventEmitter<ViewerEvents> {
   // --- Three.js context (read-only for custom UIs) ---
+  /**
+   * @deprecated Phase 4b of plan-182: prefer typed helpers like `viewer.eachNode(fn)`
+   * or `viewer.projectToScreen(node)` over direct `viewer.scene` access. Only ~15
+   * core plugins (WebXR, layout-planner, annotation, fpv, etc.) have a legitimate
+   * reason to use the raw Scene — those are whitelisted in plan-182 section 2.7.2.
+   */
   readonly scene: Scene;
   private perspCamera!: PerspectiveCamera;
   private orthoCamera!: OrthographicCamera;
   private _activeCamera!: PerspectiveCamera | OrthographicCamera;
-  /** The active camera (perspective or orthographic). */
+  /**
+   * @deprecated Phase 4b of plan-182: prefer `viewer.getCameraState()` for reads,
+   * `viewer.animateCameraTo()` for navigation. Direct camera access is only for
+   * plugins handling custom view modes (FPV, WebXR, multiuser sync).
+   */
   get camera(): PerspectiveCamera | OrthographicCamera { return this._activeCamera; }
+  /**
+   * @deprecated Phase 4b of plan-182: renderer access is only for plugins needing
+   * `renderer.domElement` for raycasting/event-listeners (annotation, measurement,
+   * fpv). Most HMI code should not access this directly.
+   */
   readonly renderer: Renderer;
+  /**
+   * @deprecated Phase 4b of plan-182: prefer `viewer.setControlsConfig({...})` for
+   * Settings-panel writes. Direct control access is only for plugins managing
+   * drag-mode conflicts (layout-planner, annotation, measurement).
+   */
   readonly controls: OrbitControls;
   readonly loop: SimulationLoop;
   private stats!: Stats;
@@ -274,6 +285,10 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
 
   // --- Highlight system (always available) ---
   readonly highlighter: RVHighlightManager;
+
+  // --- Outline system (post-process OutlinePass; WebGL only) ---
+  /** Plugin-driven OutlinePass wrapper. `available` is false on WebGPU. */
+  readonly outlineManager: RVOutlineManager;
 
   // --- Generic gizmo overlay system (always available) ---
   /** Central 3D-overlay/gizmo system. Used by WebSensor and other components. */
@@ -408,8 +423,58 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   /** Central selection state (multi-select, Escape-to-deselect, selection highlights). */
   readonly selectionManager = new SelectionManager();
 
+  /** Pending async work that must complete before `loadModel` / `loadScene`
+   *  resolves to the caller. Drained via {@link whenLoadingIdle}; populated
+   *  via {@link trackLoadingWork} by subsystems and plugins that kick off
+   *  deferred async tasks during a load (env-map IBL generation, placement
+   *  spawn, asset prefetch). Centralising the wait means the loading
+   *  overlay stays up until the scene is fully ready to be revealed — no
+   *  unlit-first-frame, no late lighting / placement pop-in. */
+  private _loadingTasks: Promise<unknown>[] = [];
+
+  /**
+   * Register an async task that must complete before the next `loadModel`
+   * or `loadScene` resolves to its caller. The task's resolution value is
+   * ignored and rejections are swallowed (`Promise.allSettled`), so a slow
+   * HDRI failing won't deadlock the loading overlay.
+   *
+   * Safe to call at any time:
+   *   - viewer construction (env-map starts loading there);
+   *   - inside `onModelLoaded` (plugins doing post-load async work);
+   *   - inside another already-tracked task (cascades are awaited too —
+   *     `whenLoadingIdle` drains in batches until the queue is empty).
+   *
+   * When no `loadModel`/`loadScene` is in flight, resolved tasks just sit
+   * in the queue harmlessly until the next drain.
+   */
+  trackLoadingWork(p: Promise<unknown>): void {
+    this._loadingTasks.push(p);
+  }
+
+  /**
+   * Resolve when every currently-registered loading task has settled. Drains
+   * in batches so tasks queued by other tasks (cascades) are awaited too.
+   * Idempotent when the queue is empty.
+   */
+  async whenLoadingIdle(): Promise<void> {
+    while (this._loadingTasks.length > 0) {
+      const batch = this._loadingTasks.splice(0);
+      await Promise.allSettled(batch);
+    }
+  }
+
   /** Plugin-extensible context menu (right-click / long-press). */
   readonly contextMenu = new ContextMenuStore();
+
+  /**
+   * BehaviorManager — owns all auto-discovered `src/behaviors/*.ts` modules.
+   * On every `model-loaded` event, matching behaviors are invoked with a
+   * fresh RVBindContext; on `model-cleared` all hooks/subscriptions made
+   * during the bind are disposed.
+   */
+  readonly behaviors = new BehaviorManager();
+  /** @internal — dispose function returned by `behaviors.attach()`. */
+  private _behaviorsDetach: (() => void) | null = null;
 
   /**
    * Register a plugin. Sorted into cached lifecycle lists.
@@ -422,6 +487,16 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       return this;
     }
     this._plugins.push(plugin);
+
+    // Phase 4a of plan-182: Plugins können init?(viewer, context) implementieren um
+    // den schmalen PluginContext statt vollem RVViewer zu erhalten. Optional & try/catch.
+    if (typeof plugin.init === 'function') {
+      try {
+        plugin.init(this, this._pluginContext);
+      } catch (e) {
+        console.error(`[RVViewer] Plugin '${plugin.id}' init error:`, e);
+      }
+    }
 
     // Insert into cached lists sorted by order
     const insertSorted = (list: RVViewerPlugin[], p: RVViewerPlugin) => {
@@ -500,6 +575,18 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   /** Model plugin manager — handles per-model plugin loading/unloading. */
   modelPluginManager: ModelPluginManager | null = null;
 
+  // ─── Sub-Facaden (Phase 4a of plan-182) ────────────────────────────────
+  // Instanziiert am Ende des Constructors, niemals null während Viewer-Lifetime.
+  // Plugins greifen über this._pluginContext.scene/.camera/etc. zu (NICHT direkt!).
+  /** @internal */ _scene!: SceneFacadeImpl;
+  /** @internal */ _camera!: CameraFacadeImpl;
+  /** @internal */ _controls!: ControlsFacadeImpl;
+  /** @internal */ _simLoop!: SimLoopFacadeImpl;
+  // _transport ist lazy in PluginContextImpl gecacht — kein Feld auf RVViewer.
+
+  // PluginContext-Instanz — wird in use() an Plugins via init?() durchgereicht.
+  /** @internal */ _pluginContext!: PluginContextImpl;
+
   /**
    * Register a lazy plugin factory. The factory is only called when a model
    * actually requests the plugin (via rv_plugins / modelname.json).
@@ -545,8 +632,11 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     const baseUrl = this._currentModelUrl
       ? this._currentModelUrl.substring(0, this._currentModelUrl.lastIndexOf('/'))
       : '.';
-    const plugin = await loadExternalPlugin(id, baseUrl);
-    if (plugin) {
+    // loadExternalPlugin returns PluginLoadable (plan-182 Phase 2 — avoids rv-viewer.ts
+    // cycle). External plugins are RVViewerPlugin by convention; cast is safe here.
+    const loadedPlugin = await loadExternalPlugin(id, baseUrl);
+    if (loadedPlugin) {
+      const plugin = loadedPlugin as RVViewerPlugin;
       this.use(plugin);
       return plugin;
     }
@@ -687,23 +777,46 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
 
   /**
    * Floor brightness multiplier (0 = black, 1 = default, 2 = double).
-   * Scales the ground material's base color — the checker texture is
-   * multiplied by this color in the fragment shader, so brightness 0.5
-   * gives a half-bright floor and brightness 2 gives a double-bright one.
+   * Combined with `groundColor` in the material tint:
+   *     mat.color = groundColor × groundBrightness   (component-wise)
+   * so a white ground at brightness 1 reproduces the original look, and a
+   * green ground at brightness 1 reads as the green hue at full intensity.
    */
   get groundBrightness(): number {
-    if (!this._groundMesh) return 1.0;
-    const mat = this._groundMesh.material as MeshStandardMaterial;
-    // Color is set uniformly (r==g==b), read back from r
-    return mat.color?.r ?? 1.0;
+    return this._groundBrightness;
   }
   set groundBrightness(v: number) {
-    if (!this._groundMesh) return;
     const clamped = Math.max(0, Math.min(2, v));
+    if (this._groundBrightness === clamped) return;
+    this._groundBrightness = clamped;
+    this.applyGroundTint();
+  }
+
+  /**
+   * Floor base color as `#rrggbb` hex. Combined with `groundBrightness` in the
+   * material tint (color × brightness). Default '#ffffff' (white) so brightness
+   * acts as a uniform gray scaler exactly as before.
+   */
+  get groundColor(): string {
+    return '#' + this._groundColor.getHexString();
+  }
+  set groundColor(hex: string) {
+    if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return;
+    const next = new Color(hex);
+    if (this._groundColor.equals(next)) return;
+    this._groundColor.copy(next);
+    this.applyGroundTint();
+  }
+
+  /** Recompute the ground material color from the stored base color and
+   *  brightness. Called whenever either input changes. */
+  private applyGroundTint(): void {
+    if (!this._groundMesh) return;
     const mat = this._groundMesh.material as MeshStandardMaterial;
     if (!mat.color) return;
-    if (mat.color.r === clamped && mat.color.g === clamped && mat.color.b === clamped) return;
-    mat.color.setScalar(clamped);
+    mat.color
+      .copy(this._groundColor)
+      .multiplyScalar(this._groundBrightness);
     this._renderDirty = true;
   }
 
@@ -737,7 +850,7 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     if (this._checkerContrast === clamped) return;
     this._checkerContrast = clamped;
     if (!this._groundMesh || !this._checkerCanvas) return;
-    this.drawCheckerPattern(this._checkerCanvas, clamped);
+    drawCheckerPattern(this._checkerCanvas, clamped);
     const mat = this._groundMesh.material as MeshStandardMaterial;
     if (mat.map) {
       (mat.map as CanvasTexture).needsUpdate = true;
@@ -813,11 +926,109 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   setSimulationPaused(reason: string, paused: boolean): void {
     const changed = this.loop.setPaused(reason, paused);
     if (changed) {
+      this._emitPauseChanged(reason);
+    }
+  }
+
+  // ─── Source Floor-Marker Visibility (plan-181) ─────────────────────
+  //
+  // Toggles the always-visible floor ring + label sprite under each
+  // `RVSource`. Visibility-only (no rebuild) so the toggle is cheap and
+  // safe to flip from the settings UI on every interaction.
+
+  /** Unsubscribe handle for the source-markers reactive store. */
+  private _sourceMarkersUnsub: (() => void) | null = null;
+
+  /**
+   * Show or hide the floor markers under every Source in the current
+   * scene. Persists the choice to localStorage via the
+   * `'rv-source-markers-visible'` key.
+   *
+   * Idempotent — calling with the same value as already stored is a no-op
+   * from the user's perspective (the reactive subscriber would not fire).
+   * For consistency this method always re-applies the visibility to every
+   * source's marker, even when the persisted value didn't change, so a
+   * just-loaded scene picks up the current state immediately.
+   */
+  setSourceMarkersVisible(visible: boolean): void {
+    setSourceMarkersVisibleStore(visible);
+    this._applySourceMarkersVisible(visible);
+  }
+
+  /** Walk every source in the current transport manager and apply the flag. */
+  private _applySourceMarkersVisible(visible: boolean): void {
+    const tm = this.transportManager;
+    if (!tm) return;
+    for (const source of tm.sources) {
+      source.setMarkerVisible?.(visible);
+    }
+  }
+
+  /**
+   * Wire the reactive `'rv-source-markers-visible'` store to the loaded
+   * scene's Sources. Called once after the scene loads so the initial
+   * value is applied AND subsequent settings-panel changes propagate
+   * without callers having to wire it themselves.
+   *
+   * Safe to call multiple times — re-subscribing replaces the prior
+   * handle.
+   */
+  private _installSourceMarkersBinding(): void {
+    this._sourceMarkersUnsub?.();
+    // Apply current value once so freshly-loaded sources reflect the
+    // persisted setting.
+    this._applySourceMarkersVisible(getSourceMarkersVisible());
+    this._sourceMarkersUnsub = subscribeSourceMarkersVisible(() => {
+      this._applySourceMarkersVisible(getSourceMarkersVisible());
+    });
+  }
+
+  /**
+   * Force-clear pause reasons. Intended as a last-resort dev/debug escape
+   * when a plugin leaked its pause-reason (e.g. crashed before `dispose()`
+   * could release it). Logs a warning so leaks are observable in production.
+   *
+   * @param reason  If provided, only that reason is removed. If omitted,
+   *                ALL active pause reasons are cleared.
+   */
+  clearPauseReasons(reason?: string): void {
+    if (!this.loop.pauseReasons.length) return;
+    if (reason !== undefined) {
+      if (!this.loop.pauseReasons.includes(reason)) return;
+      console.warn(`[SimControl] Force-clearing pause reason: '${reason}'`);
+      const changed = this.loop.setPaused(reason, false);
+      if (changed) this._emitPauseChanged(reason);
+      return;
+    }
+    const snapshot = [...this.loop.pauseReasons];
+    console.warn(`[SimControl] Force-clearing pause reasons: ${snapshot.join(', ')}`);
+    let lastChanged = false;
+    let lastReason = '';
+    for (const r of snapshot) {
+      lastChanged = this.loop.setPaused(r, false) || lastChanged;
+      lastReason = r;
+    }
+    if (lastChanged) this._emitPauseChanged(lastReason);
+  }
+
+  /**
+   * Re-entrancy-guarded emit for `'simulation-pause-changed'`. If a subscriber
+   * synchronously calls `setSimulationPaused` from inside the handler, the
+   * nested emission is suppressed to avoid event-driven feedback loops.
+   * (The pause-set itself is still updated — only the recursive event is skipped.)
+   */
+  private _emittingPauseChanged = false;
+  private _emitPauseChanged(reason: string): void {
+    if (this._emittingPauseChanged) return;
+    this._emittingPauseChanged = true;
+    try {
       this.emit('simulation-pause-changed', {
         paused: this.loop.isPaused,
         reasons: this.loop.pauseReasons,
         reason,
       });
+    } finally {
+      this._emittingPauseChanged = false;
     }
   }
 
@@ -827,7 +1038,39 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   /** Snapshot of active pause reasons (for diagnostics / UI badges). */
   get simulationPauseReasons(): readonly string[] { return this.loop.pauseReasons; }
 
+  /**
+   * Reset the simulation to a clean "start of new demo run" state without
+   * unloading the model.
+   *
+   * Effects:
+   * - Clears all live MUs and resets transport counters (`totalSpawned`,
+   *   `totalConsumed`).
+   * - Resets all LogicSteps to `Idle` (existing `logicEngine.reset()`).
+   *
+   * Intentionally leaves untouched:
+   * - **Drives**: stay at their current position. Conveyor textures do not
+   *   abruptly snap back — the user-visible model continues to look like it
+   *   did before the reset.
+   * - **Signals**: stay at their current values. This is essential for Live
+   *   mode (Unity / PLC stream) — resetting them would just be overwritten on
+   *   the next tick and would briefly visualise stale data.
+   * - **Pause state**: untouched. Reset can be invoked while paused or running.
+   *
+   * Use case: starting a fresh demo loop on a model that has been running for
+   * a while and has accumulated MUs on conveyors.
+   */
+  resetSimulation(): void {
+    if (this.transportManager) this.transportManager.reset();
+    if (this.logicEngine) this.logicEngine.reset();
+  }
+
+  // #region NodeFilter
   // ─── Unified Node Filter ──────────────────────────────────────────
+  //
+  // Marked as a region rather than extracted to a separate service because
+  // `filterNodes()` calls `this.emit()` which requires a circular reference
+  // back to the viewer. See plan-177 section 2.4 (DESCOPED NodeFilterService)
+  // for the rationale.
 
   private static readonly MAX_HIGHLIGHT_RESULTS = 20;
 
@@ -899,6 +1142,7 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   filterDrives(term: string): void {
     this.filterNodes(term);
   }
+  // #endregion NodeFilter
 
   /** Drive pinned by a card click (shown in tooltip until cleared). */
   focusedDrive: RVDrive | null = null;
@@ -912,8 +1156,11 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   /** Info from the last GLB load. */
   lastLoadInfo: { glbSize: string; loadTime: string } | null = null;
 
-  /** Load model with progress overlay (set by main.ts bootstrap). */
-  loadModelWithProgress: ((url: string) => Promise<void>) | null = null;
+  /** Load model with progress overlay (set by main.ts bootstrap).
+   *  The optional `options.overlay` is forwarded to `loadModel` so the
+   *  rv-extras overlay is applied during traversal (no race window).
+   */
+  loadModelWithProgress: ((url: string, options?: { overlay?: RVExtrasOverlay }) => Promise<void>) | null = null;
 
   /**
    * Optional gate promise that must resolve before model loading begins.
@@ -943,11 +1190,21 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   private dirLight!: DirectionalLight;
 
   // --- Post-processing (WebGL only) ---
-  private _composer: EffectComposer | null = null;
-  private _gtaoPass: GTAOPass | null = null;
-  private _bloomPass: UnrealBloomPass | null = null;
-  private _ssaoEnabled = false;
-  private _bloomEnabled = false;
+  // All composer / GTAO / N8AO / Bloom / desat / isolate-overlay state now
+  // lives in `_postProcessing` (see PostProcessingManager). The viewer keeps
+  // proxy getters/setters below so the 71 external consumers of RVViewer
+  // continue to work unchanged. `_composer` and `_ensureComposer` stay as
+  // accessors here too because RVOutlineManager talks to them directly
+  // (matches the OutlineHostViewer interface contract).
+  private _postProcessing!: PostProcessingManager;
+  /** @internal — exposed to RVOutlineManager so it can insert OutlinePass. */
+  get _composer(): EffectComposer | null { return this._postProcessing.composer; }
+
+  /** Diagnostic GPU info — populated synchronously at construction with the
+   *  active adapter, then asynchronously merged with high-perf / low-power
+   *  probes a tick later (best-effort, see rv-gpu-info.ts). Read via
+   *  `getGPUInfo()`; consumers poll. */
+  private _gpuInfo: GPUInfo | null = null;
 
   private constructor(
     container: HTMLElement,
@@ -964,11 +1221,58 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this.isWebGPU = this._detectWebGPU(renderer);
     this._antialiasActive = options.antialias ?? false;
 
+    // --- GPU diagnostics ---
+    // Sync detection first so `getGPUInfo()` returns a usable object
+    // immediately (UI doesn't have to wait for the async probe). Then
+    // kick off the optional adapter enumeration in the background;
+    // when it resolves, merge non-duplicate entries onto _gpuInfo so
+    // the next DevToolsTab poll picks them up.
+    this._gpuInfo = {
+      backend: this.isWebGPU ? 'webgpu' : 'webgl',
+      active: detectActiveGPU(renderer, this.isWebGPU ? 'webgpu' : 'webgl'),
+    };
+    void enumerateOtherAdapters().then((adapters) => {
+      if (!this._gpuInfo) return;
+      const active = this._gpuInfo.active;
+      const highPerf = !isSameAsActive(adapters.highPerf, active) ? adapters.highPerf : undefined;
+      const lowPower = !isSameAsActive(adapters.lowPower, active) ? adapters.lowPower : undefined;
+      // Skip lowPower if it's identical to highPerf — single useful entry.
+      const lowDiffersFromHigh = lowPower && highPerf
+        && (lowPower.device.toLowerCase() !== highPerf.device.toLowerCase());
+      this._gpuInfo = {
+        ...this._gpuInfo,
+        highPerf,
+        lowPower: lowDiffersFromHigh ? lowPower : undefined,
+      };
+    });
+
     // --- Scene ---
     this.scene = new Scene();
     // Default background = 0x9a9a9a gray (scalar 0.604) scaled by backgroundBrightness.
     this.scene.background = new Color().setScalar(BG_BASE_SCALAR * this._backgroundBrightness);
     this.highlighter = new RVHighlightManager(this.scene);
+    this.outlineManager = new RVOutlineManager(this);
+    // --- Post-processing manager (constructed early so the OutlineManager,
+    // which talks to `_composer` / `_ensureComposer()` via the host, sees a
+    // backing manager whenever it eventually calls in). The host shape is
+    // satisfied by `this` via the proxy getters below.
+    const ppSelf = this;
+    const ppHost: PostProcessingHost = {
+      get renderer() { return ppSelf.renderer; },
+      get scene() { return ppSelf.scene; },
+      get camera() { return ppSelf.camera; },
+      get isWebGPU() { return ppSelf.isWebGPU; },
+      get antialiasActive() { return ppSelf._antialiasActive; },
+      get outlineHasOutlines() { return ppSelf.outlineManager.hasOutlines; },
+      markRenderDirty() { ppSelf._renderDirty = true; },
+    };
+    this._postProcessing = new PostProcessingManager(ppHost);
+    // Route standard hover/selection through the OutlinePass so they render
+    // as a true silhouette (matching the layout planner look). Each channel
+    // (hover / selection) keeps its own color, derived from the active
+    // HighlightStyle's edgeColor — preserving the existing orange/cyan
+    // palette while replacing the per-mesh overlay+edge meshes.
+    this.highlighter.setOutlineManager(this.outlineManager);
     // Lazy getter for raycastManager: it's created later (loadGLB time), so a closure
     // is needed instead of passing the value directly. Once available, every gizmo
     // automatically participates in raycasting (hover/click resolves to owner node).
@@ -984,6 +1288,10 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     // Enable highlight-overlay layer so hover/select wireframes render in
     // normal mode. The 3-pass isolate renderer manages this layer per-pass.
     this.perspCamera.layers.enable(HIGHLIGHT_OVERLAY_LAYER);
+    // Enable NO_AO so the RenderPass draws NO_AO-tagged UI (ghost, grid, glow
+    // gizmos) normally. The AO clone camera turns this layer back OFF so those
+    // objects never enter the GTAO/N8AO gbuffer.
+    this.perspCamera.layers.enable(NO_AO_LAYER);
 
     const frustumHalf = 5;
     this.orthoCamera = new OrthographicCamera(
@@ -992,6 +1300,7 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this.orthoCamera.position.set(3, 2.5, 4);
     this.orthoCamera.lookAt(0, 0.5, 0);
     this.orthoCamera.layers.enable(HIGHLIGHT_OVERLAY_LAYER);
+    this.orthoCamera.layers.enable(NO_AO_LAYER);
 
     this._activeCamera = this.perspCamera;
 
@@ -1031,15 +1340,20 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       set _shadowsDirty(v: boolean) { self._shadowsDirty = v; },
       get _renderDirty() { return self._renderDirty; },
       set _renderDirty(v: boolean) { self._renderDirty = v; },
+      // Lets the env-map (IBL) load participate in loadModel's idle-drain
+      // so the scene isn't revealed unlit.
+      trackLoadingWork: (p) => self.trackLoadingWork(p),
     });
 
     // --- Ground ---
     if (showGround) {
-      const ground = this.createGroundFade();
+      const { mesh: ground, canvas } = createGroundFade(this._checkerContrast, this.isWebGPU);
       ground.visible = true;
+      ground.userData._rvGroundPlane = true;
       this.scene.add(ground);
       this.sceneFixtures.add(ground);
       this._groundMesh = ground;
+      this._checkerCanvas = canvas;
     }
 
     // --- Renderer-dependent init ---
@@ -1049,6 +1363,11 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     // --- Controls ---
     this.controls = new OrbitControls(this._activeCamera, renderer.domElement);
     this.controls.enableDamping = true;
+    // Dolly toward the cursor instead of the static orbit target. Without this,
+    // OrbitControls' wheel-dolly scales distance to `target` by a fixed factor
+    // per notch — asymptotic to the target, so close-up zoom in large scenes
+    // (e.g. Gaussian Splat showrooms) feels frozen.
+    this.controls.zoomToCursor = true;
     this.controls.target.set(0, 0.5, 0);
     this.controls.mouseButtons = {
       LEFT: -1 as MOUSE,
@@ -1144,10 +1463,9 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
         this.orthoCamera.bottom = -halfH;
         this.orthoCamera.updateProjectionMatrix();
         this.renderer.setSize(w, h);
-        if (this._composer) {
-          this._composer.setSize(w, h);
-          this._applyHalfResPostProcessing();
-        }
+        this._postProcessing.setSize(w, h);
+        // OutlinePass renders at full resolution — keep it in sync with the canvas.
+        this.outlineManager.setSize(w, h);
         this._renderDirty = true;
       };
       this.resizeObserver = new ResizeObserver(() => {
@@ -1160,148 +1478,47 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     }
 
     logInfo(`realvirtual WEB — Ready (${this.isWebGPU ? 'WebGPU' : 'WebGL'})`);
+
+    // ─── Sub-Facaden (Phase 4a of plan-182) ────────────────────────────
+    // Initialized last: all managers (controls, camera, scene) are ready.
+    // Plugins reach these via this._pluginContext — not via direct field access.
+    this._scene    = new SceneFacadeImpl(this);
+    this._camera   = new CameraFacadeImpl(this);
+    this._controls = new ControlsFacadeImpl(this);
+    this._simLoop  = new SimLoopFacadeImpl(this);
+    this._pluginContext = new PluginContextImpl(this);
+
+    // ─── Behavior auto-discovery hook ───────────────────────────────────
+    // Attach the BehaviorManager so it listens for model-loaded /
+    // model-cleared and dispatches all matching behaviors registered via
+    // `registerAllBehaviors(viewer.behaviors)`. Per-context cleanup is
+    // centrally guaranteed on model-cleared.
+    this._behaviorsDetach = this.behaviors.attach(
+      this as unknown as BindContextHost,
+      () => this.currentModel,
+      () => this._currentModelUrl,
+    );
   }
 
   // ─── Post-Processing Pipeline (WebGL only) ─────────────────────────
+  // The composer + GTAO/N8AO/Bloom/desat/isolate-overlay resources are
+  // owned by `_postProcessing` (see PostProcessingManager). The methods
+  // and getters below are thin delegations preserved for backwards
+  // compatibility with RVOutlineManager and the viewer's own render path.
 
-  /** Whether any post-processing effect is active (determines composer vs direct render).
-   *
-   * Always false while a WebXR session is presenting — the EffectComposer renders to its
-   * own offscreen render targets, but WebXR requires the scene be rendered directly into
-   * the XR session's framebuffer each frame. Routing through composer in XR shows only
-   * the camera passthrough (no 3D content). In XR we always go through the direct path.
-   */
+  /** Whether any post-processing effect is active (determines composer vs
+   *  direct render). Always false while a WebXR session is presenting and
+   *  always false on WebGPU — see {@link PostProcessingManager.useComposer}. */
   private get _useComposer(): boolean {
-    if (this.isWebGPU) return false;
-    const xr = (this.renderer as unknown as WebGLRenderer).xr;
-    if (xr?.isPresenting) return false;
-    return !!this._composer && (this._ssaoEnabled || this._bloomEnabled);
+    return this._postProcessing.useComposer;
   }
 
-  /** Internal buffers for GTAO and Bloom run at half resolution for performance. */
-  private static readonly PP_SCALE = 0.5;
-
-  /** Lazily create the EffectComposer with all post-processing passes. */
-  private _ensureComposer(): void {
-    if (this._composer || this.isWebGPU) return;
-    const w = this.renderer.domElement.width;
-    const h = this.renderer.domElement.height;
-    const hw = Math.max(1, Math.floor(w * RVViewer.PP_SCALE));
-    const hh = Math.max(1, Math.floor(h * RVViewer.PP_SCALE));
-    const composer = new EffectComposer(this.renderer as unknown as WebGLRenderer);
-
-    // Enable MSAA on composer render targets to match renderer antialias setting
-    if (this._antialiasActive) {
-      composer.renderTarget1.samples = 4;
-      composer.renderTarget2.samples = 4;
-    }
-
-    // Pass 1: Scene render (full resolution)
-    composer.addPass(new RenderPass(this.scene, this.camera));
-
-    // Pass 2: GTAO (ambient occlusion) — half-res internal buffers
-    const gtaoPass = new GTAOPass(this.scene, this.camera, hw, hh);
-    gtaoPass.output = GTAOPass.OUTPUT.Default;
-    gtaoPass.blendIntensity = 1.0;
-    gtaoPass.updateGtaoMaterial({ radius: 0.15, scale: 1.0, thickness: 0.5 });
-    gtaoPass.enabled = this._ssaoEnabled;
-    composer.addPass(gtaoPass);
-
-    // Pass 3: Bloom (glow on bright areas) — half-res internal buffers
-    const bloomPass = new UnrealBloomPass(new Vector2(hw, hh), 0.5, 0.4, 0.85);
-    bloomPass.enabled = this._bloomEnabled;
-    composer.addPass(bloomPass);
-
-    // Pass 4: Output (tone mapping + color space)
-    composer.addPass(new OutputPass());
-
-    this._composer = composer;
-    this._gtaoPass = gtaoPass;
-    this._bloomPass = bloomPass;
-
-    // composer.addPass() sets all passes to full-res — override to half-res
-    this._applyHalfResPostProcessing();
-  }
-
-  /** Re-apply half-res to GTAO/Bloom internal buffers. */
-  private _applyHalfResPostProcessing(): void {
-    if (!this._composer) return;
-    // EffectComposer stores CSS dims in _width/_height and scales by pixelRatio
-    const c = this._composer as unknown as { _width: number; _height: number; _pixelRatio: number };
-    const pw = c._width * c._pixelRatio;
-    const ph = c._height * c._pixelRatio;
-    const hw = Math.max(1, Math.floor(pw * RVViewer.PP_SCALE));
-    const hh = Math.max(1, Math.floor(ph * RVViewer.PP_SCALE));
-    if (this._gtaoPass) this._gtaoPass.setSize(hw, hh);
-    if (this._bloomPass) this._bloomPass.setSize(hw, hh);
-  }
-
-  // ─── Isolate Overlay (group isolate visualization) ────────────────────
-
-  /** Lazily build the semi-transparent fullscreen overlay resources. */
-  private _ensureIsolateOverlay(): void {
-    if (this._isolateOverlayScene) return;
-    const scene = new Scene();
-    // Must stay null — `scene.background = Color` triggers Three.js's
-    // forceClear path (Background.js:44) which bypasses autoClear and
-    // would wipe the dim backdrop drawn in pass 1.
-    scene.background = null;
-    const cam = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
-    const mat = new MeshBasicMaterial({
-      color: 0xffffff, // refreshed from scene background each frame in _renderIsolateMode
-      transparent: true,
-      opacity: 0.9,
-      depthTest: false,
-      depthWrite: false,
-      side: DoubleSide,
-      toneMapped: false,
-    });
-    const mesh = new Mesh(new PlaneGeometry(2, 2), mat);
-    mesh.frustumCulled = false;
-    scene.add(mesh);
-    this._isolateOverlayScene = scene;
-    this._isolateOverlayCam = cam;
-    this._isolateOverlayMat = mat;
-  }
-
-  /** Lazily build the fullscreen desaturation resources. */
-  private _ensureDesatPass(): void {
-    if (this._desatScene) return;
-    const w = this.renderer.domElement.width || 1;
-    const h = this.renderer.domElement.height || 1;
-    this._desatRT = new WebGLRenderTarget(w, h, { samples: this._antialiasActive ? 4 : 0 });
-    const cam = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
-    const mat = new ShaderMaterial({
-      uniforms: {
-        tDiffuse: { value: this._desatRT.texture },
-        saturation: { value: 0.0 },
-      },
-      vertexShader: /* glsl */ `
-        varying vec2 vUv;
-        void main() { vUv = uv; gl_Position = vec4(position, 1.0); }
-      `,
-      fragmentShader: /* glsl */ `
-        uniform sampler2D tDiffuse;
-        uniform float saturation;
-        varying vec2 vUv;
-        void main() {
-          vec4 c = texture2D(tDiffuse, vUv);
-          float lum = dot(c.rgb, vec3(0.299, 0.587, 0.114));
-          gl_FragColor = vec4(mix(vec3(lum), c.rgb, saturation), c.a);
-        }
-      `,
-      depthTest: false,
-      depthWrite: false,
-      toneMapped: false,
-    });
-    const mesh = new Mesh(new PlaneGeometry(2, 2), mat);
-    mesh.frustumCulled = false;
-    const scene = new Scene();
-    scene.background = null;
-    scene.add(mesh);
-    this._desatScene = scene;
-    this._desatCam = cam;
-    this._desatMat = mat;
+  /**
+   * Lazily create the EffectComposer with all post-processing passes.
+   * @internal — also called by RVOutlineManager when outlines turn on.
+   */
+  _ensureComposer(): void {
+    this._postProcessing.ensureComposer();
   }
 
   /**
@@ -1311,10 +1528,11 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
    *   3. Focus group drawn crisply on top of the overlay.
    *
    * Caller (render()) saves and restores camera.layers.mask / renderer.autoClear
-   * in a try/finally so exceptions can't corrupt global state.
+   * in a try/finally so exceptions can't corrupt global state. The composer,
+   * desat, and isolate-overlay resources are all owned by _postProcessing.
    */
   private _renderIsolateMode(): void {
-    this._ensureIsolateOverlay();
+    this._postProcessing.ensureIsolateOverlay();
     // Re-tag isolated subtrees so dynamically added descendants (spawned MUs,
     // gripper pickups, async-loaded geometry, etc.) inherit ISOLATE_FOCUS_LAYER
     // and render in pass 3 instead of being washed by the dim overlay.
@@ -1339,17 +1557,19 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     // ── Pass 1: Dim backdrop ──
     // enableAll + disable focus = "everything but focus", mutation-safe for
     // dynamically spawned nodes (MUs, tank fills, pipe-flow rings) which
-    // default to layer 0 only. Also exclude the highlight layer so hover/
-    // select wireframes don't render dim here — they're rendered crisply in
-    // pass 4.
+    // default to layer 0 only. Also exclude overlay layers (highlight wires
+    // and measurement markers/labels) so they don't render dim here — both
+    // are re-rendered crisply in pass 4 above the AO/composer output.
+    // Excluding MEASUREMENT_LAYER also prevents the label sprite from
+    // contaminating the GTAO/N8AO depth sample → halo artifacts.
     camera.layers.enableAll();
     camera.layers.disable(ISOLATE_FOCUS_LAYER);
-    camera.layers.disable(HIGHLIGHT_OVERLAY_LAYER);
+    disableOverlayLayers(camera);
 
     if (desaturate) {
       // Render backdrop to offscreen RT, then blit desaturated to screen.
-      this._ensureDesatPass();
-      const rt = this._desatRT!;
+      this._postProcessing.ensureDesatPass();
+      const rt = this._postProcessing.desatRT!;
       const w = gl.domElement.width;
       const h = gl.domElement.height;
       if (rt.width !== w || rt.height !== h) rt.setSize(w, h);
@@ -1372,15 +1592,23 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       // Blit the RT to the default framebuffer through a desaturation shader.
       // saturation=0 → full grayscale; the focus group (Pass 3) renders in
       // full color on top afterwards.
-      this._desatMat!.uniforms.tDiffuse.value = rt.texture;
-      this._desatMat!.uniforms.saturation.value = 0.0;
+      const desatMat = this._postProcessing.desatMat!;
+      desatMat.uniforms.tDiffuse.value = rt.texture;
+      desatMat.uniforms.saturation.value = 0.0;
       gl.clear(true, true, false);
-      gl.render(this._desatScene!, this._desatCam!);
+      gl.render(this._postProcessing.desatScene!, this._postProcessing.desatCam!);
     } else if (this._useComposer) {
-      if (this._gtaoPass) this._gtaoPass.camera = camera;
-      const renderPass = this._composer!.passes[0] as RenderPass;
+      // AO clone excludes NO_AO_LAYER (mirrors pass-1's reduced mask); RenderPass
+      // keeps the real camera so NO_AO UI still draws in the dim backdrop.
+      const aoCam = this._postProcessing.syncAoCamera(camera);
+      const gtaoPass = this._postProcessing.gtaoPass;
+      if (gtaoPass) gtaoPass.camera = aoCam;
+      const n8 = this._postProcessing.n8aoPass as (Pass & { camera?: PerspectiveCamera | OrthographicCamera }) | null;
+      if (n8) n8.camera = aoCam;
+      const composer = this._postProcessing.composer!;
+      const renderPass = composer.passes[0] as RenderPass;
       if (renderPass) renderPass.camera = camera;
-      this._composer!.render();
+      composer.render();
     } else {
       gl.render(this.scene, camera);
     }
@@ -1396,11 +1624,12 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     // Sync overlay tint to the scene background color (Color → use as-is,
     // Texture/CubeTexture/null → fall back to the renderer clear color so
     // the fade still matches the visible sky).
-    if (this._isolateOverlayMat) {
+    const overlayMat = this._postProcessing.isolateOverlayMat;
+    if (overlayMat) {
       if (savedBackground && (savedBackground as Color).isColor) {
-        this._isolateOverlayMat.color.copy(savedBackground as Color);
+        overlayMat.color.copy(savedBackground as Color);
       } else {
-        gl.getClearColor(this._isolateOverlayMat.color);
+        gl.getClearColor(overlayMat.color);
       }
       // Allow the active isolate caller to override the dim-opacity.
       // autoFilters takes precedence over groups; both fall back to the default 0.9.
@@ -1408,26 +1637,29 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
         this.autoFilters?.dimOpacity ??
         (this.groups as { dimOpacity?: number | null } | null)?.dimOpacity ??
         null;
-      this._isolateOverlayMat.opacity = override ?? 0.9;
+      overlayMat.opacity = override ?? 0.9;
     }
     try {
       // ── Pass 2: Semi-transparent fullscreen overlay ──
       // Direct render — do NOT route through composer, the composer already
       // wrote its final color to the default framebuffer.
       gl.clearDepth();
-      gl.render(this._isolateOverlayScene!, this._isolateOverlayCam!);
+      gl.render(this._postProcessing.isolateOverlayScene!, this._postProcessing.isolateOverlayCam!);
 
       // ── Pass 3: Focus group on top ──
       gl.clearDepth();
       camera.layers.set(ISOLATE_FOCUS_LAYER);
       gl.render(this.scene, camera);
 
-      // ── Pass 4: Hover/select wireframes on top of everything ──
-      // Overlay materials already have depthTest:false, depthWrite:false; the
-      // depth clear keeps them visible regardless of pass-3 z-state. Only the
-      // overlay layer is enabled, so the pass renders just the highlight pairs.
+      // ── Pass 4: Overlays on top of everything ──
+      // Hover/select wireframes (HIGHLIGHT_OVERLAY_LAYER) and measurement
+      // markers/lines/labels (MEASUREMENT_LAYER) — both have depthTest:false
+      // and renderOrder>=11. Combined into a single overlay pass: the depth
+      // clear keeps them visible regardless of pass-3 z-state, and rendering
+      // here (after composer/desat) ensures AO never sees their depth and
+      // never darkens their color.
       gl.clearDepth();
-      camera.layers.set(HIGHLIGHT_OVERLAY_LAYER);
+      setOverlayLayersOnly(camera);
       gl.render(this.scene, camera);
     } finally {
       this.scene.background = savedBackground;
@@ -1506,10 +1738,54 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     return new RVViewer(container, renderer, options ?? {});
   }
 
+  // ─── Behaviors / Kinematics low-level binding ─────────────────────────
+
+  /**
+   * Apply a KinematicsSpec or a bind-callback to the given root subtree.
+   *
+   * Two forms:
+   *   1. `viewer.bind(root, spec)` — applies the spec directly via
+   *      {@link applyKinematicsSpec}.
+   *   2. `viewer.bind(root, (rv) => { ... })` — runs the callback against a
+   *      fresh RVBindContext, accumulates a spec from the calls, and
+   *      applies it. Subscriptions (`onFixedUpdate`, `signals.on`,
+   *      contextMenu) are NOT auto-disposed in this low-level entry; the
+   *      caller may dispose them by listening to `model-cleared`. For
+   *      Behavior-files use the BehaviorManager — it disposes for you.
+   */
+  bind(
+    root: Object3D,
+    specOrCb: KinematicsSpec | ((rv: RVBindContext) => void),
+    opts?: { strict?: boolean; overwrite?: boolean },
+  ): KinematizeReport {
+    if (typeof specOrCb === 'function') {
+      const accum: KinematicsSpec = {};
+      const { ctx } = createBindContext(root, this as unknown as BindContextHost, accum);
+      specOrCb(ctx);
+      const merged: KinematicsSpec = {
+        ...accum,
+        strict: opts?.strict ?? accum.strict,
+        overwrite: opts?.overwrite ?? accum.overwrite,
+      };
+      return applyKinematicsSpec(root, merged);
+    }
+    const merged: KinematicsSpec = {
+      ...specOrCb,
+      strict: opts?.strict ?? specOrCb.strict,
+      overwrite: opts?.overwrite ?? specOrCb.overwrite,
+    };
+    return applyKinematicsSpec(root, merged);
+  }
+
   // ─── Model Management ─────────────────────────────────────────────────
 
-  /** Load a GLB model and start all simulation systems. */
-  async loadModel(url: string): Promise<LoadResult> {
+  /**
+   * Load a GLB model and start all simulation systems.
+   *
+   * @param url      GLB URL (file, blob:, or empty-glb URL)
+   * @param options  Optional load options (e.g. an rv-extras overlay applied during traversal).
+   */
+  async loadModel(url: string, options?: { overlay?: RVExtrasOverlay }): Promise<LoadResult> {
     this.clearModel();
     this._currentModelUrl = url;
 
@@ -1539,7 +1815,12 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     // Wait for any load gate (e.g. login) before heavy GLB parsing
     if (this.loadGate) await this.loadGate;
 
-    const result = await loadGLB(url, this.scene, { isWebGPU: this.isWebGPU, gizmoManager: this.gizmoManager, events: this });
+    const result = await loadGLB(url, this.scene, {
+      isWebGPU: this.isWebGPU,
+      gizmoManager: this.gizmoManager,
+      events: this,
+      overlay: options?.overlay,
+    });
 
     // Pre-compile shaders to avoid first-frame stutter (available on WebGPURenderer)
     if ('compileAsync' in this.renderer) {
@@ -1548,7 +1829,12 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       } catch { /* non-critical */ }
     }
 
-    this.currentModel = this.scene.children.find((c) => !this.sceneFixtures.has(c)) ?? null;
+    // GLB root is reported deterministically by loadGLB (LoadResult.root) —
+    // no diffing scene.children. The `_rvModelRoot` userData tag stays as
+    // defence-in-depth so clearModel's tag-sweep can recover from any
+    // historic stray that might still be tagged from prior buggy sessions.
+    this.currentModel = result.root;
+    this.currentModel.userData._rvModelRoot = true;
     this.drives = result.drives;
     this.transportManager = result.transportManager;
     this.signalStore = result.signalStore;
@@ -1557,6 +1843,11 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this.logicEngine = result.logicEngine;
     this.registry = result.registry;
     this.groups = result.groups;
+
+    // Wire the source-floor-marker visibility flag (plan-181) — applies the
+    // persisted value to all freshly-loaded Sources AND subscribes to future
+    // settings-panel toggles. Idempotent across re-loads.
+    this._installSourceMarkersBinding();
 
     // Component event dispatcher — routes viewer events (object-hover, object-clicked,
     // selection-changed) to per-component onHover/onClick/onSelect callbacks.
@@ -1594,9 +1885,13 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       }
     }
 
-    // Unified raycast manager with grouped BVH
+    // Unified raycast manager with grouped BVH. Pass a getter (not the
+    // current camera reference) so the raycaster always uses the active
+    // camera even after a perspective ↔ orthographic swap. A captured
+    // reference would go stale at the moment of the swap and produce
+    // wrong rays in the new projection mode.
     this.raycastManager = new RaycastManager(
-      this.renderer, this.camera, this.scene,
+      this.renderer, () => this.camera, this.scene,
       result.registry, this.highlighter, this,
     );
 
@@ -1656,13 +1951,30 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     // Resize ground plane to fit model bounds + margin
     const center = new Vector3();
     const size = new Vector3();
-    result.boundingBox.getCenter(center);
-    result.boundingBox.getSize(size);
+    if (result.boundingBox.isEmpty()) {
+      // Empty / mesh-less GLB (e.g. the synthesized empty scene from
+      // empty-glb.ts). Box3.getCenter/getSize on an empty box returns
+      // ±Infinity, which would put the camera + orbit target at infinity
+      // and lock OrbitControls. Synthesize a 15 m playground bbox so the
+      // ground fade and camera framing land at a workable scale for an
+      // empty workspace (drives the ground size below via FLOOR_FADE_*
+      // and the initial camera distance further down).
+      center.set(0, 0, 0);
+      size.set(15, 1, 15);
+    } else {
+      result.boundingBox.getCenter(center);
+      result.boundingBox.getSize(size);
+    }
 
     if (this._groundMesh) {
-      // Ground is a 200×200 fade plane; always square, sized to cover the
-      // longer of the model's X/Z extents so elongated models still fit.
-      const groundSize = Math.max(size.x, size.z) * 1.1 * 2;
+      // Ground is a 200×200 fade plane with a circular alpha map. The fade
+      // geometry is driven by FLOOR_FADE_START_RATIO and FLOOR_FADE_END_RATIO
+      // — both expressed in units of the model's half-extent. The plane is
+      // sized so its inscribed-circle radius equals FLOOR_FADE_END_RATIO ×
+      // model-half-extent, and the alpha map puts opaque out to
+      // FLOOR_FADE_START_RATIO / FLOOR_FADE_END_RATIO of that radius.
+      const modelMaxFullExtent = Math.max(size.x, size.z);
+      const groundSize = modelMaxFullExtent * FLOOR_FADE_END_RATIO;
       this._groundMesh.scale.set(groundSize / 200, groundSize / 200, 1);
       this._groundMesh.position.set(center.x, 0, center.z);
 
@@ -1679,8 +1991,14 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     // Fit camera to model
 
     const maxDim = Math.max(size.x, size.y, size.z);
+    // For an empty base (synthesized 15 m playground bbox above) the user
+    // is authoring at workspace scale — frame the camera close to a 5 m
+    // working area so the initial view matches what the user is about to
+    // build, not the full 15 m ground extent. Shadow / sun fit below still
+    // uses `maxDim` so coverage extends across the whole ground.
+    const cameraFitDim = result.boundingBox.isEmpty() ? 5 : maxDim;
     const fov = this.perspCamera.fov * (Math.PI / 180);
-    const dist = (maxDim / (2 * Math.tan(fov / 2))) * 1.5;
+    const dist = (cameraFitDim / (2 * Math.tan(fov / 2))) * 1.5;
 
     this.camera.position.set(center.x + dist * 0.7, center.y + dist * 0.5, center.z + dist * 0.7);
     this.controls.target.copy(center);
@@ -1766,6 +2084,11 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
 
     logInfo(`Model loaded: ${this.drives.length} drives, ${this.signalStore?.size ?? 0} signals`);
     this.emit('model-loaded', { result });
+    // Wait for any deferred async loading work registered by subsystems
+    // and plugins (env-map IBL, deferred asset prefetch, …) so the caller's
+    // `await viewer.loadModel(...)` only resolves once the scene is fully
+    // ready to be revealed.
+    await this.whenLoadingIdle();
     return result;
   }
 
@@ -1794,6 +2117,12 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       this.raycastManager = null;
     }
 
+    // Drop the source-markers subscription before nulling out the transport
+    // manager — otherwise future settings-store toggles would try to iterate
+    // a stale source list.
+    this._sourceMarkersUnsub?.();
+    this._sourceMarkersUnsub = null;
+
     // IMPORTANT: Reset transport manager BEFORE scene traverse to remove
     // active MU nodes from scene tree. MU clones share geometry by reference
     // with templates — disposing geometry during traverse would corrupt shared buffers.
@@ -1802,12 +2131,24 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       this.transportManager = null;
     }
 
-    if (this.currentModel) {
-      this.scene.remove(this.currentModel);
-      // After material deduplication, multiple meshes share the same material
-      // instance. Use a Set to avoid disposing the same material/texture twice.
-      const disposedMaterials = new Set<MeshStandardMaterial>();
-      this.currentModel.traverse((node) => {
+    // Collect every model root currently parented to the scene. Normally this
+    // is just `this.currentModel`, but a `_rvModelRoot`-tagged orphan can
+    // remain if a previous switch tracked the wrong child as currentModel
+    // (see snapshot logic in loadModel). Sweeping all of them here ensures
+    // we never end up with two scenes drawing simultaneously.
+    const modelRootsToClear = new Set<Object3D>();
+    if (this.currentModel) modelRootsToClear.add(this.currentModel);
+    for (const child of this.scene.children) {
+      if (child.userData?._rvModelRoot) modelRootsToClear.add(child);
+    }
+
+    // After material deduplication, multiple meshes share the same material
+    // instance. Use a Set to avoid disposing the same material/texture twice
+    // across all roots being torn down in this pass.
+    const disposedMaterials = new Set<MeshStandardMaterial>();
+    for (const root of modelRootsToClear) {
+      this.scene.remove(root);
+      root.traverse((node) => {
         const mesh = node as {
           geometry?: { dispose(): void };
           material?: (MeshStandardMaterial & { dispose(): void }) | (MeshStandardMaterial & { dispose(): void })[];
@@ -1834,8 +2175,8 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
           else disposeMat(mesh.material);
         }
       });
-      this.currentModel = null;
     }
+    this.currentModel = null;
     this.drives = [];
     if (this.playback) {
       this.playback.stop();
@@ -1884,6 +2225,137 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   /** Override the stored model URL (e.g. to replace blob: URL with original for display). */
   set currentModelUrl(url: string | null) {
     this._currentModelUrl = url;
+  }
+
+  // ─── Scene loading (unified RvScene) ──────────────────────────────────
+
+  /** Active scene record set by `loadScene()`. Read by the Scene window. */
+  private _currentScene: RvScene | null = null;
+
+  /** Read the currently loaded scene record, or null if none. */
+  get currentScene(): RvScene | null {
+    return this._currentScene;
+  }
+
+  /** Override the active scene record (used by main.ts after a side-channel
+   *  load and by SceneStore once a save bumps modifiedAt). */
+  set currentScene(s: RvScene | null) {
+    this._currentScene = s;
+  }
+
+  /**
+   * Load a unified Scene record — base GLB plus optional overlay, planner
+   * placements, and camera preset.
+   *
+   * Apply order (deterministic):
+   *   1. Resolve base URL (built-in / empty)
+   *   2. Clear any planner placements from the previous scene
+   *   3. loadGLB with `overlay` applied during traversal
+   *   4. apply planner placements (if any)
+   *   5. emit('scene-loaded')
+   *
+   * The camera preset (scene.cameraStart) is consumed by the camera-startpos
+   * plugin, which subscribes to `scene-loaded`.
+   * The BVH rebuild (after placements) is wired in PR 4.
+   */
+  async loadScene(scene: RvScene): Promise<void> {
+    // Phase 0 — materialise edits (ops → overlay + placements + cameraStart).
+    // The op log is the canonical store; existing engine subsystems
+    // (rv-scene-loader.loadGLB, planner.applyPlacements, camera-startpos)
+    // still consume their familiar shapes — materialise() bridges between
+    // the two.
+    const matMod = await import('./hmi/scene/rv-scene-edits');
+    const materialised = matMod.materialise(scene.edits.ops);
+
+    // Phase 1 — resolve base URL
+    let url: string;
+    if (scene.base.kind === 'empty') {
+      const emptyGlb = await import('./hmi/scene/empty-glb');
+      url = emptyGlb.getEmptyGlbUrl();
+    } else {
+      url = scene.base.url;
+    }
+
+    // Stash the active scene BEFORE loadModel so plugin onModelLoaded handlers
+    // (e.g. the camera-startpos plugin) can prefer per-scene presets over the
+    // per-base/legacy localStorage default. clearModel fires onModelCleared
+    // first; that path doesn't read currentScene so the early stash is safe.
+    this._currentScene = scene;
+
+    // Phase 2 — clear previous planner placements + sweep any orphans
+    // (defensive — see planner.sweepOrphanLayoutObjects).
+    const planner = this.getPlugin<RVViewerPlugin & {
+      clearLayout?: () => void;
+      applyPlacements?: (snap: PlacementsSnapshot) => Promise<void>;
+      ensureAttached?: (viewer: RVViewer) => void;
+      sweepOrphanLayoutObjects?: () => void;
+      setLayoutFloorVisible?: (visible: boolean) => void;
+    }>('layout-planner');
+    planner?.clearLayout?.();
+    planner?.sweepOrphanLayoutObjects?.();
+
+    // Phase 3 — loadGLB. Overlay is applied during traversal so component
+    // constructors see overridden field values directly (no race window).
+    const overlay = Object.keys(materialised.overlay.nodes).length > 0
+      ? materialised.overlay
+      : undefined;
+    if (this.loadModelWithProgress) {
+      await this.loadModelWithProgress(url, { overlay });
+    } else {
+      await this.loadModel(url, { overlay });
+    }
+
+    // Phase 4 — planner placements
+    if (materialised.placements.length > 0) {
+      if (!planner?.applyPlacements) {
+        throw new Error('Scene has placements but Layout Planner plugin is not registered');
+      }
+      planner.ensureAttached?.(this);
+      await planner.applyPlacements({
+        placements: materialised.placements,
+        catalogUrls: scene.edits.settings.catalogUrls,
+        gridSizeMm: scene.edits.settings.gridSizeMm,
+      });
+    }
+
+    // Phase 4b — keep the planner's authoring floor (`_layoutFloor`) hidden.
+    // Both built-in and empty bases already render a floor: built-ins use
+    // their own GLB ground, and empty bases use the viewer's `_groundMesh`
+    // (the checker fade, deliberately sized to a 30 m playground when the
+    // bbox is empty — see resize logic above loadModel). Showing the planner
+    // floor on top would double up with either, producing the "duplicate
+    // floor on reload" / "extra floor on empty scenes" symptoms.
+    //
+    // For empty bases we still call ensureAttached so the planner is wired
+    // (raycast targets, ghost root) before any subsequent placement op runs.
+    if (scene.base.kind === 'empty') {
+      planner?.ensureAttached?.(this);
+    }
+    // applyPlacements() above unconditionally toggles the floor based on its
+    // snapshot's `hasContent` — overrule it here so the visibility tracks
+    // intent rather than placement count.
+    planner?.setLayoutFloorVisible?.(false);
+
+    // Phase 5 — drain again. loadModel already awaited whenLoadingIdle, but
+    // applyPlacements above and any onModelLoaded handlers may have queued
+    // additional cascading work after that point. Cheap when the queue is
+    // empty; ensures `scene-loaded` only fires once the scene is fully ready.
+    await this.whenLoadingIdle();
+
+    // Camera preset has already been applied by the camera-startpos plugin
+    // during onModelLoaded (it reads currentScene).
+    this.emit('scene-loaded', { scene });
+  }
+
+  /**
+   * Tear down the current scene without loading a new one. Used when the
+   * Scene window deletes the active scene and no fallback exists.
+   */
+  async loadEmptyScene(): Promise<void> {
+    this.clearModel();
+    this._currentModelUrl = null;
+    this._currentScene = null;
+    this.markRenderDirty();
   }
 
   /** Explicit override for projectAssetsPath (set by ModelPluginManager in dev mode). */
@@ -1959,8 +2431,28 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this.highlighter.clear();
   }
 
+  /**
+   * Scale factor applied to the camera distance so a centered object still
+   * clears side panels (left/right) and top/bottom bars without moving the
+   * orbit pivot. We pull the camera back symmetrically instead of shifting the
+   * orbit target, which keeps the rotation pivot exactly on the bounding-box
+   * center while leaving the framed object fully inside the visible viewport.
+   */
+  private _panelFitScale(offset?: ViewportOffset): number {
+    if (!offset) return 1;
+    const canvas = this.renderer.domElement;
+    const canvasW = canvas.clientWidth || 1;
+    const canvasH = canvas.clientHeight || 1;
+    const lr = Math.max(offset.left ?? 0, offset.right ?? 0);
+    const tb = Math.max(offset.top ?? 0, offset.bottom ?? 0);
+    const wScale = canvasW / Math.max(canvasW - 2 * lr, 1);
+    const hScale = canvasH / Math.max(canvasH - 2 * tb, 1);
+    return Math.max(wScale, hScale, 1);
+  }
+
   /** Smoothly orbit camera to focus on a component by hierarchy path. Also pins the drive tooltip if the target is a drive.
-   *  @param offset  Optional pixel offsets for panels obscuring the viewport (shifts orbit target). */
+   *  @param offset  Optional pixel offsets for panels obscuring the viewport (the camera is pulled back to keep the
+   *                 object clear of the panels; the orbit pivot stays on the bounding-box center). */
   focusByPath(path: string, offset?: ViewportOffset): void {
     const node = this.registry?.getNode(path);
     if (!node) return;
@@ -1970,7 +2462,7 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       ?? (this.registry!.getByPath<RVDrive>('Drive', path) || null);
     this.focusedDrive = drive;
     this.focusedNode = node;
-    this.emit('drive-focus', { drive, node });
+    this.emit('object-focus', { path, node });
 
     const box = this._cameraManager.computeNodeBounds([node]);
     if (box.isEmpty()) return;
@@ -1982,14 +2474,16 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
 
     const maxDim = Math.max(size.x, size.y, size.z, 0.1);
     const fov = this.perspCamera.fov * (Math.PI / 180);
-    const dist = (maxDim / (2 * Math.tan(fov / 2))) * 2.5;
-
-    // Keep current viewing direction — just move along it to frame the target
-    const dir = new Vector3().subVectors(this.camera.position, this.controls.target).normalize();
     const effectiveOffset = offset ?? this.getCurrentViewportOffset();
-    const adjustedCenter = this._cameraManager.applyViewportOffset(center, dist, effectiveOffset);
-    const endPos = adjustedCenter.clone().add(dir.multiplyScalar(dist));
-    this.animateCameraTo(endPos, adjustedCenter);
+    // Pull back symmetrically to clear panels — never shift the orbit pivot.
+    const dist = (maxDim / (2 * Math.tan(fov / 2))) * 2.5 * this._panelFitScale(effectiveOffset);
+
+    // Keep current viewing direction — just move along it to frame the target.
+    // The orbit target is the true bounding-box center, so rotation always
+    // pivots around the geometric center of the selection.
+    const dir = new Vector3().subVectors(this.camera.position, this.controls.target).normalize();
+    const endPos = center.clone().add(dir.multiplyScalar(dist));
+    this.animateCameraTo(endPos, center);
   }
 
   /** Smoothly animate camera to frame all given nodes.
@@ -2006,31 +2500,23 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
 
     const effectiveOffset = offset ?? this.getCurrentViewportOffset();
 
-    // Compute distance so the bounding box fits in the *visible* viewport
-    // (the area not covered by panels).
+    // Compute distance so the bounding box fits in the viewport, then pull back
+    // symmetrically to clear any panels. The orbit pivot stays on the true
+    // bounding-box center so rotation always pivots around the selection center.
     const maxDim = Math.max(size.x, size.y, size.z, 0.1);
     const fovRad = this.perspCamera.fov * (Math.PI / 180);
     const halfTanFov = Math.tan(fovRad / 2);
     const margin = 1.8;
+    const aspect = this.perspCamera.aspect;
 
-    const canvas = this.renderer.domElement;
-    const canvasW = canvas.clientWidth || 1;
-    const canvasH = canvas.clientHeight || 1;
-    const leftPx = effectiveOffset?.left ?? 0;
-    const rightPx = effectiveOffset?.right ?? 0;
-    const visibleW = Math.max(canvasW - leftPx - rightPx, 1);
-    const visibleAspect = visibleW / canvasH;
-
-    // Distance to fit vertically (full height available)
+    // Distance to fit vertically (full height) and horizontally (full width).
     const distV = maxDim / (2 * halfTanFov);
-    // Distance to fit horizontally within visible area
-    const distH = maxDim / (2 * halfTanFov * visibleAspect);
-    const dist = Math.max(distV, distH) * margin;
+    const distH = maxDim / (2 * halfTanFov * aspect);
+    const dist = Math.max(distV, distH) * margin * this._panelFitScale(effectiveOffset);
 
     const dir = new Vector3().subVectors(this.camera.position, this.controls.target).normalize();
-    const adjustedCenter = this._cameraManager.applyViewportOffset(center, dist, effectiveOffset);
-    const endPos = adjustedCenter.clone().add(dir.multiplyScalar(dist));
-    this.animateCameraTo(endPos, adjustedCenter);
+    const endPos = center.clone().add(dir.multiplyScalar(dist));
+    this.animateCameraTo(endPos, center);
   }
 
   /** Clear pinned drive focus (e.g., user clicked canvas). */
@@ -2038,7 +2524,7 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     if (this.focusedDrive || this.focusedNode) {
       this.focusedDrive = null;
       this.focusedNode = null;
-      this.emit('drive-focus', { drive: null, node: null });
+      this.emit('object-blur', undefined);
     }
   }
 
@@ -2050,6 +2536,26 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
    */
   private _raycastForRVNode(e: MouseEvent): string | null {
     return this.raycastManager?.raycastForRVNode(e) ?? null;
+  }
+
+  /**
+   * Coalesce multiple synchronous BVH-rebuild requests into a single
+   * microtask-deferred pass. Used by the planner after placement add/remove
+   * (and after batch operations like applyPlacements).
+   */
+  private _bvhRebuildPending = false;
+  rebuildGroupedBvh(): void {
+    if (this._bvhRebuildPending) return;
+    if (!this.currentModel || !this.registry || !this.raycastManager) return;
+    this._bvhRebuildPending = true;
+    queueMicrotask(() => {
+      this._bvhRebuildPending = false;
+      if (!this.currentModel || !this.registry || !this.raycastManager) return;
+      const driveNodeSet = new Set(this.drives.map(d => d.node));
+      const geo = buildRaycastGeometries(this.currentModel, this.drives, this.registry, driveNodeSet);
+      const muMeshes = this._collectInstancedMeshes();
+      this.raycastManager.setRaycastGeometry(geo, muMeshes);
+    });
   }
 
   /**
@@ -2154,54 +2660,70 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this.orthoCamera.updateProjectionMatrix();
   }
 
-  // ─── Visual Settings ─────────────────────────────────────────────────
+  // ─── Visual Settings (pure-delegation proxies) ─────────────────────────
+  //
+  // The proxies below forward 1:1 to `_visualSettings` with no extra
+  // side-effects. They are marked `@deprecated` to nudge new code toward
+  // `viewer.visualSettings.*`; removal is planned for v2.0.
 
-  /** Active lighting mode. */
+  /** @deprecated Use `viewer.visualSettings.lightingMode` instead. Will be removed in v2.0. */
   get lightingMode() { return this._visualSettings.lightingMode; }
+  /** @deprecated Use `viewer.visualSettings.lightingMode` instead. Will be removed in v2.0. */
   set lightingMode(mode: import('./hmi/visual-settings-store').LightingMode) { this._visualSettings.lightingMode = mode; }
 
-  /** Tone mapping algorithm (applied only in default mode). */
+  /** @deprecated Use `viewer.visualSettings.toneMapping` instead. Will be removed in v2.0. */
   get toneMapping(): ToneMappingType { return this._visualSettings.toneMapping; }
+  /** @deprecated Use `viewer.visualSettings.toneMapping` instead. Will be removed in v2.0. */
   set toneMapping(v: ToneMappingType) { this._visualSettings.toneMapping = v; }
 
-  /** Tone mapping exposure (only effective when tone mapping != none). */
+  /** @deprecated Use `viewer.visualSettings.toneMappingExposure` instead. Will be removed in v2.0. */
   get toneMappingExposure(): number { return this._visualSettings.toneMappingExposure; }
+  /** @deprecated Use `viewer.visualSettings.toneMappingExposure` instead. Will be removed in v2.0. */
   set toneMappingExposure(v: number) { this._visualSettings.toneMappingExposure = v; }
 
-  /** Ambient light color as hex string (e.g. '#ffffff'). */
+  /** @deprecated Use `viewer.visualSettings.ambientColor` instead. Will be removed in v2.0. */
   get ambientColor(): string { return this._visualSettings.ambientColor; }
+  /** @deprecated Use `viewer.visualSettings.ambientColor` instead. Will be removed in v2.0. */
   set ambientColor(hex: string) { this._visualSettings.ambientColor = hex; }
 
-  /** Ambient light intensity. */
+  /** @deprecated Use `viewer.visualSettings.ambientIntensity` instead. Will be removed in v2.0. */
   get ambientIntensity(): number { return this._visualSettings.ambientIntensity; }
+  /** @deprecated Use `viewer.visualSettings.ambientIntensity` instead. Will be removed in v2.0. */
   set ambientIntensity(v: number) { this._visualSettings.ambientIntensity = v; }
 
-  /** Directional light on/off. */
+  /** @deprecated Use `viewer.visualSettings.dirLightEnabled` instead. Will be removed in v2.0. */
   get dirLightEnabled(): boolean { return this._visualSettings.dirLightEnabled; }
+  /** @deprecated Use `viewer.visualSettings.dirLightEnabled` instead. Will be removed in v2.0. */
   set dirLightEnabled(v: boolean) { this._visualSettings.dirLightEnabled = v; }
 
-  /** Directional light color as hex string. */
+  /** @deprecated Use `viewer.visualSettings.dirLightColor` instead. Will be removed in v2.0. */
   get dirLightColor(): string { return this._visualSettings.dirLightColor; }
+  /** @deprecated Use `viewer.visualSettings.dirLightColor` instead. Will be removed in v2.0. */
   set dirLightColor(hex: string) { this._visualSettings.dirLightColor = hex; }
 
-  /** Directional light intensity. */
+  /** @deprecated Use `viewer.visualSettings.dirLightIntensity` instead. Will be removed in v2.0. */
   get dirLightIntensity(): number { return this._visualSettings.dirLightIntensity; }
+  /** @deprecated Use `viewer.visualSettings.dirLightIntensity` instead. Will be removed in v2.0. */
   set dirLightIntensity(v: number) { this._visualSettings.dirLightIntensity = v; }
 
-  /** Shadow casting on/off. */
+  /** @deprecated Use `viewer.visualSettings.shadowEnabled` instead. Will be removed in v2.0. */
   get shadowEnabled(): boolean { return this._visualSettings.shadowEnabled; }
+  /** @deprecated Use `viewer.visualSettings.shadowEnabled` instead. Will be removed in v2.0. */
   set shadowEnabled(v: boolean) { this._visualSettings.shadowEnabled = v; }
 
-  /** Shadow darkness (0 = invisible, 1 = full black). */
+  /** @deprecated Use `viewer.visualSettings.shadowIntensity` instead. Will be removed in v2.0. */
   get shadowIntensity(): number { return this._visualSettings.shadowIntensity; }
+  /** @deprecated Use `viewer.visualSettings.shadowIntensity` instead. Will be removed in v2.0. */
   set shadowIntensity(v: number) { this._visualSettings.shadowIntensity = v; }
 
-  /** Shadow map resolution. */
+  /** @deprecated Use `viewer.visualSettings.shadowQuality` instead. Will be removed in v2.0. */
   get shadowQuality(): ShadowQuality { return this._visualSettings.shadowQuality; }
+  /** @deprecated Use `viewer.visualSettings.shadowQuality` instead. Will be removed in v2.0. */
   set shadowQuality(v: ShadowQuality) { this._visualSettings.shadowQuality = v; }
 
-  /** Environment intensity (default mode) or ambient intensity (simple mode). */
+  /** @deprecated Use `viewer.visualSettings.lightIntensity` instead. Will be removed in v2.0. */
   get lightIntensity(): number { return this._visualSettings.lightIntensity; }
+  /** @deprecated Use `viewer.visualSettings.lightIntensity` instead. Will be removed in v2.0. */
   set lightIntensity(v: number) { this._visualSettings.lightIntensity = v; }
 
   // ─── Individual Rendering Settings (delegated to VisualSettingsManager) ──
@@ -2242,7 +2764,7 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this.projection = settings.projection;
 
     // 8. SSAO (WebGL only)
-    this.ssaoEnabled = settings.ssaoEnabled ?? false;
+    this.aoMode = settings.aoMode ?? 'gtao';
     this.ssaoIntensity = settings.ssaoIntensity ?? 1.0;
     this.ssaoRadius = settings.ssaoRadius ?? 0.15;
 
@@ -2254,6 +2776,9 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
 
     // 10. Ground / Floor
     this.groundEnabled = settings.groundEnabled ?? true;
+    // Apply color BEFORE brightness so the brightness setter's combine math
+    // sees the user's chosen base color instead of recomputing twice.
+    this.groundColor = settings.groundColor ?? '#ffffff';
     this.groundBrightness = settings.groundBrightness ?? 1.0;
     this.backgroundBrightness = settings.backgroundBrightness ?? 1.0;
     this.checkerContrast = settings.checkerContrast ?? 1.0;
@@ -2264,74 +2789,79 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     }
   }
 
-  // ─── Individual Rendering Settings ──────────────────────────────────
+  // ─── Individual Rendering Settings (pure-delegation proxies) ───────────
 
-  /** Get current effective DPR. */
+  /** @deprecated Use `viewer.visualSettings.effectiveDpr` instead. Will be removed in v2.0. */
   get effectiveDpr(): number { return this._visualSettings.effectiveDpr; }
 
-  /** Set maximum device pixel ratio. Values >= 2 use native DPR. Applies immediately (no reload). */
+  /** @deprecated Use `viewer.visualSettings.maxDpr` instead. Will be removed in v2.0. */
   set maxDpr(cap: number) { this._visualSettings.maxDpr = cap; }
 
-  /** Set shadow map resolution (e.g. 512, 1024, 2048). Disposes old map. */
+  /** @deprecated Use `viewer.visualSettings.shadowMapSize` instead. Will be removed in v2.0. */
   set shadowMapSize(size: number) { this._visualSettings.shadowMapSize = size; }
 
-  /** Set shadow softness radius (1-5). Also switches shadow map type. */
+  /** @deprecated Use `viewer.visualSettings.shadowRadius` instead. Will be removed in v2.0. */
   set shadowRadius(radius: number) { this._visualSettings.shadowRadius = radius; }
 
-  /** Whether Screen Space Ambient Occlusion (GTAO) is enabled. WebGL only — no-op on WebGPU. */
-  get ssaoEnabled(): boolean { return this._ssaoEnabled; }
-  set ssaoEnabled(v: boolean) {
-    if (v === this._ssaoEnabled) return;
-    this._ssaoEnabled = v;
-    if (v && !this.isWebGPU) this._ensureComposer();
-    if (this._gtaoPass) this._gtaoPass.enabled = v;
-    this._renderDirty = true;
-  }
+  // #region VisualSettingsProxies — post-processing side-effect setters
+  //
+  // The proxies below delegate to PostProcessingManager — the source of
+  // truth for all composer-related state since plan-177 phase 7b. They
+  // retain the same names as the original RVViewer setters so the 71
+  // external consumers continue to work unchanged. The side-effects
+  // (composer lazily ensured, `_renderDirty` flag set, AO pass lazy-
+  // imported) all happen inside the manager now, not here.
+  //
+  // NOTE: These are NOT pure delegations — they trigger composer creation
+  // and other side-effects, so they are intentionally NOT marked
+  // `@deprecated`. They remain the official API surface for these
+  // properties until / unless a future refactor exposes
+  // `viewer.postProcessing` directly.
 
-  /** SSAO blend intensity (0 = invisible, 1 = full). */
-  get ssaoIntensity(): number { return this._gtaoPass?.blendIntensity ?? 1.0; }
-  set ssaoIntensity(v: number) {
-    if (this._gtaoPass) this._gtaoPass.blendIntensity = v;
-    this._renderDirty = true;
-  }
+  /**
+   * Ambient-occlusion backend: 'off' | 'gtao' | 'n8ao'. WebGL only — a no-op
+   * on WebGPU. Switching to 'n8ao' triggers a dynamic import of the `n8ao`
+   * package; if the module isn't installed or fails to load, the mode
+   * silently reverts to 'gtao' with a console warning so the UI stays honest.
+   */
+  get aoMode(): AOMode { return this._postProcessing.aoMode; }
+  set aoMode(mode: AOMode) { this._postProcessing.aoMode = mode; }
 
-  /** SSAO sampling radius in world units. */
-  get ssaoRadius(): number { return this._gtaoPass?.gtaoMaterial?.uniforms?.radius?.value ?? 0.15; }
-  set ssaoRadius(v: number) {
-    if (this._gtaoPass) this._gtaoPass.updateGtaoMaterial({ radius: v });
-    this._renderDirty = true;
-  }
+  /**
+   * Legacy back-compat: boolean toggle mapping onto `aoMode`.
+   *   true  → aoMode = 'gtao' (current default)
+   *   false → aoMode = 'off'
+   * Prefer `aoMode` directly in new code.
+   */
+  get ssaoEnabled(): boolean { return this._postProcessing.ssaoEnabled; }
+  set ssaoEnabled(v: boolean) { this._postProcessing.ssaoEnabled = v; }
+
+  /** AO blend intensity (0 = invisible, 1 = full). Writes to whichever backend
+   *  is currently active; non-active backend picks it up on next activation. */
+  get ssaoIntensity(): number { return this._postProcessing.ssaoIntensity; }
+  set ssaoIntensity(v: number) { this._postProcessing.ssaoIntensity = v; }
+
+  /** AO sampling radius in world units (GTAO scale; N8AO radius is derived). */
+  get ssaoRadius(): number { return this._postProcessing.ssaoRadius; }
+  set ssaoRadius(v: number) { this._postProcessing.ssaoRadius = v; }
 
   /** Whether bloom (glow on bright areas) is enabled. WebGL only. */
-  get bloomEnabled(): boolean { return this._bloomEnabled; }
-  set bloomEnabled(v: boolean) {
-    if (v === this._bloomEnabled) return;
-    this._bloomEnabled = v;
-    if (v && !this.isWebGPU) this._ensureComposer();
-    if (this._bloomPass) this._bloomPass.enabled = v;
-    this._renderDirty = true;
-  }
+  get bloomEnabled(): boolean { return this._postProcessing.bloomEnabled; }
+  set bloomEnabled(v: boolean) { this._postProcessing.bloomEnabled = v; }
 
   /** Bloom glow intensity (0–2). */
-  get bloomIntensity(): number { return this._bloomPass?.strength ?? 0.5; }
-  set bloomIntensity(v: number) {
-    if (this._bloomPass) this._bloomPass.strength = v;
-    this._renderDirty = true;
-  }
+  get bloomIntensity(): number { return this._postProcessing.bloomIntensity; }
+  set bloomIntensity(v: number) { this._postProcessing.bloomIntensity = v; }
 
   /** Brightness threshold for bloom (0–1). */
-  get bloomThreshold(): number { return this._bloomPass?.threshold ?? 0.85; }
-  set bloomThreshold(v: number) {
-    if (this._bloomPass) this._bloomPass.threshold = v;
-    this._renderDirty = true;
-  }
+  get bloomThreshold(): number { return this._postProcessing.bloomThreshold; }
+  set bloomThreshold(v: number) { this._postProcessing.bloomThreshold = v; }
 
   /** Bloom spread radius (0–1). */
-  get bloomRadius(): number { return this._bloomPass?.radius ?? 0.4; }
-  set bloomRadius(v: number) {
-    if (this._bloomPass) this._bloomPass.radius = v;
-    this._renderDirty = true;
-  }
+  get bloomRadius(): number { return this._postProcessing.bloomRadius; }
+  set bloomRadius(v: number) { this._postProcessing.bloomRadius = v; }
+
+  // #endregion VisualSettingsProxies
 
   // ─── Profiler Overlay ────────────────────────────────────────────────
 
@@ -2343,6 +2873,20 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   rendererInfoLogging = false;
 
   // ─── Renderer Info (for dev tools) ────────────────────────────────────
+
+  /** Diagnostic GPU info for the DevTools panel. Returns the active GPU
+   *  immediately and merges in optional high-perf / low-power adapter
+   *  data once the async probe resolves (typically <1 frame). */
+  getGPUInfo(): GPUInfo | null {
+    return this._gpuInfo;
+  }
+
+  /** Performance-tier diagnosis derived from the active GPU and any
+   *  available adapter probes. Recomputed each call so it reflects the
+   *  latest probe result without needing an event subscription. */
+  getGPUAnalysis(): GPUAnalysis | null {
+    return this._gpuInfo ? analyzeGPU(this._gpuInfo) : null;
+  }
 
   /** Get renderer performance info (triangles, draw calls, etc.). */
   getRendererInfo(): {
@@ -2460,6 +3004,58 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   /** Whether a camera animation is currently in progress. */
   get isCameraAnimating(): boolean { return this._cameraManager.isCameraAnimating; }
 
+  /**
+   * Smoothly animate between perspective and orthographic projection.
+   * Element-wise lerps between the two cameras' projection matrices, then
+   * commits the actual camera swap at the end of the tween.
+   */
+  animateProjectionTo(v: ProjectionType, duration = 0.4): void {
+    this._cameraManager.animateProjectionTo(v, duration);
+  }
+
+  /** Whether a projection animation is currently in progress. */
+  get isProjectionAnimating(): boolean { return this._cameraManager.isProjectionAnimating; }
+
+  // ──── Helper Methods für HMI/Plugin-Konsumenten (Phase 4b of plan-182) ────
+  //
+  // Diese Methoden delegieren an die Sub-Facaden (_scene/_camera/_controls)
+  // und sind die EMPFOHLENE API für HMI-Komponenten + neue Plugins.
+  // Direkte Zugriffe wie `viewer.scene.traverse(...)` sind `@deprecated`.
+
+  /** Iterate over all nodes in the loaded model. Delegates to SceneFacade. */
+  eachNode(fn: (node: Object3D, path: string) => void): void {
+    this._scene.eachNode(fn);
+  }
+
+  /** Project a node's world position to screen pixels. Returns null if camera/renderer
+   *  absent or node behind camera. */
+  projectToScreen(node: Object3D, out?: Vector2): Vector2 | null {
+    return this._scene.projectToScreen(node, out);
+  }
+
+  /** Project an arbitrary world point to screen pixels. */
+  projectPoint(point: Vector3, out?: Vector2): Vector2 | null {
+    return this._scene.projectPoint(point, out);
+  }
+
+  /** Snapshot of current camera state (position, OrbitControls target, quaternion).
+   *  Optional `out` parameter for GC-free hot paths in HMI useFrame hooks. */
+  getCameraState(out?: { position: Vector3; target: Vector3 }) {
+    return this._camera.getCameraState(out);
+  }
+
+  /** Apply a partial OrbitControls configuration. Used by Settings panels.
+   *  Wraps multiple property writes that previously went directly to `viewer.controls.X = val`. */
+  setControlsConfig(cfg: Partial<{ rotateSpeed: number; panSpeed: number; zoomSpeed: number; dampingFactor: number; enabled: boolean }>): void {
+    this._controls.setConfig(cfg);
+  }
+
+  /** Toggle verbose renderer-info logging. Used by DevTools panel.
+   *  Replaces direct `viewer.rendererInfoLogging = v` writes. */
+  setDebugLogging(enabled: boolean): void {
+    this.rendererInfoLogging = enabled;
+  }
+
   // ─── Private ──────────────────────────────────────────────────────────
 
   private lastHoveredDrive: RVDrive | null = null;
@@ -2492,19 +3088,13 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   private _checkerContrast = 1.0;
   /** Scene background brightness multiplier (0 = black, 1 = default, 2 = white). */
   private _backgroundBrightness = 1.0;
+  /** Floor brightness multiplier (0 = black, 1 = default, 2 = double). Combined
+   *  with `_groundColor` to compute the actual material tint. */
+  private _groundBrightness = 1.0;
+  /** Floor base color (default white). */
+  private _groundColor = new Color(0xffffff);
 
-  /** Lazy overlay scene used for the semi-transparent wash during group isolate. */
-  private _isolateOverlayScene: Scene | null = null;
-  /** Orthographic camera for the isolate overlay pass (NDC -1..1). */
-  private _isolateOverlayCam: OrthographicCamera | null = null;
-  /** Overlay material — color is refreshed to match scene background each frame. */
-  private _isolateOverlayMat: MeshBasicMaterial | null = null;
-
-  // --- Isolate desaturation pass (framebuffer-level grayscale) ---
-  private _desatRT: WebGLRenderTarget | null = null;
-  private _desatScene: Scene | null = null;
-  private _desatCam: OrthographicCamera | null = null;
-  private _desatMat: ShaderMaterial | null = null;
+  // Isolate-overlay and desaturation pass state now live in PostProcessingManager.
 
   private fixedUpdate(dt: number): void {
     this.simTickCount++;
@@ -2527,10 +3117,16 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       }
     }
 
-    // ── Plugins Pre (interface signals, replay, CAM) ──
-    for (const p of this._prePlugins) {
+    // ── TickStage.PRE ──────────────────────────────────────────────────────
+    // 1. Legacy onFixedUpdatePre-Plugins (defensive snapshot — protects against
+    //    a plugin that removes itself mid-iteration, e.g. via disablePlugin).
+    for (const p of this._snapshotPrePlugins()) {
       callPlugin(p, 'onFixedUpdatePre', dt);
     }
+    // 2. SimLoopFacade.onTick(PRE) callbacks — adapters flush incoming PLC signals here.
+    this._runTickCallbacks(TickStage.PRE, dt);
+
+    // ── TickStage.SIM (Core) ───────────────────────────────────────────────
 
     // ── Core Drive Physics (behaviors + motion, drives[] may be topologically sorted) ──
     for (const drive of this.drives) {
@@ -2585,11 +3181,103 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       this._renderDirty = true;
     }
 
-    // ── Plugins Post (recorder, sensor monitor, interface readback) ──
-    for (const p of this._postPlugins) {
+    // 3. SimLoopFacade.onTick(SIM) callbacks — run AFTER all core SIM subsystems
+    //    (Drive-Physics + Transport + TankFill + PipeFlow + Gizmo) have updated,
+    //    so plugins reading drive positions or MU counts see the current-tick values.
+    this._runTickCallbacks(TickStage.SIM, dt);
+
+    // 3b. Behavior onFixedUpdate fan-out (auto-disposed on model-cleared).
+    this.behaviors.tick(dt);
+
+    // ── TickStage.POST ─────────────────────────────────────────────────────
+    // 4. Legacy onFixedUpdatePost-Plugins (defensive snapshot).
+    for (const p of this._snapshotPostPlugins()) {
       callPlugin(p, 'onFixedUpdatePost', dt);
     }
+    // 5. SimLoopFacade.onTick(POST) callbacks — recorders, stats, adapter readback.
+    this._runTickCallbacks(TickStage.POST, dt);
 
+  }
+
+  // ─── Defensive Plugin Iteration (Phase 5 of plan-182) ────────────────────
+  //
+  // Snapshots protect against iterator-invalidation: a plugin that removes
+  // itself during fixedUpdate() (via disablePlugin/removePlugin) would otherwise
+  // mutate the array while we are iterating it. slice() returns a shallow copy
+  // so that plugins registered in the same tick are deferred to the next one.
+
+  /** @internal */
+  _snapshotPrePlugins(): readonly RVViewerPlugin[] {
+    return this._prePlugins.slice();
+  }
+
+  /** @internal */
+  _snapshotPostPlugins(): readonly RVViewerPlugin[] {
+    return this._postPlugins.slice();
+  }
+
+  // ─── _runTickCallbacks — per-stage SimLoopFacade tick (Phase 5 of plan-182) ─
+
+  /** Run all onTick callbacks for a given stage, with defensive snapshot.
+   *  Each callback is wrapped in try/catch — one failing callback does not stop the others.
+   *  @internal */
+  private _runTickCallbacks(stage: TickStage, dt: number): void {
+    const list = this._simLoop._ticks.get(stage);
+    if (!list || list.length === 0) return;
+    // Defensive snapshot: a callback may register/unregister callbacks during execution.
+    const snapshot = list.slice();
+    for (const entry of snapshot) {
+      try {
+        entry.callback(dt);
+      } catch (e) {
+        console.error(`[RVViewer] onTick(${TickStage[stage]}) callback error:`, e);
+      }
+    }
+  }
+
+  // ─── _tickOnce — Synchronous tick for tests (Phase 5 of plan-182) ────────
+  //
+  // Calls the EXACT same code path as the production fixedUpdate(), so tests
+  // can step the simulation deterministically without spinning up a real
+  // SimulationLoop / requestAnimationFrame chain.
+  //
+  // Usage in tests: `(viewer as any)._tickOnce(0.016)`
+
+  /** @internal */
+  _tickOnce(dt: number): void {
+    this.fixedUpdate(dt);
+  }
+
+  /**
+   * Render the overlay-only layers (highlights + measurement markers, lines,
+   * distance labels) on top of whatever is currently in the back buffer.
+   *
+   * Called AFTER the main scene render AND after `plugin.onRender` so the
+   * gaussian-splat plugin's library render (which alpha-blends splat pixels
+   * with `depthTest=true / depthWrite=false`) cannot overwrite overlays —
+   * those visually disappeared into the splat backdrop otherwise even
+   * though their materials use depthTest=false.
+   *
+   * Background-nulling guards three.js' Background.js which would call
+   * `forceClear=true` and wipe the back buffer when scene.background is a
+   * Color (mirrors the same dance _renderIsolateMode performs).
+   */
+  private _renderOverlayLayers(): void {
+    const gl = this.renderer as unknown as WebGLRenderer;
+    const prevAutoClear = gl.autoClear;
+    const prevLayerMask = this.camera.layers.mask;
+    gl.autoClear = false;
+    const savedBg = this.scene.background;
+    this.scene.background = null;
+    try {
+      setOverlayLayersOnly(this.camera);
+      gl.clearDepth();
+      gl.render(this.scene, this.camera);
+    } finally {
+      this.scene.background = savedBg;
+      this.camera.layers.mask = prevLayerMask;
+      gl.autoClear = prevAutoClear;
+    }
   }
 
   private render(): void {
@@ -2611,6 +3299,10 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this._cameraManager.tickCameraAnimation(frameDt);
     // Camera animation keeps render dirty
     if (this._cameraManager.isCameraAnimating) this._renderDirty = true;
+    // Projection animation: lerps the active camera's projection matrix in
+    // place, so the renderer needs to redraw every frame for the duration.
+    this._cameraManager.tickProjectionAnimation(frameDt);
+    if (this._cameraManager.isProjectionAnimating) this._renderDirty = true;
     // Damping: keep rendering for N frames after last user input
     if (this._dampingFramesRemaining > 0) {
       this._dampingFramesRemaining--;
@@ -2632,6 +3324,9 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     if (glXR?.isPresenting) this._renderDirty = true;
 
     // Render-on-demand: skip expensive GPU render when scene is static
+    const didMainRender = this._renderDirty;
+    const isXRPresentingNow = (this.renderer as unknown as WebGLRenderer).xr?.isPresenting;
+    const isolateActiveNow = this.groups?.isIsolateActive || this.autoFilters?.isIsolateActive;
     if (this._renderDirty) {
       // Shadow dirty flag handling lives INSIDE the render block so a
       // pending shadow update isn't silently cleared on a skipped frame.
@@ -2664,12 +3359,51 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
         } else if (this.groups?.isIsolateActive || this.autoFilters?.isIsolateActive) {
           this._renderIsolateMode();
         } else if (this._useComposer) {
-          // Update camera references (may have switched persp/ortho)
-          if (this._gtaoPass) this._gtaoPass.camera = this.camera;
-          const renderPass = this._composer!.passes[0] as RenderPass;
+          const gtaoPass = this._postProcessing.gtaoPass;
+          const n8cam = this._postProcessing.n8aoPass as (Pass & { camera?: PerspectiveCamera | OrthographicCamera }) | null;
+          const composer = this._postProcessing.composer!;
+          const renderPass = composer.passes[0] as RenderPass;
           if (renderPass) renderPass.camera = this.camera;
-          this._composer!.render();
+          // OutlinePass also caches a camera reference at construction —
+          // re-bind to the live active camera so outlines stay aligned
+          // with their objects after a projection swap.
+          this.outlineManager.syncCamera();
+
+          // Pull overlay layers OUT of the composer's main pass:
+          //  (a) any depth accidentally written by a highlight wireframe or a
+          //      measurement label sprite (SpriteMaterial defaults depthWrite=true
+          //      even when transparent=true) would contaminate the GTAO/N8AO
+          //      depth sample → halo artifacts around the overlay;
+          //  (b) GTAO darkens the entire color buffer post-AO, so an overlay
+          //      drawn over a cavity edge in pass 1 would visibly DIM. Rendering
+          //      overlays AFTER the composer fixes both issues — same pattern
+          //      as the isolation-mode pass 4.
+          //  HIGHLIGHT_OVERLAY_LAYER (hover/select wireframes) and
+          //  MEASUREMENT_LAYER (markers, lines, distance labels) are both
+          //  semantically overlay (depthTest:false, renderOrder>=11) and share
+          //  the same exclusion.
+          //
+          //  Overlay pass itself runs AFTER the plugin onRender loop below —
+          //  otherwise the gaussian-splat plugin's render call (which alpha-
+          //  blends splats over whatever is in the back buffer) would
+          //  overwrite measurement lines / distance labels with splat pixels.
+          disableOverlayLayers(this.camera);
+          // AO passes render their own gbuffer with a CLONE of the camera that
+          // additionally excludes NO_AO_LAYER, so NO_AO-tagged in-scene UI
+          // (ghost, grid, glow gizmos) casts no ambient-occlusion halos. The
+          // clone is synced AFTER disableOverlayLayers so it inherits the
+          // already-reduced mask (overlay layers stay out of AO too). The
+          // RenderPass keeps the real camera so all that UI still renders with
+          // correct depth-occlusion and bloom.
+          const aoCam = this._postProcessing.syncAoCamera(this.camera);
+          if (gtaoPass) gtaoPass.camera = aoCam;
+          if (n8cam) n8cam.camera = aoCam;
+          composer.render();
         } else {
+          // Non-composer path — render scene without overlay layers so the
+          // post-plugin overlay pass below can draw them on top of the
+          // splat plugin's output (same reason as the composer branch).
+          disableOverlayLayers(this.camera);
           this.renderer.render(this.scene, this.camera);
         }
       } finally {
@@ -2692,6 +3426,22 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       callPlugin(p, 'onRender', frameDt);
     }
 
+    // ── Overlay layers (post-plugins) ──
+    //
+    // Highlights + measurement markers/lines/labels render LAST, after any
+    // plugin onRender has touched the back buffer. This is what guarantees
+    // they survive the gaussian-splat plugin's render call (which alpha-
+    // blends splats and would otherwise overwrite measurement pixels even
+    // though the overlay materials use depthTest=false).
+    //
+    // Skipped while: nothing was rendered this frame (`!didMainRender` →
+    // overlay would draw against a stale buffer); isolate mode (it manages
+    // overlay rendering itself); XR (compositor needs the submitted frame
+    // untouched).
+    if (didMainRender && !isolateActiveNow && !isXRPresentingNow) {
+      this._renderOverlayLayers();
+    }
+
     // Emit object-hover + backward-compatible drive-hover events
     if (this.raycastManager) {
       const rm = this.raycastManager;
@@ -2701,11 +3451,10 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       const cx = rm.pointerClientX;
       const cy = rm.pointerClientY;
 
-      // Resolve drive for compat layer
+      // Track changes to throttle 'object-hover' to relevant transitions.
       const hoveredDrive = (hoveredNode && hoveredType === 'Drive')
         ? this.registry?.findInParent<RVDrive>(hoveredNode, 'Drive') ?? null
         : null;
-
       const driveChanged = hoveredDrive !== this.lastHoveredDrive;
       const dx = cx - this.lastHoverClientX;
       const dy = cy - this.lastHoverClientY;
@@ -2715,7 +3464,6 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
         this.lastHoverClientX = cx;
         this.lastHoverClientY = cy;
 
-        // Emit generic object-hover
         if (hoveredNode && hoveredType && hoveredPath) {
           this.emit('object-hover', {
             node: hoveredNode,
@@ -2728,9 +3476,6 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
         } else {
           this.emit('object-hover', null);
         }
-
-        // Backward-compat: drive-hover with EXACT existing signature
-        this.emit('drive-hover', { drive: hoveredDrive, clientX: cx, clientY: cy });
       }
     }
 
@@ -2796,6 +3541,15 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       this.camera.lookAt(this.controls.target);
       this.controls.update();
     }, { passive: false });
+
+    // #region CanvasInput
+    //
+    // Canvas pointer / context-menu / long-press input handling. Marked as a
+    // region instead of extracted to a separate class because the handlers
+    // touch 22+ `this` members across multiple subsystems (raycastManager,
+    // registry, drives, highlighter, selectionManager, controls, plus the
+    // private long-press and pointer-down tracking fields above). See plan-
+    // 177 section 2.4 (DESCOPED CanvasInputHandler) for the rationale.
 
     // Canvas click: record pointer start, then select on pointerup only if
     // the pointer didn't move (drag threshold).
@@ -2875,8 +3629,12 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
         } else {
           this.selectionManager.select(hitPath, hitPoint);
         }
-        // Backward compat: emit object-clicked for existing listeners
-        this.emit('object-clicked', { path: hitPath, node: hitNode });
+        // Backward compat: emit object-clicked for existing listeners.
+        // hitPoint lets click consumers tell WHERE on the object the click
+        // landed (e.g. the snap-flip icon overlay distinguishes a click on its
+        // sprite from a click on the object's geometry — both resolve to the
+        // same placed root via the aux-target / ancestor-override resolution).
+        this.emit('object-clicked', { path: hitPath, node: hitNode, hitPoint });
       } else {
         // Clicked empty space
         this.selectionManager.clear();
@@ -2894,6 +3652,31 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
           this.fitToNodes([node]);
         }
       }
+    });
+
+    // F key: Frame Selected — fit camera to current selection.
+    // Industry-standard 3D-tool shortcut (Blender, Unity, Maya all use F).
+    // Skipped while typing in form fields. Mirrors a dblclick `object-focus`
+    // for the primary selected node so plugins listening on object-focus
+    // (e.g. the property inspector) get the same trigger as a double-click.
+    window.addEventListener('keydown', (e) => {
+      if (e.code !== 'KeyF') return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const tag = (document.activeElement as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      const snap = this.selectionManager.getSnapshot();
+      if (snap.selectedPaths.length === 0 || !this.registry) return;
+      const nodes: Object3D[] = [];
+      for (const p of snap.selectedPaths) {
+        const n = this.registry.getNode(p);
+        if (n) nodes.push(n);
+      }
+      if (nodes.length === 0) return;
+      e.preventDefault();
+      const primary = snap.primaryPath ?? snap.selectedPaths[0];
+      const primaryNode = this.registry.getNode(primary);
+      if (primaryNode) this.emit('object-focus', { path: primary, node: primaryNode });
+      this.fitToNodes(nodes);
     });
 
     // ── Context Menu (right-click) ───────────────────────────────────
@@ -3028,6 +3811,7 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this.contextMenu.open({ x: e.clientX, y: e.clientY }, target);
     this.emit('context-menu-request', { pos: { x: e.clientX, y: e.clientY }, path, node });
   }
+  // #endregion CanvasInput
 
   /** Set up XR if available (WebGPU real backend has no XR support). */
   private _setupXR(renderer: Renderer, container: HTMLElement): void {
@@ -3088,99 +3872,8 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     }
   }
 
-  /**
-   * Draw the 8×8 checker pattern into `canvas`. The darker tile always equals
-   * the scene-background base color, so at contrast=0 (and when floor/bg
-   * brightness are equal) the floor and background render to the same color.
-   * The lighter tile brightens above the base by CHECKER_HIGHLIGHT_DELTA × contrast,
-   * so contrast=1 reproduces the original `#b0b0b0` / `#9a9a9a` pair.
-   */
-  private drawCheckerPattern(canvas: HTMLCanvasElement, contrast: number): void {
-    const tileCount = 8;
-    const ctx = canvas.getContext('2d')!;
-    const tilePixels = canvas.width / tileCount;
-    const CHECKER_HIGHLIGHT_DELTA = 0x16 / 255; // 0x9a → 0xb0 spread ≈ 0.086
-    const a = Math.max(0, Math.min(1, BG_BASE_SCALAR + CHECKER_HIGHLIGHT_DELTA * contrast));
-    const b = BG_BASE_SCALAR;
-    const toCss = (x: number) => {
-      const v = Math.round(x * 255);
-      return `rgb(${v},${v},${v})`;
-    };
-    const colorA = toCss(a);
-    const colorB = toCss(b);
-    for (let y = 0; y < tileCount; y++) {
-      for (let x = 0; x < tileCount; x++) {
-        ctx.fillStyle = (x + y) % 2 === 0 ? colorA : colorB;
-        ctx.fillRect(x * tilePixels, y * tilePixels, tilePixels, tilePixels);
-      }
-    }
-  }
-
-  /**
-   * Create ground plane with checker pattern that fades to transparent at edges.
-   * Inner 50% is opaque, outer 50% fades to transparent via alphaMap.
-   */
-  private createGroundFade(): Mesh {
-    const checkerSize = 512;
-    const canvas = document.createElement('canvas');
-    canvas.width = checkerSize;
-    canvas.height = checkerSize;
-    this.drawCheckerPattern(canvas, this._checkerContrast);
-    this._checkerCanvas = canvas;
-    const checkerTex = new CanvasTexture(canvas);
-    checkerTex.wrapS = RepeatWrapping;
-    checkerTex.wrapT = RepeatWrapping;
-    checkerTex.colorSpace = SRGBColorSpace;
-    checkerTex.magFilter = NearestFilter;
-
-    // Create alpha map: rectangular fade from center (opaque) to edges (transparent)
-    const alphaSize = 256;
-    const alphaCanvas = document.createElement('canvas');
-    alphaCanvas.width = alphaSize;
-    alphaCanvas.height = alphaSize;
-    const alphaCtx = alphaCanvas.getContext('2d')!;
-    const imageData = alphaCtx.createImageData(alphaSize, alphaSize);
-    for (let py = 0; py < alphaSize; py++) {
-      for (let px = 0; px < alphaSize; px++) {
-        const dx = Math.abs(px / alphaSize - 0.5) * 2; // 0..1
-        const dy = Math.abs(py / alphaSize - 0.5) * 2; // 0..1
-        // Inner half = opaque, outer half fades out
-        const fadeX = dx > 0.5 ? (dx - 0.5) / 0.5 : 0;
-        const fadeY = dy > 0.5 ? (dy - 0.5) / 0.5 : 0;
-        const alpha = 1 - Math.max(fadeX, fadeY);
-        const idx = (py * alphaSize + px) * 4;
-        const v = Math.max(0, Math.round(alpha * 255));
-        imageData.data[idx] = v;
-        imageData.data[idx + 1] = v;
-        imageData.data[idx + 2] = v;
-        imageData.data[idx + 3] = 255;
-      }
-    }
-    alphaCtx.putImageData(imageData, 0, 0);
-    const alphaTex = new CanvasTexture(alphaCanvas);
-
-    let geo: PlaneGeometry | BufferGeometry = new PlaneGeometry(200, 200);
-    if (this.isWebGPU && geo.index) {
-      const nonIndexed = geo.toNonIndexed();
-      geo.dispose();
-      geo = nonIndexed;
-    }
-
-    const mat = new MeshStandardMaterial({
-      map: checkerTex,
-      alphaMap: alphaTex,
-      transparent: true,
-      side: DoubleSide,
-      depthWrite: false,
-      roughness: 1.0,
-      metalness: 0.0,
-    });
-
-    const mesh = new Mesh(geo, mat);
-    mesh.rotation.x = -Math.PI / 2;
-    mesh.renderOrder = -1;
-    mesh.receiveShadow = true;
-    mesh.visible = false;
-    return mesh;
-  }
+  // Ground plane factory (createGroundFade) and the checker pattern helper
+  // (drawCheckerPattern) now live in `engine/rv-ground-plane.ts`. The
+  // constants FLOOR_FADE_START_RATIO / FLOOR_FADE_END_RATIO are still
+  // referenced inside loadModel() above for the dynamic ground scale.
 }

@@ -138,6 +138,11 @@ export class RVSensor implements RVComponent {
   // Derived mode for backward compat with callers checking mode
   get mode(): 'Raycast' | 'Collision' { return this.UseRaycast ? 'Raycast' : 'Collision'; }
 
+  /** Authoritative current runtime value for UI display (live source of truth). */
+  getLiveState(): Record<string, unknown> {
+    return { Occupied: this.occupied };
+  }
+
   /** Resolved signal address for SensorOccupied PLCInputBool (null if not connected) */
   SensorOccupied: string | null = null;
   /** Resolved signal address for SensorNotOccupied PLCInputBool (null if not connected) */

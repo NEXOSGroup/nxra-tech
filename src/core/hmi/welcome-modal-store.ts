@@ -14,27 +14,25 @@
  */
 
 import { useSyncExternalStore } from 'react';
+import { createStore } from './create-store';
 
-let _isOpen = false;
-const _listeners = new Set<() => void>();
+const _store = createStore<boolean>(false);
 
 /** Set the modal open state. Called by WelcomeModal.tsx in a useEffect. */
 export function setWelcomeModalOpen(open: boolean): void {
-  if (_isOpen === open) return;
-  _isOpen = open;
-  for (const l of _listeners) {
-    try { l(); } catch (e) { console.error('[welcome-modal-store] listener threw:', e); }
-  }
+  if (_store.getSnapshot() === open) return;
+  _store.set(() => open);
 }
 
 /** Subscribe to visibility changes. Returns unsubscribe function. */
 export function subscribeWelcomeModal(listener: () => void): () => void {
-  _listeners.add(listener);
-  return () => { _listeners.delete(listener); };
+  return _store.subscribe(listener);
 }
 
 /** Current visibility state (synchronous snapshot). */
-export function isWelcomeModalOpen(): boolean { return _isOpen; }
+export function isWelcomeModalOpen(): boolean {
+  return _store.getSnapshot();
+}
 
 /** React hook — returns live visibility state. */
 export function useWelcomeModalOpen(): boolean {
@@ -46,6 +44,5 @@ export function _resetWelcomeModalForTests(): void {
   if (import.meta.env.PROD) {
     throw new Error('_resetWelcomeModalForTests() must not be called in production');
   }
-  _isOpen = false;
-  _listeners.clear();
+  _store.set(() => false);
 }

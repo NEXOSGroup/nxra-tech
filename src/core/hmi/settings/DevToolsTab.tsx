@@ -17,6 +17,17 @@ interface DevStats {
   programs: number;
   heapMB: string;
   renderer: string;
+  // GPU (active adapter + best-effort other adapters; see rv-gpu-info.ts)
+  gpuActive: string;
+  gpuArchitecture?: string;
+  gpuHighPerf?: string;
+  gpuLowPower?: string;
+  // Diagnosis: tier + severity drive the colored badge and the
+  // optional warning message below the GPU rows.
+  gpuTier: 'software' | 'integrated' | 'discrete' | 'apple-silicon' | 'unknown';
+  gpuSeverity: 'ok' | 'warning' | 'critical';
+  gpuMessage?: string;
+  gpuAction?: string;
   // Scene (from GLB)
   triangles: number;
   meshesInGlb: number;
@@ -52,6 +63,78 @@ function SectionHeader({ children }: { children: string }) {
     <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
       {children}
     </Typography>
+  );
+}
+
+/** Color + label for the GPU tier pill next to the section header. */
+function GPUTierBadge({
+  tier, severity,
+}: {
+  tier: DevStats['gpuTier'];
+  severity: DevStats['gpuSeverity'];
+}) {
+  // Severity drives colour (green/yellow/red); tier drives the label.
+  // Tier 'unknown' or no analysis → no badge at all (avoids noise).
+  if (tier === 'unknown') return null;
+  const COLORS: Record<DevStats['gpuSeverity'], { fg: string; bg: string }> = {
+    ok:       { fg: '#66bb6a', bg: 'rgba(102,187,106,0.15)' },
+    warning:  { fg: '#ffa726', bg: 'rgba(255,167,38,0.15)'  },
+    critical: { fg: '#ef5350', bg: 'rgba(239,83,80,0.18)'   },
+  };
+  const LABELS: Record<DevStats['gpuTier'], string> = {
+    discrete:        'Discrete',
+    'apple-silicon': 'Apple Silicon',
+    integrated:      'Integrated',
+    software:        'Software (CPU)',
+    unknown:         '',
+  };
+  const c = COLORS[severity];
+  return (
+    <Box sx={{
+      px: 0.75, py: 0.1,
+      borderRadius: 1,
+      fontSize: 10,
+      fontWeight: 600,
+      letterSpacing: 0.3,
+      color: c.fg,
+      bgcolor: c.bg,
+      border: `1px solid ${c.fg}40`, // 25% alpha
+    }}>
+      {LABELS[tier]}
+    </Box>
+  );
+}
+
+/** Inline callout shown under the GPU rows when severity != 'ok'.
+ *  Yellow for 'warning' (suboptimal but functional), red for 'critical'
+ *  (software fallback). Two-line layout: message above, action below. */
+function GPUDiagnosisCallout({
+  severity, message, action,
+}: {
+  severity: DevStats['gpuSeverity'];
+  message: string;
+  action?: string;
+}) {
+  const isCritical = severity === 'critical';
+  const fg = isCritical ? '#ef5350' : '#ffa726';
+  const bg = isCritical ? 'rgba(239,83,80,0.08)' : 'rgba(255,167,38,0.08)';
+  return (
+    <Box sx={{
+      mt: 1.25,
+      p: 1,
+      borderRadius: 1,
+      bgcolor: bg,
+      border: `1px solid ${fg}40`,
+    }}>
+      <Typography variant="caption" sx={{ color: fg, fontWeight: 600, display: 'block' }}>
+        {message}
+      </Typography>
+      {action && (
+        <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.55)', display: 'block', mt: 0.5 }}>
+          {action}
+        </Typography>
+      )}
+    </Box>
   );
 }
 
@@ -92,7 +175,21 @@ export function DevToolsTab() {
       const info = viewer.getRendererInfo();
       const mem = (performance as unknown as { memory?: { usedJSHeapSize?: number } }).memory;
       const heapMB = mem?.usedJSHeapSize ? (mem.usedJSHeapSize / (1024 * 1024)).toFixed(0) : '--';
-      const hash = `${viewer.currentFps}|${info.triangles}|${info.drawCalls}|${info.programs}|${info.materialsUnique}|${heapMB}|${viewer.drives.length}`;
+      const gpu = viewer.getGPUInfo();
+      const analysis = viewer.getGPUAnalysis();
+      // Compose a single-line label per row. Vendor + device is what
+      // engineers expect to see; architecture appears only when WebGPU
+      // hands it to us.
+      const gpuActive = gpu
+        ? `${gpu.active.vendor} ${gpu.active.renderer}`.trim()
+        : '--';
+      const gpuHighPerf = gpu?.highPerf
+        ? `${gpu.highPerf.vendor} ${gpu.highPerf.device}`.trim()
+        : undefined;
+      const gpuLowPower = gpu?.lowPower
+        ? `${gpu.lowPower.vendor} ${gpu.lowPower.device}`.trim()
+        : undefined;
+      const hash = `${viewer.currentFps}|${info.triangles}|${info.drawCalls}|${info.programs}|${info.materialsUnique}|${heapMB}|${viewer.drives.length}|${gpuActive}|${gpuHighPerf ?? ''}|${gpuLowPower ?? ''}|${analysis?.severity ?? ''}|${analysis?.tier ?? ''}`;
       if (hash === prevStatsHashRef.current) return;
       prevStatsHashRef.current = hash;
       setStats({
@@ -104,6 +201,14 @@ export function DevToolsTab() {
         programs: info.programs,
         heapMB,
         renderer: viewer.isWebGPU ? 'WebGPU' : 'WebGL',
+        gpuActive,
+        gpuArchitecture: gpu?.active.architecture,
+        gpuHighPerf,
+        gpuLowPower,
+        gpuTier: analysis?.tier ?? 'unknown',
+        gpuSeverity: analysis?.severity ?? 'ok',
+        gpuMessage: analysis?.message,
+        gpuAction: analysis?.action,
         triangles: info.triangles,
         meshesInGlb: info.materialsOriginal, // materialsOriginal ≈ meshes in GLB (1 mat per mesh before dedup)
         materialsOriginal: info.materialsOriginal,
@@ -140,7 +245,7 @@ export function DevToolsTab() {
           </Box>
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <Typography variant="body2" sx={{ color: 'text.primary' }}>Console Perf Log</Typography>
-            <Switch size="small" checked={infoLogging} onChange={(_, v) => { viewer.rendererInfoLogging = v; setInfoLogging(v); }} />
+            <Switch size="small" checked={infoLogging} onChange={(_, v) => { viewer.setDebugLogging(v); setInfoLogging(v); }} />
           </Box>
         </Box>
       </Box>
@@ -209,6 +314,24 @@ export function DevToolsTab() {
           <StatRow label="JS Heap" value={s ? `${s.heapMB} MB` : '--'} />
           <StatRow label="Renderer" value={s?.renderer ?? '--'} />
         </Box>
+      </Box>
+
+      {/* ─── GPU ─── */}
+      <Box sx={{ borderTop: '1px solid rgba(255,255,255,0.08)', pt: 1.5 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <SectionHeader>GPU</SectionHeader>
+          {s && <GPUTierBadge tier={s.gpuTier} severity={s.gpuSeverity} />}
+        </Box>
+        <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+          <StatRow label="Backend" value={s?.renderer ?? '--'} />
+          <StatRow label="Active" value={s?.gpuActive ?? '--'} />
+          {s?.gpuArchitecture && <StatRow label="Architecture" value={s.gpuArchitecture} />}
+          {s?.gpuHighPerf && <StatRow label="High-perf" value={s.gpuHighPerf} />}
+          {s?.gpuLowPower && <StatRow label="Low-power" value={s.gpuLowPower} />}
+        </Box>
+        {s?.gpuMessage && (
+          <GPUDiagnosisCallout severity={s.gpuSeverity} message={s.gpuMessage} action={s.gpuAction} />
+        )}
       </Box>
 
       {/* ─── Performance Budget ─── */}

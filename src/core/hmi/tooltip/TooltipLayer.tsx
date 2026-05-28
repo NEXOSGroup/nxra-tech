@@ -21,11 +21,18 @@ import { tooltipStore } from './tooltip-store';
 import { tooltipRegistry } from './tooltip-registry';
 import { projectToScreen, projectPointToScreen, clampToViewport } from './tooltip-utils';
 import { useViewer } from '../../../hooks/use-viewer';
+import { getUIZoom } from '../visual-settings-store';
 import type { VisibleTooltip } from './tooltip-store';
 import type { ContextMenuTarget } from '../context-menu-store';
 
-const DEFAULT_OFFSET_X = 16;
-const DEFAULT_OFFSET_Y = -12;
+/** Cursor tooltip: small down-right gap, standard OS pattern. Bubble anchors
+ *  at its top-left so the cursor sits close to the bubble's upper-left corner. */
+const CURSOR_OFFSET_X = 14;
+const CURSOR_OFFSET_Y = 14;
+/** World / fixed tooltip: bubble floats above the anchor (translateY(-100%)).
+ *  Small vertical gap keeps the bubble visually attached to the object. */
+const WORLD_OFFSET_X = 0;
+const WORLD_OFFSET_Y = -8;
 const TOOLTIP_MIN_WIDTH = 160;
 const TOOLTIP_EST_HEIGHT = 120;
 const VIEWPORT_MARGIN = 10;
@@ -76,8 +83,14 @@ const SingleTooltipBubble: FC<SingleTooltipBubbleProps> = ({ tooltip }) => {
       if (!mounted) return;
       const el = tooltipRef.current;
 
-      const offsetX = primary.offset?.x ?? DEFAULT_OFFSET_X;
-      const offsetY = primary.offset?.y ?? DEFAULT_OFFSET_Y;
+      // Cursor tooltips anchor top-left (bubble appears below-right of cursor).
+      // World / fixed tooltips anchor bottom-left via translateY(-100%) set below,
+      // so the bubble floats above the anchor and doesn't occlude the object.
+      const isCursor = primary.mode === 'cursor';
+      const defaultX = isCursor ? CURSOR_OFFSET_X : WORLD_OFFSET_X;
+      const defaultY = isCursor ? CURSOR_OFFSET_Y : WORLD_OFFSET_Y;
+      const offsetX = primary.offset?.x ?? defaultX;
+      const offsetY = primary.offset?.y ?? defaultY;
 
       let rawX = 0;
       let rawY = 0;
@@ -104,12 +117,24 @@ const SingleTooltipBubble: FC<SingleTooltipBubbleProps> = ({ tooltip }) => {
       if (show && el) {
         const tooltipWidth = el.offsetWidth || TOOLTIP_MIN_WIDTH;
         const tooltipHeight = el.offsetHeight || TOOLTIP_EST_HEIGHT;
+        // clampToViewport expects Y to be the BOTTOM of the tooltip (matches
+        // the translateY(-100%) world/fixed anchor). For cursor mode we
+        // convert Y from top→bottom before clamping, then back.
+        const yBottom = isCursor ? rawY + tooltipHeight : rawY;
         const clamped = clampToViewport(
-          rawX, rawY, tooltipWidth, tooltipHeight,
+          rawX, yBottom, tooltipWidth, tooltipHeight,
           VIEWPORT_MARGIN, window.innerWidth, window.innerHeight,
         );
-        el.style.left = clamped.x + 'px';
-        el.style.top = clamped.y + 'px';
+        const finalTop = isCursor ? clamped.y - tooltipHeight : clamped.y;
+        // CSS `zoom` on HMIShell scales its children, so a raw viewport pixel
+        // value written to `left/top` inside the zoomed container is RENDERED
+        // at viewport × zoom. Mouse events (clientX/Y) stay in unzoomed
+        // viewport space. Dividing by the current zoom factor cancels the
+        // scaling and puts the bubble exactly where the cursor / object is.
+        const zoom = getUIZoom() || 1;
+        el.style.left = (clamped.x / zoom) + 'px';
+        el.style.top = (finalTop / zoom) + 'px';
+        el.style.transform = isCursor ? 'none' : 'translateY(-100%)';
         el.style.visibility = 'visible';
       } else if (el) {
         el.style.visibility = 'hidden';
@@ -141,7 +166,8 @@ const SingleTooltipBubble: FC<SingleTooltipBubbleProps> = ({ tooltip }) => {
         left: 0,
         top: 0,
         visibility: 'hidden',
-        transform: 'translateY(-100%)',
+        // transform is set imperatively in the rAF tick so it can switch
+        // between 'translateY(-100%)' (world/fixed) and 'none' (cursor).
         pointerEvents: isPinned ? 'auto' : 'none !important',
         zIndex: 1300,
         bgcolor: 'rgba(18, 18, 18, 0.88)',

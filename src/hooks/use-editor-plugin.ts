@@ -17,16 +17,26 @@ import type { RvExtrasEditorPlugin, ExtrasEditorState } from '../core/hmi/rv-ext
 import { HIERARCHY_DEFAULT_WIDTH } from '../core/hmi/rv-extras-editor';
 
 const NOOP_UNSUB = () => () => {};
-const EMPTY_SNAPSHOT: ExtrasEditorState = {
-  panelOpen: false,
-  panelWidth: HIERARCHY_DEFAULT_WIDTH,
-  overlay: null,
-  editableNodes: [],
-  selectedNodePath: null,
-  revealPath: null,
-  showInspector: false,
-  settingsOpen: false,
-};
+
+/** Empty snapshot lazily — using HIERARCHY_DEFAULT_WIDTH at module-init
+ *  time creates a TDZ error in the module-cycle
+ *  rv-extras-editor → SetPositionDialog → use-editor-plugin → rv-extras-editor.
+ *  Building it on first call defers the read until both modules are settled. */
+let _emptySnapshot: ExtrasEditorState | null = null;
+function getEmptySnapshot(): ExtrasEditorState {
+  if (_emptySnapshot) return _emptySnapshot;
+  _emptySnapshot = {
+    panelOpen: false,
+    panelWidth: HIERARCHY_DEFAULT_WIDTH,
+    overlay: null,
+    editableNodes: [],
+    selectedNodePath: null,
+    revealPath: null,
+    showInspector: false,
+    settingsOpen: false,
+  };
+  return _emptySnapshot;
+}
 
 /** Full-state subscription (legacy, re-renders on any state change). */
 export function useEditorPlugin() {
@@ -34,7 +44,7 @@ export function useEditorPlugin() {
   const plugin = viewer.getPlugin<RvExtrasEditorPlugin>('rv-extras-editor');
   const state = useSyncExternalStore(
     plugin?.subscribe ?? NOOP_UNSUB,
-    plugin?.getSnapshot ?? (() => EMPTY_SNAPSHOT),
+    plugin?.getSnapshot ?? (() => getEmptySnapshot()),
   );
   return { plugin, state };
 }
@@ -58,7 +68,7 @@ export function useEditorState<T>(selector: (state: ExtrasEditorState) => T): T 
   selectorRef.current = selector;
 
   const getSnapshot = useCallback(() => {
-    const snap = plugin?.getSnapshot() ?? EMPTY_SNAPSHOT;
+    const snap = plugin?.getSnapshot() ?? getEmptySnapshot();
     return selectorRef.current(snap);
   }, [plugin]);
 

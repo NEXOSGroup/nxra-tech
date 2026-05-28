@@ -16,6 +16,8 @@ import { Close, NavigateBefore, NavigateNext, ZoomIn, ZoomOut, OpenInNew } from 
 export interface DocViewerOverlayProps {
   url: string;
   title?: string;
+  /** Page to open first (1-based). Defaults to 1. */
+  initialPage?: number;
   onClose: () => void;
 }
 
@@ -39,12 +41,12 @@ function loadReactPdf(): Promise<ReactPdfModule> {
 
 // ─── Component ──────────────────────────────────────────────────────────
 
-export function DocViewerOverlay({ url, title, onClose }: DocViewerOverlayProps) {
+export function DocViewerOverlay({ url, title, initialPage, onClose }: DocViewerOverlayProps) {
   const [pdfMod, setPdfMod] = useState<ReactPdfModule | null>(null);
   const [modError, setModError] = useState('');
   const [pdfError, setPdfError] = useState('');
   const [numPages, setNumPages] = useState(0);
-  const [page, setPage] = useState(1);
+  const [page, setPage] = useState(initialPage ?? 1);
   const [scale, setScale] = useState(1.2);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -57,8 +59,8 @@ export function DocViewerOverlay({ url, title, onClose }: DocViewerOverlayProps)
     return () => { cancelled = true; };
   }, []);
 
-  // Reset page when URL changes
-  useEffect(() => { setPage(1); setNumPages(0); setPdfError(''); }, [url]);
+  // Reset page when URL or initialPage changes
+  useEffect(() => { setPage(initialPage ?? 1); setNumPages(0); setPdfError(''); }, [url, initialPage]);
 
   // Escape key
   useEffect(() => {

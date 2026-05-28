@@ -4,7 +4,7 @@
 /**
  * TransportStatsPlugin — Samples transport counters at 10Hz into ring buffers.
  *
- * Emits 'mu-spawned' and 'mu-consumed' events when counters change.
+ * Emits `component-event` (componentType: 'mu', kind: 'spawned' | 'consumed') when counters change.
  * UI components can poll the ring buffers via usePlugin('transport-stats').
  */
 
@@ -51,11 +51,21 @@ export class TransportStatsPlugin implements RVViewerPlugin {
     this.consumedBuffer.push(tm.totalConsumed);
 
     if (tm.totalSpawned !== this.lastSpawned) {
-      this.viewer?.emit('mu-spawned', { totalSpawned: tm.totalSpawned });
+      this.viewer?.emit('component-event', {
+        componentType: 'mu',
+        kind: 'spawned',
+        path: '',
+        payload: { totalSpawned: tm.totalSpawned },
+      });
       this.lastSpawned = tm.totalSpawned;
     }
     if (tm.totalConsumed !== this.lastConsumed) {
-      this.viewer?.emit('mu-consumed', { totalConsumed: tm.totalConsumed });
+      this.viewer?.emit('component-event', {
+        componentType: 'mu',
+        kind: 'consumed',
+        path: '',
+        payload: { totalConsumed: tm.totalConsumed },
+      });
       this.lastConsumed = tm.totalConsumed;
     }
   }

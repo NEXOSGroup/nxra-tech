@@ -7,6 +7,7 @@ import { useViewer } from '../../hooks/use-viewer';
 import type { UISlot } from '../rv-ui-plugin';
 import { useActiveContexts, isUIElementVisible, registerUIElement } from './ui-context-store';
 import { subscribeUIZoom, getUIZoom } from './visual-settings-store';
+import { getSceneStore } from './scene/scene-store-singleton';
 
 interface HMIShellProps {
   children: React.ReactNode;
@@ -64,6 +65,38 @@ export function HMIShell({ children }: HMIShellProps) {
     return subscribeUIZoom(applyZoom);
   }, []);
 
+  // ── Global undo/redo keyboard shortcuts ────────────────────────────
+  // Ctrl/Cmd+Z      → undo
+  // Ctrl/Cmd+Shift+Z OR Ctrl+Y → redo
+  // Suppressed when focus is in a text input or contentEditable element
+  // (so browser-default per-field undo still works).
+  useEffect(() => {
+    function isTextInput(el: EventTarget | null): boolean {
+      if (!(el instanceof HTMLElement)) return false;
+      const tag = el.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return true;
+      if (el.isContentEditable) return true;
+      return false;
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (isTextInput(e.target)) return;
+      const meta = e.ctrlKey || e.metaKey;
+      if (!meta) return;
+      const sceneStore = getSceneStore();
+      if (!sceneStore) return;
+      const key = e.key.toLowerCase();
+      if (key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        void sceneStore.undo();
+      } else if ((key === 'z' && e.shiftKey) || key === 'y') {
+        e.preventDefault();
+        void sceneStore.redo();
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
   return (
     <Box
       ref={boxRef}
@@ -77,7 +110,33 @@ export function HMIShell({ children }: HMIShellProps) {
         },
       }}
     >
+      {/*
+        Portal target for floating panels (ChartPanel, DESStatsPanel, …).
+        Direct child of HMIShell so panels inherit the CSS `zoom` but
+        bypass the deeper Paper hierarchy. Ancestor Papers carry
+        `backdrop-filter: blur(...)` from the theme (theme.ts) which per
+        CSS spec creates a containing block for `position: fixed`
+        descendants — so a panel rendered inside e.g. ButtonPanel's
+        Paper would have its `top: 0` snapped to the Paper's top, not
+        the viewport top. Portaling here gives panels HMIShell as their
+        containing block, which is what the drag/clamp math assumes.
+
+        Plain `<div>` with no styling: no transform / filter /
+        backdrop-filter / will-change / contain → does not establish a
+        containing block of its own.
+      */}
+      <div id="rv-floating-panel-root" style={{ pointerEvents: 'none' }} />
       {children}
     </Box>
   );
+}
+
+/**
+ * Look up the floating-panel portal root. Returns null on the server
+ * or before HMIShell has mounted; callers should fall back to inline
+ * rendering in that case.
+ */
+export function getFloatingPanelRoot(): HTMLElement | null {
+  if (typeof document === 'undefined') return null;
+  return document.getElementById('rv-floating-panel-root');
 }

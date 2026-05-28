@@ -31,7 +31,6 @@ export type DebugCategory =
   | 'erratic'    // ErraticDriver
   | 'grip'       // Grip pick/place
   | 'parity'     // GLB extras parity validation
-  | 'physics'    // Rapier physics plugin
   | 'config'     // App config loading
   | 'multiuser'  // Multiuser synchronization
   | 'interface'  // Industrial interface connections
@@ -54,7 +53,7 @@ export interface LogEntry {
 
 const ALL_CATEGORIES: DebugCategory[] = [
   'loader', 'playback', 'drive', 'transport', 'sensor', 'logic', 'signal', 'erratic', 'grip', 'parity',
-  'physics', 'config', 'multiuser', 'interface', 'render',
+  'config', 'multiuser', 'interface', 'render',
 ];
 
 const LOG_LEVELS: LogLevel[] = ['trace', 'debug', 'info', 'warn', 'error'];

@@ -7,13 +7,14 @@ import { useViewer } from '../../../hooks/use-viewer';
 import { loadInterfaceSettings, saveInterfaceSettings, type InterfaceSettings, type InterfaceType, INTERFACE_DEFAULTS } from '../../../interfaces/interface-settings-store';
 import { InterfaceManager } from '../../../interfaces/interface-manager';
 import { StatRow, tfSx } from './settings-helpers';
+import { connectionStateColor } from '../isa-colors';
 
 const INTERFACE_OPTIONS: { value: InterfaceType; label: string; available: boolean }[] = [
   { value: 'none', label: 'None', available: true },
   { value: 'websocket-realtime', label: 'WebSocket Realtime', available: true },
   { value: 'ctrlx', label: 'ctrlX (Bosch Rexroth)', available: true },
-  { value: 'twincat-hmi', label: 'TwinCAT HMI', available: false },
-  { value: 'mqtt', label: 'MQTT', available: false },
+  { value: 'twincat-hmi', label: 'TwinCAT HMI (Beckhoff)', available: true },
+  { value: 'mqtt', label: 'MQTT', available: true },
   { value: 'keba', label: 'KEBA', available: false },
 ];
 
@@ -79,10 +80,7 @@ export function InterfacesTab() {
     setSignalCount(0);
   };
 
-  const stateColor = connectionState === 'connected' ? '#66bb6a'
-    : connectionState === 'connecting' ? '#ffa726'
-    : connectionState === 'error' ? '#ef5350'
-    : 'rgba(255,255,255,0.5)';
+  const stateColor = connectionStateColor(connectionState) ?? 'rgba(255,255,255,0.5)';
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
@@ -151,7 +149,7 @@ export function InterfacesTab() {
             <Typography variant="body2" sx={{ color: 'text.primary', fontSize: 13 }}>Use SSL (wss://)</Typography>
             <Switch size="small" checked={settings.wsUseSSL} onChange={(_, v) => persist({ wsUseSSL: v })} />
           </Box>
-          {(settings.wsUseSSL || settings.activeType === 'ctrlx') && (
+          {(settings.wsUseSSL || settings.activeType === 'ctrlx' || settings.activeType === 'twincat-hmi') && (
             <TextField
               label="Auth Token"
               size="small"
@@ -159,7 +157,7 @@ export function InterfacesTab() {
               type="password"
               value={settings.wsAuthToken}
               onChange={(e) => persist({ wsAuthToken: e.target.value })}
-              placeholder="Bearer token (ctrlX SSL)"
+              placeholder={settings.activeType === 'twincat-hmi' ? 'Session token (cid)' : 'Bearer token (ctrlX SSL)'}
               sx={tfSx}
             />
           )}

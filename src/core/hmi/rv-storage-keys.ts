@@ -5,7 +5,6 @@
 
 export const ALL_RV_STORAGE_KEYS = [
   'rv-visual-settings',
-  'rv-physics-settings',
   'rv-search-settings',
   'rv-interface-settings',
   'rv-webviewer-last-model',
@@ -25,11 +24,26 @@ export const ALL_RV_STORAGE_KEYS = [
   'rv-maintenance-progress',
   'rv-ai-bridge',
   'rv-multiuser-settings',
+  'rv-source-markers-visible',
+  'rv-toolbar-show-labels',
   'rv-left-panel-active',
   'rv-layout-library-urls',
   'rv-layout-autosave',
   'rv-layout-grid-enabled',
   'rv-layout-grid-size',
+  'rv-layout-drop-to-surface',
+  'rv-layout-active-tab',
+  'rv-layout-bbox-snap-mid',
+  'rv-layout-bbox-snap-side',
+  'rv-layout-bbox-snap-tolerance',
+  'rv-layout-show-neighbor-distances',
+  'rv-layout-neighbor-distance-max',
+  'rv-unity-cloud-config',
+  'rv-layouts-index',
+  'rv-scene-active',
+  'rv-models-window-open',
+  'rv-local-folders',
+  'rv-splat-transform',  // legacy — transforms now managed via PlacedComponent
 ] as const;
 
 /**
@@ -51,10 +65,13 @@ export const RV_DYNAMIC_PREFIXES = [
   'rv-extras-overlay:',
   'rv-extras-originals:',
   'rv-annotations-',
+  'rv-measurements-',
   'rv-panel-',
+  'rv-panel-geo:',
   'rv-order-',
   'rv-camera-start:',
   'rv-login-',    // login gate keys
+  'rv-layouts/',  // multi-layout registry entries (rv-layouts/<id>)
 ] as const;
 
 /**

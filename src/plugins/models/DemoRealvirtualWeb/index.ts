@@ -27,15 +27,21 @@ import { AnnotationPlugin } from '../../annotation-plugin';
 import { AasLinkPlugin } from '../../aas-link-plugin';
 import { OrderManagerPlugin } from '../../order-manager-plugin';
 
-// Kiosk Mode — code-first async tour (Plan 150)
-import type { KioskPlugin } from '../../kiosk-plugin';
-import { demoKioskTour } from './demo-kiosk-tour';
+// Kiosk Mode — disabled for now, re-enable when tour content is ready
+// import type { KioskPlugin } from '../../kiosk-plugin';
+// import { demoKioskTour } from './demo-kiosk-tour';
 
 // Side-effect import: triggers tooltipRegistry self-registration for 'aas' content type
 import '../../aas-link-plugin';
 
+// Side-effect import: opt this demo into the live drive HUD tooltip. The
+// core HMI no longer side-effect-imports DriveTooltipContent — it's
+// optional, per-deployment. Model-plugin packs that want the floating
+// "Position / Speed / Target" hover card import it here.
+import '../../../core/hmi/tooltip/DriveTooltipContent';
+
 /** Model filenames (without .glb) that this module handles. */
-export const models = ['DemoRealvirtualWeb', 'RealvirtualWebTest'];
+export const models = ['DemoRealvirtualWeb', 'DemoRealvirtualWebBosch', 'RealvirtualWebTest'];
 
 /** Track registered plugin IDs for clean unregister. */
 const registeredIds: string[] = [];
@@ -61,14 +67,13 @@ export function registerModelPlugins(viewer: RVViewer): void {
     registeredIds.push(p.id);
   }
 
-  // Register kiosk tours for this model (if KioskPlugin is loaded).
-  // Optional chaining handles the case where KioskPlugin was excluded from the build.
-  const kiosk = viewer.getPlugin<KioskPlugin>('kiosk');
-  if (kiosk) {
-    for (const modelName of models) {
-      kiosk.registerTour(modelName, demoKioskTour);
-    }
-  }
+  // Kiosk tours — disabled for now, re-enable when tour content is ready
+  // const kiosk = viewer.getPlugin<KioskPlugin>('kiosk');
+  // if (kiosk) {
+  //   for (const modelName of models) {
+  //     kiosk.registerTour(modelName, demoKioskTour);
+  //   }
+  // }
 }
 
 export function unregisterModelPlugins(viewer: RVViewer): void {
@@ -77,13 +82,12 @@ export function unregisterModelPlugins(viewer: RVViewer): void {
   }
   registeredIds.length = 0;
 
-  // Unregister kiosk tours (does not remove the KioskPlugin itself — it is core)
-  const kiosk = viewer.getPlugin<KioskPlugin>('kiosk');
-  if (kiosk) {
-    for (const modelName of models) {
-      kiosk.unregisterTour(modelName);
-    }
-  }
+  // const kiosk = viewer.getPlugin<KioskPlugin>('kiosk');
+  // if (kiosk) {
+  //   for (const modelName of models) {
+  //     kiosk.unregisterTour(modelName);
+  //   }
+  // }
 }
 
 export default { models, registerModelPlugins, unregisterModelPlugins } satisfies ModelPluginModule;

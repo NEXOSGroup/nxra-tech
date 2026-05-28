@@ -8,8 +8,7 @@
  * updated on every 'multiuser-changed' event.
  */
 
-import { useState, useEffect } from 'react';
-import { useViewer } from './use-viewer';
+import { useViewerEvent } from './use-viewer-event';
 import type { MultiuserSnapshot } from '../plugins/multiuser-plugin';
 
 /** Default state when MultiuserPlugin is not loaded. */
@@ -26,15 +25,5 @@ const INITIAL: MultiuserSnapshot = {
 
 /** Subscribe to multiuser-changed events. Returns current snapshot. */
 export function useMultiuser(): MultiuserSnapshot {
-  const viewer = useViewer();
-  const [state, setState] = useState<MultiuserSnapshot>(INITIAL);
-
-  useEffect(() => {
-    const off = viewer.on('multiuser-changed' as string, (data: unknown) => {
-      setState(data as MultiuserSnapshot);
-    });
-    return off;
-  }, [viewer]);
-
-  return state;
+  return useViewerEvent('multiuser-changed', INITIAL, (data) => data);
 }

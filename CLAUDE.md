@@ -10,7 +10,6 @@ This file provides guidance to Claude Code when working with the realvirtual WEB
 - **Runtime:** Three.js + TypeScript
 - **HMI:** React 19 + MUI 7
 - **Build:** Vite 6
-- **Physics:** Rapier.js (WASM)
 - **Tests:** Vitest (browser-mode via Playwright provider) + Playwright E2E
 
 ## Quick Start
@@ -113,6 +112,7 @@ public/models/                   # GLB model files
 - **Live signals always override local behavior:** Immediately, per-component, no blending.
 - **GLB as single source of truth:** All component config is in `rv_extras` inside the GLB. No separate signal map files.
 - **Standalone simulation uses accumulator pattern:** Fixed-timestep equivalent to Unity FixedUpdate.
+- **Events & hooks for loose coupling:** Plugins, HMI components and engine systems communicate through the typed `ViewerEvents` bus (`viewer.on / viewer.emit`) and plugin-lifecycle hooks (`onModelLoaded`, `onModelCleared`, `onRender`, …) wherever possible. Direct cross-plugin imports / module-level coupling are kept for stable, performance-critical APIs only. Prefer registry patterns (`componentActionRegistry`, `fieldRendererRegistry`) and `viewer.on('layout-transform-update', …)`-style subscriptions over hard wiring; that's what lets plugins like `gaussian-splat-plugin` stay in step with `layout-planner` mutations without either side knowing about the other. When a new cross-cutting concern shows up, ask first whether a typed event or a tiny registry can carry it before reaching for a shared service singleton.
 
 ## Testing
 
@@ -169,10 +169,12 @@ The recommended MCP server is [realvirtual-MCP](https://github.com/game4automati
 | File | Contents |
 |------|----------|
 | `doc-webviewer.md` | Full architecture, component reference, configuration |
+| `doc-lifecycle.md` | Runtime lifecycle: model load, fixed-step loop, pause, reset, dispose, events |
 | `doc-extending-webviewer.md` | Plugin system, custom components, UI slots, hooks |
 | `doc-multiuser-system.md` | Multiuser sessions, relay server, shared views |
 | `doc-web-debugging.md` | Debugging tools and workflow |
 | `doc-webviewer-interface.md` | Industrial interfaces (WebSocket Realtime, ctrlX, MQTT) — protocol, signal flow, new-interface guide |
+| `doc-persistence.md` | Persistence architecture: Scene model, ops log, drafts, localStorage / sessionStorage / IndexedDB layout |
 | `webviewer.mcp.md` | MCP tools reference (imported at runtime) |
 
 ## Git Repository

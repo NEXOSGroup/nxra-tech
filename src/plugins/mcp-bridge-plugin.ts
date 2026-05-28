@@ -413,6 +413,53 @@ export class McpBridgePlugin extends RVBehavior {
     return JSON.stringify({ name, jogForward: dir, jogBackward: !dir });
   }
 
+  @McpTool('Play / pause the WebViewer simulation (toggles or sets the user pause reason)')
+  async webSimPlayPause(
+    @McpParam('paused', 'true to pause, false to play; omit to toggle', 'boolean', false) paused: boolean,
+  ): Promise<string> {
+    if (!this.viewer) return JSON.stringify({ error: 'No viewer' });
+    const userPaused = this.viewer.simulationPauseReasons.includes('user');
+    const next = paused === undefined || paused === null ? !userPaused : paused;
+    this.viewer.setSimulationPaused('user', next);
+    return JSON.stringify({
+      paused: this.viewer.isSimulationPaused,
+      userPaused: next,
+      reasons: [...this.viewer.simulationPauseReasons],
+    });
+  }
+
+  @McpTool('Show or hide the always-visible floor markers (ring + label) under each Source. Persists in localStorage.')
+  async webSetSourceMarkers(
+    @McpParam('visible', 'true to show, false to hide', 'boolean', true) visible: boolean,
+  ): Promise<string> {
+    if (!this.viewer) return JSON.stringify({ error: 'No viewer' });
+    this.viewer.setSourceMarkersVisible(visible);
+    const sources = this.transportManager?.sources ?? [];
+    return JSON.stringify({
+      ok: true,
+      visible,
+      affectedSources: sources.length,
+    });
+  }
+
+  @McpTool('Reset the WebViewer simulation: clear MUs + LogicSteps (drives and signals are untouched)')
+  async webSimReset(): Promise<string> {
+    if (!this.viewer) return JSON.stringify({ error: 'No viewer' });
+    const before = {
+      mus: this.transportManager?.mus.length ?? 0,
+      totalSpawned: this.transportManager?.totalSpawned ?? 0,
+    };
+    this.viewer.resetSimulation();
+    return JSON.stringify({
+      ok: true,
+      before,
+      after: {
+        mus: this.transportManager?.mus.length ?? 0,
+        totalSpawned: this.transportManager?.totalSpawned ?? 0,
+      },
+    });
+  }
+
   @McpTool('Stop a drive (clear jog flags and stop motion)')
   async webDriveStop(
     @McpParam('name', 'Drive name') name: string,

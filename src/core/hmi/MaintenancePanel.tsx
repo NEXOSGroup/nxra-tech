@@ -43,13 +43,14 @@ import { useViewer } from '../../hooks/use-viewer';
 import { useMaintenanceMode } from '../../hooks/use-maintenance-mode';
 import type { MaintenancePluginAPI } from '../types/plugin-types';
 import type { MaintenanceStep } from '../maintenance-parser';
+import { ISA_GREEN, ISA_AMBER, ISA_RED } from './isa-colors';
 
 // ─── ISA-101 Colors ──────────────────────────────────────────────────────
 
-const COLOR_DONE    = '#66bb6a';
-const COLOR_ACTIVE  = '#ffa726';
+const COLOR_DONE    = ISA_GREEN;
+const COLOR_ACTIVE  = ISA_AMBER;
 const COLOR_PENDING = 'rgba(255,255,255,0.3)';
-const COLOR_WARNING = '#ef5350';
+const COLOR_WARNING = ISA_RED;
 
 // ─── Helper: Get plugin instance ────────────────────────────────────────
 

@@ -8,8 +8,10 @@
  * is kept stable to avoid re-subscriptions on every render.
  *
  * Usage:
- *   useSimulationEvent('sensor-changed', (data) => {
- *     console.log(data.sensorPath, data.occupied);
+ *   useSimulationEvent('component-event', (e) => {
+ *     if (e.componentType === 'sensor' && e.kind === 'changed') {
+ *       console.log(e.path, e.payload);
+ *     }
  *   });
  */
 

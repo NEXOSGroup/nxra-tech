@@ -44,7 +44,6 @@ describe('rv-app-config', () => {
     expect(config.visual?.antialias).toBe(false);
     expect(config.interface?.wsPort).toBe(8080);
     // Unset fields must be undefined
-    expect(config.physics).toBeUndefined();
     expect(config.search).toBeUndefined();
   });
 
@@ -93,15 +92,15 @@ describe('rv-app-config', () => {
   it('should lock all tabs when lockSettings is true', () => {
     setAppConfig({ lockSettings: true });
     expect(isTabLocked('visual')).toBe(true);
-    expect(isTabLocked('physics')).toBe(true);
+    expect(isTabLocked('devtools')).toBe(true);
     expect(isTabLocked('interfaces')).toBe(true);
     expect(isTabLocked('model')).toBe(true);
   });
 
   it('should lock only specified tabs via lockedTabs', () => {
-    setAppConfig({ lockedTabs: ['interfaces', 'physics'] });
+    setAppConfig({ lockedTabs: ['interfaces', 'devtools'] });
     expect(isTabLocked('interfaces')).toBe(true);
-    expect(isTabLocked('physics')).toBe(true);
+    expect(isTabLocked('devtools')).toBe(true);
     expect(isTabLocked('visual')).toBe(false);
     expect(isTabLocked('model')).toBe(false);
   });

@@ -8,8 +8,11 @@ import { useViewer } from '../../../hooks/use-viewer';
 import { isSettingsLocked } from '../../rv-app-config';
 import {
   loadVisualSettings, saveVisualSettings, setUIZoom,
+  useSourceMarkersVisible,
+  useToolbarShowLabels, setToolbarShowLabels,
   LIGHTING_MODES, TONE_MAPPING_OPTIONS, SHADOW_QUALITY_OPTIONS,
   type VisualSettings, type LightingMode, type ToneMappingType, type ShadowQuality, type ProjectionType,
+  type AOMode,
 } from '../visual-settings-store';
 
 export function VisualTab() {
@@ -35,7 +38,7 @@ export function VisualTab() {
   const [shadowMapSize, setShadowMapSize] = useState<number>(settingsRef.current.shadowMapSize);
   const [shadowRadiusVal, setShadowRadiusVal] = useState<number>(settingsRef.current.shadowRadius);
   const [maxDpr, setMaxDpr] = useState<number>(settingsRef.current.maxDpr);
-  const [ssaoOn, setSsaoOn] = useState<boolean>(settingsRef.current.ssaoEnabled);
+  const [aoMode, setAoMode] = useState<AOMode>(settingsRef.current.aoMode);
   const [ssaoInt, setSsaoInt] = useState<number>(settingsRef.current.ssaoIntensity);
   const [ssaoRad, setSsaoRad] = useState<number>(settingsRef.current.ssaoRadius);
   const [bloomOn, setBloomOn] = useState<boolean>(settingsRef.current.bloomEnabled);
@@ -43,7 +46,13 @@ export function VisualTab() {
   const [bloomThresh, setBloomThresh] = useState<number>(settingsRef.current.bloomThreshold);
   const [bloomRad, setBloomRad] = useState<number>(settingsRef.current.bloomRadius);
   const [uiZoom, setUiZoom] = useState<number>(settingsRef.current.uiZoom);
+  const sourceMarkersVisible = useSourceMarkersVisible();
+  const toolbarShowLabels = useToolbarShowLabels();
   const settingsLocked = isSettingsLocked();
+
+  const updateSourceMarkersVisible = (_: unknown, v: boolean): void => {
+    viewer.setSourceMarkersVisible(v);
+  };
 
   const persist = (patch: Partial<VisualSettings>) => {
     Object.assign(settingsRef.current, patch);
@@ -147,9 +156,22 @@ export function VisualTab() {
     persist({ maxDpr: val });
   };
 
-  const updateSsao = (_: unknown, v: boolean) => {
-    viewer.ssaoEnabled = v; setSsaoOn(v);
-    persist({ ssaoEnabled: v });
+  const updateAoMode = (next: AOMode) => {
+    viewer.aoMode = next;
+    setAoMode(next);
+    persist({ aoMode: next });
+    // If the viewer refused the N8AO switch (lazy-load failure), it will have
+    // reverted its own aoMode to 'gtao'. Give it a tick to settle, then
+    // reconcile local state so the dropdown reflects reality.
+    if (next === 'n8ao') {
+      setTimeout(() => {
+        const actual = viewer.aoMode;
+        if (actual !== next) {
+          setAoMode(actual);
+          persist({ aoMode: actual });
+        }
+      }, 250);
+    }
   };
   const updateSsaoInt = (_: unknown, v: number | number[]) => {
     const val = v as number; viewer.ssaoIntensity = val; setSsaoInt(val);
@@ -209,6 +231,37 @@ export function VisualTab() {
         </ToggleButtonGroup>
       </Box>
 
+      {/* Source markers (plan-181) — floor ring + label under each Source */}
+      <Box>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Typography variant="body2" sx={{ color: 'text.primary' }}>Show source markers</Typography>
+          <Switch
+            size="small"
+            checked={sourceMarkersVisible}
+            onChange={updateSourceMarkersVisible}
+            disabled={settingsLocked}
+          />
+        </Box>
+        <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mt: 0.25, fontSize: 11 }}>
+          Floor ring + label under each source to identify spawn locations.
+        </Typography>
+      </Box>
+
+      {/* Toolbar button labels — show text next to icons in top-left toolbar */}
+      <Box>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Typography variant="body2" sx={{ color: 'text.primary' }}>Toolbar button labels</Typography>
+          <Switch
+            size="small"
+            checked={toolbarShowLabels}
+            onChange={(_, v) => setToolbarShowLabels(v)}
+          />
+        </Box>
+        <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mt: 0.25, fontSize: 11 }}>
+          Show text labels next to icons for window-opening buttons in the top-left toolbar. Always collapsed on mobile.
+        </Typography>
+      </Box>
+
       {/* Antialiasing */}
       <Box>
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -233,14 +286,23 @@ export function VisualTab() {
         )}
       </Box>
 
-      {/* Ambient Occlusion (SSAO) */}
+      {/* Ambient Occlusion (Off / GTAO / N8AO) */}
       {!viewer.isWebGPU && (
         <Box>
-          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Typography variant="body2" sx={{ color: 'text.primary' }}>Ambient Occlusion</Typography>
-            <Switch size="small" checked={ssaoOn} onChange={updateSsao} />
+          <Typography variant="body2" sx={{ color: 'text.primary' }}>Ambient Occlusion</Typography>
+          <Box sx={{ mt: 0.75 }}>
+            <Select
+              size="small"
+              fullWidth
+              value={aoMode}
+              onChange={(e) => updateAoMode(e.target.value as AOMode)}
+            >
+              <MenuItem value="off">Off</MenuItem>
+              <MenuItem value="gtao">GTAO · Built-in (faster)</MenuItem>
+              <MenuItem value="n8ao">N8AO · High quality</MenuItem>
+            </Select>
           </Box>
-          {ssaoOn && (
+          {aoMode !== 'off' && (
             <>
               <Box sx={{ mt: 1 }}>
                 <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>

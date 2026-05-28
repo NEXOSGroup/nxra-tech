@@ -462,6 +462,7 @@ export default defineConfig({
     thumbnailSavePlugin(),
   ].filter(Boolean),
   resolve: {
+    dedupe: ['three'],
     alias: {
       '@rv': resolve(__dirname, 'src'),
       '@rv-private': HAS_PRIVATE
@@ -484,6 +485,7 @@ export default defineConfig({
     __RV_COMMERCIAL__: JSON.stringify(!!process.env.RV_COMMERCIAL),
   },
   server: {
+    host: true,
     open: true,
     https: !!process.env.HTTPS,
     // Allow Tailscale MagicDNS hostnames (*.ts.net) when testing via `tailscale serve`.
@@ -491,6 +493,15 @@ export default defineConfig({
     allowedHosts: ['.ts.net'],
     headers: {
       'Cache-Control': 'no-store',
+    },
+    proxy: {
+      // Proxy Unity Asset Manager API to avoid CORS restrictions
+      '/unity-api': {
+        target: 'https://services.api.unity.com',
+        changeOrigin: true,
+        rewrite: (path: string) => path.replace(/^\/unity-api/, ''),
+        secure: true,
+      },
     },
     watch: {
       usePolling: true,
@@ -507,18 +518,20 @@ export default defineConfig({
         manualChunks: {
           three: ['three'],
           echarts: ['echarts'],
-          rapier: ['@dimforge/rapier3d-compat'],
           'react-pdf': ['react-pdf', 'pdfjs-dist'],
+          'gaussian-splat': ['@mkkellogg/gaussian-splats-3d'],
         },
       },
     },
   },
   test: {
     include: ['tests/**/*.test.{ts,tsx}'],
+    exclude: ['tests/**/*.node.test.ts'],
     browser: {
       enabled: true,
       provider: playwright(),
       instances: [{ browser: 'chromium' }],
+      api: { port: 5177 },
     },
   },
 });

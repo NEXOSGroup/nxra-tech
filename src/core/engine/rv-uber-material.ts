@@ -32,6 +32,7 @@ import {
   FrontSide,
 } from 'three';
 import { debug } from './rv-debug';
+import { traverseMeshes } from './rv-traverse-utils';
 
 /**
  * Shared uber-material. A single instance serves every uber-eligible mesh in
@@ -285,9 +286,7 @@ export function applyUberMaterial(
   // with many shared geometries (e.g. 40k meshes → ~24k unique geometries
   // on the Mauser scene).
   const geometryUsage = new Map<BufferGeometry, Set<Material>>();
-  root.traverse((node) => {
-    if (!(node as Mesh).isMesh) return;
-    const mesh = node as Mesh;
+  traverseMeshes(root, (mesh) => {
     if (Array.isArray(mesh.material)) return;
     const mat = mesh.material;
     if (!mat || !eligible.has(mat)) return;
@@ -299,10 +298,7 @@ export function applyUberMaterial(
     users.add(mat);
   });
 
-  root.traverse((node) => {
-    if (!(node as Mesh).isMesh) return;
-    const mesh = node as Mesh;
-
+  traverseMeshes(root, (mesh) => {
     // Skip multi-material meshes — baking per-submesh would require splitting
     // the geometry by groups and is out of scope for Phase 2. They continue to
     // use the deduped (but not uber-collapsed) materials.
@@ -363,9 +359,9 @@ export function applyUberMaterial(
   // On a typical scene this reclaims tens of megabytes of typed-array
   // vertex data that GLTFLoader uploaded but nothing renders anymore.
   const stillReferenced = new Set<BufferGeometry>();
-  root.traverse((node) => {
-    if ((node as Mesh).isMesh && (node as Mesh).geometry) {
-      stillReferenced.add((node as Mesh).geometry);
+  traverseMeshes(root, (mesh) => {
+    if (mesh.geometry) {
+      stillReferenced.add(mesh.geometry);
     }
   });
   let disposedSources = 0;

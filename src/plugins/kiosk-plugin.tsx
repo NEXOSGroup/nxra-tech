@@ -66,6 +66,7 @@ import { OeeChart } from './demo/OeeChart';
 import { PartsChart } from './demo/PartsChart';
 import { CycleTimeChart } from './demo/CycleTimeChart';
 import { EnergyChart } from './demo/EnergyChart';
+import { createStore, type Store } from '../core/hmi/create-store';
 
 // ─── Chart state store (module-level pub/sub) ───────────────────────────
 
@@ -147,8 +148,7 @@ export class KioskPlugin implements RVViewerPlugin {
   private _idleDetector: IdleDetector | null = null;
   private _welcomeModalUnsub: (() => void) | null = null;
   private _cycleCount = 0;
-  private _listeners = new Set<() => void>();
-  private _snapshot: KioskSnapshot = { hasTour: false, hasCurrentModelTour: false, isActive: false, tourName: null };
+  private _store: Store<KioskSnapshot> = createStore<KioskSnapshot>({ hasTour: false, hasCurrentModelTour: false, isActive: false, tourName: null });
   private _exitKeydownHandler: ((e: KeyboardEvent) => void) | null = null;
   private _exitPointerHandler: ((e: PointerEvent) => void) | null = null;
   private _kioskExitListener: (() => void) | null = null;
@@ -236,7 +236,10 @@ export class KioskPlugin implements RVViewerPlugin {
     this._kioskExitListener = null;
     this._removeExitInteractionListeners();
     this._registeredTours.clear();
-    this._listeners.clear();
+    // Note: createStore-backed _store retains its listeners by design (no
+    // clear-listeners API). After dispose(), no further _notify() calls are
+    // made, so listeners are effectively dormant. They will be GC'd when the
+    // plugin instance becomes unreachable.
     this._viewer = null;
     if (_pluginInstance === this) _registerPluginInstance(null);
   }
@@ -375,12 +378,11 @@ export class KioskPlugin implements RVViewerPlugin {
 
   /** Pub/sub subscribe (for DemoButton). @internal */
   subscribe(listener: () => void): () => void {
-    this._listeners.add(listener);
-    return () => { this._listeners.delete(listener); };
+    return this._store.subscribe(listener);
   }
 
   /** Pub/sub snapshot (for DemoButton). @internal */
-  getSnapshot(): KioskSnapshot { return this._snapshot; }
+  getSnapshot(): KioskSnapshot { return this._store.getSnapshot(); }
 
   // ─── Private helpers ─────────────────────────────────────────────
 
@@ -439,15 +441,14 @@ export class KioskPlugin implements RVViewerPlugin {
 
   private _notify(): void {
     const currentTourFn = this._resolveCurrentTour();
-    this._snapshot = {
+    this._store.set({
       // ANY tour registered (for ANY model) — Welcome-modal button shows even before model-load
       hasTour: this._registeredTours.size > 0,
       // Tour for the CURRENTLY loaded model — used by DemoButton in toolbar
       hasCurrentModelTour: currentTourFn !== null,
       isActive: this.isActive,
       tourName: this._currentModelName,
-    };
-    for (const l of this._listeners) { try { l(); } catch (e) { console.error(e); } }
+    });
     // Also notify global subscribers (React hooks that subscribed before the
     // KioskPlugin instance existed — e.g. WelcomeModal mounted first).
     _notifyGlobalListeners();

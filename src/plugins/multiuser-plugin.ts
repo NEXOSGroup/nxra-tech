@@ -412,6 +412,9 @@ export class MultiuserPlugin extends RVBehavior {
   }
 
   protected onFrame(frameDt: number): void {
+    // Re-bind to the live active camera each frame so avatar LOD stays
+    // correct after a perspective ↔ orthographic swap.
+    if (this._avatarManager && this.viewer) this._avatarManager.setCamera(this.viewer.camera);
     this._avatarManager?.lerpAvatars(frameDt);
 
     // Shared view auto-unfollow: if no avatar_broadcast from operator for 5s

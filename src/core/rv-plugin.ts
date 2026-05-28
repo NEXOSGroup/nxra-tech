@@ -16,6 +16,7 @@
 import type { LoadResult } from './engine/rv-scene-loader';
 import type { RVViewer } from './rv-viewer';
 import type { UISlotEntry } from './rv-ui-plugin';
+import type { PluginContext } from './rv-plugin-context';
 
 export interface RVViewerPlugin {
   /** Unique plugin ID (e.g. 'drive-recorder', 'sensor-monitor'). */
@@ -36,6 +37,19 @@ export interface RVViewerPlugin {
 
   /** UI slot entries this plugin provides (KPI cards, buttons, messages, etc.). */
   readonly slots?: UISlotEntry[];
+
+  /**
+   * Called once when the plugin is registered via `viewer.use(plugin)`.
+   *
+   * Both `viewer` and `context` are passed. New plugins should prefer `context`
+   * (a narrow capability bundle) over the full `viewer` pointer — see plan-182.
+   *
+   * Note: `context` is optional in the signature for backward compatibility, but
+   * Phase 4 of plan-182 guarantees that it is always provided when the plugin is
+   * loaded via `viewer.use()`. Plugins running against older viewer versions
+   * (pre-Phase-4) won't receive a context — guard with `if (context)` if needed.
+   */
+  init?(viewer: RVViewer, context?: PluginContext): void;
 
   // ── Lifecycle Callbacks ──
 

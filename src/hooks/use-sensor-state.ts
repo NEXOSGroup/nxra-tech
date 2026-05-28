@@ -4,8 +4,8 @@
 /**
  * React hook for event-based sensor state (no polling).
  *
- * Subscribes to 'sensor-changed' events and returns the occupied state
- * for a specific sensor path.
+ * Subscribes to the generic `component-event` (componentType: 'sensor',
+ * kind: 'changed') and returns the occupied state for a specific sensor path.
  *
  * Usage:
  *   const occupied = useSensorState('DemoCell/EntrySensor');
@@ -20,8 +20,11 @@ export function useSensorState(sensorPath: string): boolean {
   const [occupied, setOccupied] = useState(false);
 
   useEffect(() => {
-    return viewer.on('sensor-changed', (data) => {
-      if (data.sensorPath === sensorPath) setOccupied(data.occupied);
+    return viewer.on('component-event', (e) => {
+      if (e.componentType !== 'sensor' || e.kind !== 'changed') return;
+      if (e.path !== sensorPath) return;
+      const occupiedVal = (e.payload as { occupied: boolean } | undefined)?.occupied;
+      if (typeof occupiedVal === 'boolean') setOccupied(occupiedVal);
     });
   }, [viewer, sensorPath]);
 

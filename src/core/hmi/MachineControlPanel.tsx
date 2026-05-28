@@ -24,14 +24,15 @@ import { useMachineControl } from '../../hooks/use-machine-control';
 import { LeftPanel } from './LeftPanel';
 import { MACHINE_PANEL_WIDTH } from './layout-constants';
 import type { MachineControlPluginAPI, MachineState, MachineMode, MachineComponent, ComponentStatus } from '../types/plugin-types';
+import { ISA_GREEN, ISA_AMBER, ISA_RED } from './isa-colors';
 
 // ─── ISA-101 Inspired Colors ─────────────────────────────────────────────
 
 const C = {
-  green:   '#66bb6a',
+  green:   ISA_GREEN,
   blue:    '#42a5f5',
-  orange:  '#ffa726',
-  red:     '#ef5350',
+  orange:  ISA_AMBER,
+  red:     ISA_RED,
   cyan:    '#4fc3f7',
   dimWhite: 'rgba(255,255,255,0.5)',
   faintWhite: 'rgba(255,255,255,0.25)',

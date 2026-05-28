@@ -37,6 +37,10 @@ import {
   type Material,
   type Texture,
 } from 'three';
+import { GizmoMaterialCache } from './rv-gizmo-material-cache';
+import { computeSubtreeAABB, traverseMeshesWithDepth } from './rv-traverse-utils';
+import { ISOLATE_FOCUS_LAYER, HIGHLIGHT_OVERLAY_LAYER } from './rv-group-registry';
+import { NO_AO_LAYER } from './rv-constants';
 
 // ─── Public Types ─────────────────────────────────────────────────────
 
@@ -101,6 +105,48 @@ export interface GizmoOptions {
   /** For shape='sphere-glow-hull' only — multiplier for the outer hull radius
    *  relative to the inner sphere. 1.2 = subtle glow, 2.0 = thick halo. Default 1.4. */
   outlineScale?: number;
+  /** For shape='sprite' only — custom texture (e.g. a CanvasTexture with an
+   *  icon). Overrides the default white-circle bitmap. The texture is NOT
+   *  disposed by GizmoOverlayManager (it may be shared) — owner manages
+   *  its lifetime. */
+  spriteTexture?: Texture;
+  /** Fixed world-meter size that overrides AABB-relative sizing. Required for
+   *  sprite gizmos attached to dimensionless Empty/anchor nodes (whose
+   *  `cachedSize` is 0). Applied as `sprite.scale.setScalar(worldSize)`. */
+  worldSize?: number;
+  /** When true, the gizmo root is parented under `node` instead of the scene
+   *  root. The gizmo then inherits the node's world transform, so moving the
+   *  owner moves the gizmo. Default false (legacy: gizmo is positioned once
+   *  at the node's world center and stays there). */
+  attachToNode?: boolean;
+  /** When true, the gizmo is NOT registered as an auxiliary raycast target.
+   *  Default false — gizmos auto-register so that hover/click on the gizmo
+   *  resolves to the owner node. Use this for markers that must not steal
+   *  hover from the underlying scene (e.g. snap-point indicators). */
+  excludeFromRaycast?: boolean;
+  /** When set, the gizmo's root mesh gets `userData[userDataMarker] = true`
+   *  after construction. Lets click/raycast listeners identify gizmos they
+   *  own without keeping a separate id map. The marker is also set on every
+   *  overlay mesh for shapes with per-descendant overlays. */
+  userDataMarker?: string;
+  /** Override the auxiliary raycast owner. By default the owner is `node`
+   *  (the gizmo's attachment node), so a hit on the gizmo resolves to it.
+   *  Some scenarios need a DIFFERENT owner — e.g. a sprite anchored to a
+   *  snap-point empty inside a placed component, where the planner's
+   *  allow-filter rejects the snap-empty (no `_layoutId`) but accepts the
+   *  placed root. Pass the placed root here so the hit resolution passes
+   *  the filter and the click event reports the right node. */
+  auxOwner?: Object3D;
+  /** Keep this gizmo INSIDE the EffectComposer's main pass instead of moving it
+   *  to the on-top overlay layer.
+   *
+   *  By default a gizmo is tagged onto HIGHLIGHT_OVERLAY_LAYER so it is excluded
+   *  from the GTAO/N8AO depth pass (no SSAO halos) and re-rendered on top after
+   *  the composer. Set this true when the gizmo must stay in the composer —
+   *  e.g. it needs UnrealBloom glow (auto-true when `emissiveIntensity > 0`) or
+   *  it must be occluded by closer scene geometry. Such gizmos render with the
+   *  scene and therefore still contribute to SSAO. */
+  keepInComposer?: boolean;
 }
 
 /** Handle returned when a gizmo is created. */
@@ -149,20 +195,22 @@ interface GizmoEntry {
   cachedAABB: Box3;
   cachedSize: Vector3;
   cachedCenter: Vector3;
-}
-
-interface MaterialMeta {
-  material: Material;
-  /** Cache-key so we can find it. */
-  key: string;
-  /** Base opacity shared by all entries that use this material. */
-  baseOpacity: number;
-  /** Blink frequency (Hz). 0 = no blink. */
-  blinkHz: number;
-  /** Last phase written ('on' | 'off' | 'static'). */
-  lastPhase: 'on' | 'off' | 'static';
-  /** Reference count — material evicted from cache when refCount → 0. */
-  refCount: number;
+  /** Optional caller-supplied sprite texture (kept for dispose semantics: NOT
+   *  owned by the manager). */
+  spriteTextureExternal?: Texture;
+  /** Fixed world-meter size override (sprites attached to Empty nodes). */
+  worldSize?: number;
+  /** Whether the root was parented under `node` instead of the scene root. */
+  attachToNode: boolean;
+  /** Whether auto-raycast registration was skipped. */
+  excludeFromRaycast: boolean;
+  /** Optional `userData` flag name set on the gizmo's mesh(es) after build. */
+  userDataMarker?: string;
+  /** Optional override for the auxiliary raycast owner. Defaults to `node`. */
+  auxOwner?: Object3D;
+  /** When true the gizmo stays in the composer (bloom / depth-occlusion) and is
+   *  NOT moved to the overlay layer. Auto-true for emissive (bloom) gizmos. */
+  keepInComposer: boolean;
 }
 
 // ─── Shared geometry cache ─────────────────────────────────────────────
@@ -200,33 +248,6 @@ const BLINK_LOW_MULT = 0.3;
 const MAX_OVERLAY_DEPTH = 5;
 
 // ─── Helpers ───────────────────────────────────────────────────────────
-
-/** Compute AABB from all isMesh descendants (filters out Lights, Cameras, Groups). */
-function computeSubtreeAABB(node: Object3D): { box: Box3; size: Vector3; center: Vector3 } {
-  const box = new Box3();
-  let hasAny = false;
-  node.traverse((child) => {
-    const asMesh = child as Mesh;
-    if (asMesh.isMesh && asMesh.geometry) {
-      box.expandByObject(asMesh);
-      hasAny = true;
-    }
-  });
-  if (!hasAny) {
-    // Fallback: use node world position as center with minimal size
-    const pos = new Vector3();
-    node.getWorldPosition(pos);
-    box.setFromCenterAndSize(pos, new Vector3(0.1, 0.1, 0.1));
-  }
-  const size = new Vector3();
-  box.getSize(size);
-  if (size.x < 0.001) size.x = 0.001;
-  if (size.y < 0.001) size.y = 0.001;
-  if (size.z < 0.001) size.z = 0.001;
-  const center = new Vector3();
-  box.getCenter(center);
-  return { box, size, center };
-}
 
 /** Create/render a text sprite with a stroked text glyph (no background panel). */
 function makeTextCanvas(text: string, color: number): HTMLCanvasElement {
@@ -268,7 +289,10 @@ function makeTextCanvas(text: string, color: number): HTMLCanvasElement {
 
 export class GizmoOverlayManager {
   private _entries = new Map<string, GizmoEntry>();
-  private _materialCache = new Map<string, MaterialMeta>();
+  /** Shared material cache (refcounted) + blink-tracking entries.
+   *  Tests reach into this field via `(mgr as any)._cache.size` — keep the
+   *  public surface (`size`, `values()`) stable. */
+  private _cache = new GizmoMaterialCache();
   private _nodeToIds = new Map<Object3D, Set<string>>();
   private _idCounter = 0;
   private _globalVisible = true;
@@ -313,6 +337,7 @@ export class GizmoOverlayManager {
     if (!rm) return;
     for (const entry of this._entries.values()) {
       if (entry.shape === 'box') continue;
+      if (entry.excludeFromRaycast) continue;
       if (entry.overlayMeshes.length > 0) {
         for (const m of entry.overlayMeshes) rm.addAuxRaycastTarget(m, entry.node);
       } else {
@@ -354,10 +379,26 @@ export class GizmoOverlayManager {
       textAnchor: opts.textAnchor,
       radius: opts.radius,
       emissiveIntensity: Math.max(0, opts.emissiveIntensity ?? 0),
+      // Bloom gizmos need UnrealBloom (inside the composer) to glow → they can't
+      // be moved to the post-composer overlay layer without losing the look.
+      // Detected from: explicit opt, a non-zero initial emissive, OR a glow-hull
+      // shape (these toggle emissive on/off over their lifetime — e.g. WebSensor
+      // states — so they must stay composer-resident even while emissive is 0).
+      keepInComposer:
+        opts.keepInComposer === true ||
+        (opts.emissiveIntensity ?? 0) > 0 ||
+        effectiveShape === 'mesh-glow-hull' ||
+        effectiveShape === 'sphere-glow-hull',
       outlineScale: Math.max(1.01, opts.outlineScale ?? 1.4),
       cachedAABB: box,
       cachedSize: subSize,
       cachedCenter: center,
+      spriteTextureExternal: opts.spriteTexture,
+      worldSize: opts.worldSize,
+      attachToNode: opts.attachToNode === true,
+      excludeFromRaycast: opts.excludeFromRaycast === true,
+      userDataMarker: opts.userDataMarker,
+      auxOwner: opts.auxOwner,
     };
 
     this._buildShape(entry);
@@ -442,7 +483,7 @@ export class GizmoOverlayManager {
   tick(_elapsedMs: number): void {
     if (this._entries.size === 0) return;
     const t = performance.now();
-    for (const meta of this._materialCache.values()) {
+    for (const meta of this._cache.values()) {
       if (meta.blinkHz <= 0) continue;
       const phase = Math.sin(2 * Math.PI * meta.blinkHz * t / 1000) > 0 ? 'on' : 'off';
       if (phase === meta.lastPhase) continue;
@@ -460,7 +501,7 @@ export class GizmoOverlayManager {
     }
     this._entries.clear();
     this._nodeToIds.clear();
-    this._materialCache.clear();
+    this._cache.clear();
   }
 
   // ─── Shape factories ────────────────────────────────────────────────
@@ -505,20 +546,47 @@ export class GizmoOverlayManager {
     entry.root.userData._rvGizmo = true;
     entry.root.userData._rvGizmoId = entry.id;
     entry.root.renderOrder = entry.renderOrder;
-    // Always render crisp during isolate mode: enable ISOLATE_FOCUS_LAYER so the
-    // gizmo participates in pass 3 (focus pass) and overdraws the dimmed copy
-    // from pass 1. No effect in normal mode (still on layer 0).
-    entry.root.traverse((o) => o.layers.enable(2 /* ISOLATE_FOCUS_LAYER */));
+    // Optional caller-supplied identification marker. Set on the gizmo root
+    // and every per-descendant overlay so click/raycast listeners can match
+    // their own gizmos via `node.userData[marker]`.
+    if (entry.userDataMarker) {
+      entry.root.userData[entry.userDataMarker] = true;
+      for (const ov of entry.overlayMeshes) ov.userData[entry.userDataMarker] = true;
+    }
+    // Layer assignment controls how the gizmo interacts with SSAO. GTAOPass
+    // builds its own depth+normal gbuffer with an override material, so a
+    // gizmo's `depthWrite:false` does NOT keep it out of SSAO — only the
+    // camera layer mask does (see OVERLAY_LAYERS in rv-group-registry).
+    if (entry.keepInComposer) {
+      // Bloom / depth-occlusion gizmos stay in the composer's main RenderPass so
+      // they keep UnrealBloom and depth-occlusion. Put them on NO_AO_LAYER (the
+      // real camera renders that layer; the AO clone camera excludes it) so they
+      // no longer cast SSAO halos — fixes WebSensor glow + snap-chain preview.
+      // Also enable ISOLATE_FOCUS_LAYER so they render crisp in isolate pass 3.
+      entry.root.traverse((o) => {
+        o.layers.set(NO_AO_LAYER);
+        o.layers.enable(ISOLATE_FOCUS_LAYER);
+      });
+    } else {
+      // Default: move the gizmo onto the on-top overlay layer so it is pulled
+      // OUT of the GTAO/N8AO pass (no SSAO halos) and re-rendered above the
+      // composer output (rv-viewer `_renderOverlayLayers` / isolate pass 4).
+      // `set` removes layer 0 — the gizmo renders ONLY in the overlay pass,
+      // which is exactly how highlights and the planner FloorGizmo behave.
+      entry.root.traverse((o) => o.layers.set(HIGHLIGHT_OVERLAY_LAYER));
+    }
 
     // Auto-register as auxiliary raycast targets so hover/click on the gizmo
     // resolves to the underlying owner node — works for sphere, transparent-shell,
     // sprite, text, floor-disk, mesh-overlay (per-mesh). Skipped for box
-    // (wireframe is hard to hit anyway).
-    if (this.raycastManager && entry.shape !== 'box') {
+    // (wireframe is hard to hit anyway) and for entries opting out via
+    // `excludeFromRaycast` (e.g. snap-point markers that must not steal hover).
+    if (this.raycastManager && entry.shape !== 'box' && !entry.excludeFromRaycast) {
+      const owner = entry.auxOwner ?? entry.node;
       if (entry.overlayMeshes.length > 0) {
-        for (const m of entry.overlayMeshes) this.raycastManager.addAuxRaycastTarget(m, entry.node);
+        for (const m of entry.overlayMeshes) this.raycastManager.addAuxRaycastTarget(m, owner);
       } else {
-        this.raycastManager.addAuxRaycastTarget(entry.root, entry.node);
+        this.raycastManager.addAuxRaycastTarget(entry.root, owner);
       }
     }
   }
@@ -526,12 +594,31 @@ export class GizmoOverlayManager {
   private _buildBox(entry: GizmoEntry): void {
     const mat = this._getOrCreateLineMaterial(entry);
     const lines = new LineSegments(getEdgesGeometry(), mat);
-    lines.position.copy(entry.cachedCenter);
-    lines.scale.copy(entry.cachedSize).multiplyScalar(entry.size);
     lines.renderOrder = entry.renderOrder;
+
+    if (entry.attachToNode) {
+      // Parent under the node so the box follows the asset's transform (e.g.
+      // a conveyor moved/rotated in the planner). cachedCenter/cachedSize are
+      // in WORLD space — convert into the node's local frame: position via
+      // worldToLocal, size divided by the node's world scale.
+      entry.node.updateWorldMatrix(true, false);
+      const localCenter = entry.node.worldToLocal(entry.cachedCenter.clone());
+      const ws = entry.node.getWorldScale(this._tmpV);
+      lines.position.copy(localCenter);
+      lines.scale.set(
+        (entry.cachedSize.x / (ws.x || 1)) * entry.size,
+        (entry.cachedSize.y / (ws.y || 1)) * entry.size,
+        (entry.cachedSize.z / (ws.z || 1)) * entry.size,
+      );
+      entry.node.add(lines);
+    } else {
+      lines.position.copy(entry.cachedCenter);
+      lines.scale.copy(entry.cachedSize).multiplyScalar(entry.size);
+      this.scene.add(lines);
+    }
+
     entry.root = lines;
     entry.material = mat;
-    this.scene.add(lines);
   }
 
   private _buildTransparentShell(entry: GizmoEntry): void {
@@ -548,40 +635,26 @@ export class GizmoOverlayManager {
   private _buildMeshOverlay(entry: GizmoEntry): void {
     const group = new Group();
     const mat = this._getOrCreateMeshMaterial(entry);
-    let depth = 0;
-    let overDepthWarned = false;
-    entry.node.traverse((child) => {
-      // Cheap depth gate (approximate)
-      depth = 0;
-      let cur: Object3D | null = child;
-      while (cur && cur !== entry.node) {
-        depth++;
-        cur = cur.parent;
-      }
-      if (depth > MAX_OVERLAY_DEPTH) {
-        if (!overDepthWarned) {
-          console.warn(`[GizmoOverlayManager] mesh-overlay exceeded depth ${MAX_OVERLAY_DEPTH}; skipping deeper meshes`);
-          overDepthWarned = true;
-        }
-        return;
-      }
-      const asMesh = child as Mesh;
-      if (!asMesh.isMesh || !asMesh.geometry) return;
-      if ((asMesh as { userData?: Record<string, unknown> }).userData?._rvGizmo) return;
-
-      const overlay = new Mesh(asMesh.geometry, mat);
-      overlay.userData._rvGizmoOverlay = true;
-      // Match world-transform of the source mesh
-      asMesh.updateWorldMatrix(true, false);
-      overlay.position.setFromMatrixPosition(asMesh.matrixWorld);
-      overlay.quaternion.setFromRotationMatrix(asMesh.matrixWorld);
-      const scl = new Vector3();
-      asMesh.matrixWorld.decompose(new Vector3(), overlay.quaternion, scl);
-      overlay.scale.copy(scl);
-      overlay.renderOrder = entry.renderOrder;
-      group.add(overlay);
-      entry.overlayMeshes.push(overlay);
-    });
+    traverseMeshesWithDepth(
+      entry.node,
+      MAX_OVERLAY_DEPTH,
+      (asMesh) => {
+        if ((asMesh as { userData?: Record<string, unknown> }).userData?._rvGizmo) return;
+        const overlay = new Mesh(asMesh.geometry, mat);
+        overlay.userData._rvGizmoOverlay = true;
+        // Match world-transform of the source mesh
+        asMesh.updateWorldMatrix(true, false);
+        overlay.position.setFromMatrixPosition(asMesh.matrixWorld);
+        overlay.quaternion.setFromRotationMatrix(asMesh.matrixWorld);
+        const scl = new Vector3();
+        asMesh.matrixWorld.decompose(new Vector3(), overlay.quaternion, scl);
+        overlay.scale.copy(scl);
+        overlay.renderOrder = entry.renderOrder;
+        group.add(overlay);
+        entry.overlayMeshes.push(overlay);
+      },
+      '[GizmoOverlayManager] mesh-overlay',
+    );
     entry.root = group;
     entry.material = mat;
     this.scene.add(group);
@@ -592,35 +665,26 @@ export class GizmoOverlayManager {
   private _buildMeshEdges(entry: GizmoEntry): void {
     const group = new Group();
     const lineMat = this._getOrCreateLineMaterial(entry);
-    let depth = 0;
-    let overDepthWarned = false;
-    entry.node.traverse((child) => {
-      depth = 0;
-      let cur: Object3D | null = child;
-      while (cur && cur !== entry.node) { depth++; cur = cur.parent; }
-      if (depth > MAX_OVERLAY_DEPTH) {
-        if (!overDepthWarned) {
-          console.warn(`[GizmoOverlayManager] mesh-edges exceeded depth ${MAX_OVERLAY_DEPTH}; skipping deeper meshes`);
-          overDepthWarned = true;
-        }
-        return;
-      }
-      const m = child as Mesh;
-      if (!m.isMesh || !m.geometry) return;
-      if (m.userData?._rvGizmo) return;
-      const edges = new EdgesGeometry(m.geometry);
-      const lines = new LineSegments(edges, lineMat);
-      m.updateWorldMatrix(true, false);
-      lines.position.setFromMatrixPosition(m.matrixWorld);
-      lines.quaternion.setFromRotationMatrix(m.matrixWorld);
-      const scl = new Vector3();
-      m.matrixWorld.decompose(new Vector3(), lines.quaternion, scl);
-      lines.scale.copy(scl);
-      lines.renderOrder = entry.renderOrder;
-      group.add(lines);
-      // Track for dispose; per-mesh EdgesGeometry NOT shared (geometry-specific)
-      entry.overlayMeshes.push(lines as unknown as Mesh);
-    });
+    traverseMeshesWithDepth(
+      entry.node,
+      MAX_OVERLAY_DEPTH,
+      (m) => {
+        if (m.userData?._rvGizmo) return;
+        const edges = new EdgesGeometry(m.geometry);
+        const lines = new LineSegments(edges, lineMat);
+        m.updateWorldMatrix(true, false);
+        lines.position.setFromMatrixPosition(m.matrixWorld);
+        lines.quaternion.setFromRotationMatrix(m.matrixWorld);
+        const scl = new Vector3();
+        m.matrixWorld.decompose(new Vector3(), lines.quaternion, scl);
+        lines.scale.copy(scl);
+        lines.renderOrder = entry.renderOrder;
+        group.add(lines);
+        // Track for dispose; per-mesh EdgesGeometry NOT shared (geometry-specific)
+        entry.overlayMeshes.push(lines as unknown as Mesh);
+      },
+      '[GizmoOverlayManager] mesh-edges',
+    );
     entry.root = group;
     entry.material = lineMat;
     this.scene.add(group);
@@ -654,37 +718,28 @@ export class GizmoOverlayManager {
       polygonOffsetFactor: 1,
       polygonOffsetUnits: 4,
     });
-    let depth = 0;
-    let overDepthWarned = false;
-    entry.node.traverse((child) => {
-      depth = 0;
-      let cur: Object3D | null = child;
-      while (cur && cur !== entry.node) { depth++; cur = cur.parent; }
-      if (depth > MAX_OVERLAY_DEPTH) {
-        if (!overDepthWarned) {
-          console.warn(`[GizmoOverlayManager] mesh-glow-hull exceeded depth ${MAX_OVERLAY_DEPTH}; skipping deeper meshes`);
-          overDepthWarned = true;
-        }
-        return;
-      }
-      const m = child as Mesh;
-      if (!m.isMesh || !m.geometry) return;
-      if (m.userData?._rvGizmo) return;
-      const hull = new Mesh(m.geometry, hullMat);
-      hull.userData._rvGizmoOverlay = true;
-      m.updateWorldMatrix(true, false);
-      hull.position.setFromMatrixPosition(m.matrixWorld);
-      hull.quaternion.setFromRotationMatrix(m.matrixWorld);
-      const scl = new Vector3();
-      m.matrixWorld.decompose(new Vector3(), hull.quaternion, scl);
-      scl.multiplyScalar(entry.outlineScale);
-      hull.scale.copy(scl);
-      // Force render BEFORE every other opaque mesh so it always paints first
-      // (the original sensor mesh draws on top in its normal order).
-      hull.renderOrder = -1;
-      group.add(hull);
-      entry.overlayMeshes.push(hull);
-    });
+    traverseMeshesWithDepth(
+      entry.node,
+      MAX_OVERLAY_DEPTH,
+      (m) => {
+        if (m.userData?._rvGizmo) return;
+        const hull = new Mesh(m.geometry, hullMat);
+        hull.userData._rvGizmoOverlay = true;
+        m.updateWorldMatrix(true, false);
+        hull.position.setFromMatrixPosition(m.matrixWorld);
+        hull.quaternion.setFromRotationMatrix(m.matrixWorld);
+        const scl = new Vector3();
+        m.matrixWorld.decompose(new Vector3(), hull.quaternion, scl);
+        scl.multiplyScalar(entry.outlineScale);
+        hull.scale.copy(scl);
+        // Force render BEFORE every other opaque mesh so it always paints first
+        // (the original sensor mesh draws on top in its normal order).
+        hull.renderOrder = -1;
+        group.add(hull);
+        entry.overlayMeshes.push(hull);
+      },
+      '[GizmoOverlayManager] mesh-glow-hull',
+    );
     entry.root = group;
     entry.material = hullMat;
     // Register the dedicated hull material in the cache with a unique key so
@@ -697,15 +752,7 @@ export class GizmoOverlayManager {
    *  the central tick() loop modulates its opacity. Used by hull/sprite/etc.
    *  materials that aren't in the shared material cache. */
   private _registerDedicatedBlinker(entry: GizmoEntry, mat: MeshBasicMaterial | SpriteMaterial): void {
-    const key = `dedicated_${entry.id}`;
-    this._materialCache.set(key, {
-      material: mat as unknown as MeshBasicMaterial,
-      key,
-      baseOpacity: entry.baseOpacity,
-      blinkHz: entry.blinkHz,
-      lastPhase: 'on',
-      refCount: 1,
-    });
+    this._cache.registerDedicated(`dedicated_${entry.id}`, mat, entry.baseOpacity, entry.blinkHz);
   }
 
   private _buildSphere(entry: GizmoEntry): void {
@@ -783,16 +830,24 @@ export class GizmoOverlayManager {
   }
 
   private _buildSprite(entry: GizmoEntry): void {
-    // Use a simple white-circle canvas as the default sprite icon
-    const canvas = document.createElement('canvas');
-    canvas.width = 64;
-    canvas.height = 64;
-    const ctx = canvas.getContext('2d')!;
-    ctx.beginPath();
-    ctx.arc(32, 32, 28, 0, 2 * Math.PI);
-    ctx.fillStyle = '#ffffff';
-    ctx.fill();
-    const tex = new CanvasTexture(canvas);
+    // Texture: caller-supplied (shared, NOT owned) or freshly built default.
+    let tex: Texture;
+    let ownTexture = false;
+    if (entry.spriteTextureExternal) {
+      tex = entry.spriteTextureExternal;
+    } else {
+      // Default: white-filled disc
+      const canvas = document.createElement('canvas');
+      canvas.width = 64;
+      canvas.height = 64;
+      const ctx = canvas.getContext('2d')!;
+      ctx.beginPath();
+      ctx.arc(32, 32, 28, 0, 2 * Math.PI);
+      ctx.fillStyle = '#ffffff';
+      ctx.fill();
+      tex = new CanvasTexture(canvas);
+      ownTexture = true;
+    }
 
     const hex = entry.color.toString(16).padStart(6, '0');
     const mat = new SpriteMaterial({
@@ -804,14 +859,35 @@ export class GizmoOverlayManager {
       depthWrite: false,
     });
     const sprite = new Sprite(mat);
-    sprite.position.copy(entry.cachedCenter);
-    const s = Math.max(entry.cachedSize.x, entry.cachedSize.y, entry.cachedSize.z) * 0.3 * entry.size;
+
+    // Sizing: caller-supplied worldSize wins (needed for Empty/anchor nodes
+    // with zero AABB); otherwise fall back to the AABB-relative default.
+    let s: number;
+    if (entry.worldSize !== undefined && entry.worldSize > 0) {
+      s = entry.worldSize * entry.size;
+    } else {
+      s = Math.max(entry.cachedSize.x, entry.cachedSize.y, entry.cachedSize.z) * 0.3 * entry.size;
+      if (!Number.isFinite(s) || s <= 0) s = 0.05 * entry.size; // safety fallback for zero AABB
+    }
     sprite.scale.set(s, s, 1);
     sprite.renderOrder = entry.renderOrder;
+
+    // Parenting: scene-attached gizmos stay where they spawned; node-attached
+    // gizmos follow their owner. Snap-point markers always want the latter.
+    if (entry.attachToNode) {
+      // Local (0,0,0) relative to node → world position = node world position
+      sprite.position.set(0, 0, 0);
+      entry.node.add(sprite);
+    } else {
+      sprite.position.copy(entry.cachedCenter);
+      this.scene.add(sprite);
+    }
+
     entry.root = sprite;
     entry.material = mat;
-    entry.texture = tex;
-    this.scene.add(sprite);
+    // Only retain the texture on the entry when WE own it (so dispose can
+    // free it). Externally-supplied textures must NOT be disposed here.
+    entry.texture = ownTexture ? tex : undefined;
   }
 
   private _buildFloorDisk(entry: GizmoEntry): void {
@@ -862,117 +938,45 @@ export class GizmoOverlayManager {
     this.scene.add(sprite);
   }
 
-  // ─── Material Cache ────────────────────────────────────────────────
+  // ─── Material Cache (thin delegating wrappers over GizmoMaterialCache) ────
 
-  private _makeCacheKey(color: number, baseOpacity: number, depthTest: boolean, blinkHz: number, emissiveIntensity = 0): string {
-    return `${color}_${baseOpacity}_${depthTest}_${blinkHz}_e${emissiveIntensity}`;
+  /** Build cache inputs from a gizmo entry (matches the original key composition). */
+  private _cacheInputs(entry: GizmoEntry): {
+    color: number; baseOpacity: number; depthTest: boolean; blinkHz: number; emissiveIntensity: number;
+  } {
+    return {
+      color: entry.color,
+      baseOpacity: entry.baseOpacity,
+      depthTest: entry.depthTest,
+      blinkHz: entry.blinkHz,
+      emissiveIntensity: entry.emissiveIntensity,
+    };
   }
 
   private _getOrCreateMeshMaterial(entry: GizmoEntry): MeshBasicMaterial {
-    const key = this._makeCacheKey(entry.color, entry.baseOpacity, entry.depthTest, entry.blinkHz);
-    const existing = this._materialCache.get(key);
-    if (existing) {
-      existing.refCount++;
-      return existing.material as MeshBasicMaterial;
-    }
-    const mat = new MeshBasicMaterial({
-      color: entry.color,
-      transparent: true,
-      opacity: entry.baseOpacity,
-      depthTest: entry.depthTest,
-      depthWrite: false,
-      polygonOffset: true,
-      polygonOffsetFactor: -1,
-      polygonOffsetUnits: -4,
-    });
-    const meta: MaterialMeta = {
-      material: mat,
-      key,
-      baseOpacity: entry.baseOpacity,
-      blinkHz: entry.blinkHz,
-      lastPhase: entry.blinkHz > 0 ? 'on' : 'static',
-      refCount: 1,
-    };
-    this._materialCache.set(key, meta);
-    return mat;
+    return this._cache.getOrCreateMesh(this._cacheInputs(entry));
   }
 
   /** Build a MeshStandardMaterial that glows via emissive + UnrealBloomPass (when bloom is enabled).
    *  Color set to black; emissive carries the visible color so the sphere is independent
    *  of scene lighting (renders correctly in unlit areas). */
   private _getOrCreateEmissiveMaterial(entry: GizmoEntry): MeshStandardMaterial {
-    const key = `em_${this._makeCacheKey(entry.color, entry.baseOpacity, entry.depthTest, entry.blinkHz, entry.emissiveIntensity)}`;
-    const existing = this._materialCache.get(key);
-    if (existing) {
-      existing.refCount++;
-      return existing.material as MeshStandardMaterial;
-    }
-    const mat = new MeshStandardMaterial({
-      color: 0x000000,
-      emissive: entry.color,
-      emissiveIntensity: entry.emissiveIntensity,
-      transparent: entry.baseOpacity < 1,
-      opacity: entry.baseOpacity,
-      depthTest: entry.depthTest,
-      depthWrite: false,
-      // Bloom requires the renderer's tone-mapped output. emissive needs to map > 0.85 (default
-      // bloom threshold) AFTER tone mapping. emissiveIntensity ≥ 1.5 typically suffices.
-      toneMapped: true,
-      polygonOffset: true,
-      polygonOffsetFactor: -1,
-      polygonOffsetUnits: -4,
-    });
-    const meta: MaterialMeta = {
-      material: mat,
-      key,
-      baseOpacity: entry.baseOpacity,
-      blinkHz: entry.blinkHz,
-      lastPhase: entry.blinkHz > 0 ? 'on' : 'static',
-      refCount: 1,
-    };
-    this._materialCache.set(key, meta);
-    return mat;
+    return this._cache.getOrCreateEmissive(this._cacheInputs(entry));
   }
 
   private _getOrCreateLineMaterial(entry: GizmoEntry): LineBasicMaterial {
-    const key = `line_${this._makeCacheKey(entry.color, entry.baseOpacity, entry.depthTest, entry.blinkHz)}`;
-    const existing = this._materialCache.get(key);
-    if (existing) {
-      existing.refCount++;
-      return existing.material as LineBasicMaterial;
-    }
-    const mat = new LineBasicMaterial({
-      color: entry.color,
-      transparent: true,
-      opacity: entry.baseOpacity,
-      depthTest: entry.depthTest,
-      depthWrite: false,
-    });
-    const meta: MaterialMeta = {
-      material: mat,
-      key,
-      baseOpacity: entry.baseOpacity,
-      blinkHz: entry.blinkHz,
-      lastPhase: entry.blinkHz > 0 ? 'on' : 'static',
-      refCount: 1,
-    };
-    this._materialCache.set(key, meta);
-    return mat;
+    return this._cache.getOrCreateLine(this._cacheInputs(entry));
   }
 
   private _releaseMaterial(entry: GizmoEntry): void {
     // text and sprite use dedicated materials — no cache to update
     if (entry.shape === 'text' || entry.shape === 'sprite') return;
-    const isLine = entry.shape === 'box';
-    const prefix = isLine ? 'line_' : '';
-    const key = `${prefix}${this._makeCacheKey(entry.color, entry.baseOpacity, entry.depthTest, entry.blinkHz)}`;
-    const meta = this._materialCache.get(key);
-    if (!meta) return;
-    meta.refCount--;
-    if (meta.refCount <= 0) {
-      this._materialCache.delete(key);
-      (meta.material as Material).dispose();
-    }
+    // Preserved 1:1 from original — box → line_ prefix, everything else → no
+    // prefix (note: emissive spheres are released under the no-prefix path,
+    // matching the original behavior; the `em_` cache entry remains until
+    // manager dispose).
+    const kind: 'mesh' | 'line' = entry.shape === 'box' ? 'line' : 'mesh';
+    this._cache.release(this._cacheInputs(entry), kind);
   }
 
   // ─── Update & Dispose ───────────────────────────────────────────────
@@ -1044,18 +1048,13 @@ export class GizmoOverlayManager {
       mat.needsUpdate = true;
       // Sync the dedicated blinker entry (or add/remove it as blinkHz changed).
       const key = `dedicated_${entry.id}`;
-      const meta = this._materialCache.get(key);
       if (entry.blinkHz > 0) {
-        if (meta) {
-          meta.baseOpacity = entry.baseOpacity;
-          meta.blinkHz = entry.blinkHz;
-        } else {
+        if (!this._cache.updateDedicated(key, entry.baseOpacity, entry.blinkHz)) {
           this._registerDedicatedBlinker(entry, mat);
         }
-      } else if (meta) {
+      } else if (this._cache.unregisterDedicated(key)) {
         // Blinking turned off → drop blinker AND restore full opacity (in case
         // tick had it in low phase when the state changed).
-        this._materialCache.delete(key);
         mat.opacity = entry.baseOpacity;
       }
       needRebuildMaterial = false;
@@ -1144,7 +1143,7 @@ export class GizmoOverlayManager {
       }
     }
     // Drop the dedicated blinker entry (no-op if never registered).
-    this._materialCache.delete(`dedicated_${entry.id}`);
+    this._cache.unregisterDedicated(`dedicated_${entry.id}`);
     // Remove from scene
     if (entry.root.parent) entry.root.parent.remove(entry.root);
     // Dispose dedicated resources

@@ -12,8 +12,6 @@
 
 import { loadVisualSettings, saveVisualSettings } from './visual-settings-store';
 import type { VisualSettings } from './visual-settings-store';
-import { loadPhysicsSettings, savePhysicsSettings } from './physics-settings-store';
-import type { PhysicsSettings } from './physics-settings-store';
 import { loadInterfaceSettings, saveInterfaceSettings } from '../../interfaces/interface-settings-store';
 import type { InterfaceSettings } from '../../interfaces/interface-settings-store';
 import { loadSearchSettings, saveSearchSettings } from './search-settings-store';
@@ -38,11 +36,16 @@ export interface RVSettingsBundle {
   modelUrl?: string;
   settings: {
     visual?: Partial<VisualSettings>;
-    physics?: Partial<PhysicsSettings>;
     interface?: Partial<InterfaceSettings>;
     search?: Partial<SearchSettings>;
     multiuser?: Partial<MultiuserSettings>;
     groupVisibility?: Partial<GroupVisibilitySettings>;
+    /**
+     * Legacy field: floating-panel positions are no longer persisted —
+     * panels re-anchor to the user's last click on each open. Field
+     * retained on import for backward-compat with existing bundles
+     * (silently ignored). Never written by current versions.
+     */
     panelLayouts?: Record<string, { x: number; y: number; w: number; h: number }>;
     /** Per-model camera start positions, keyed by model basename (without .glb). */
     cameraStart?: Record<string, ModelCameraStart>;
@@ -74,21 +77,12 @@ export function getModelBasename(url: string | null): string {
  * Collect all settings stores into a single bundle.
  */
 export function collectSettingsBundle(modelUrl: string | null): RVSettingsBundle {
-  // Collect panel layout positions from localStorage
-  const panelLayouts: Record<string, { x: number; y: number; w: number; h: number }> = {};
   // Collect per-model camera start presets from localStorage (rv-camera-start:<modelKey>)
   const cameraStart: Record<string, ModelCameraStart> = {};
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
     if (!key) continue;
-    if (key.startsWith('rv-panel-')) {
-      try {
-        const val = JSON.parse(localStorage.getItem(key)!);
-        if (val && typeof val === 'object' && typeof val.x === 'number') {
-          panelLayouts[key.substring('rv-panel-'.length)] = val;
-        }
-      } catch { /* skip invalid */ }
-    } else if (key.startsWith(CAMERA_START_LS_PREFIX)) {
+    if (key.startsWith(CAMERA_START_LS_PREFIX)) {
       try {
         const val = JSON.parse(localStorage.getItem(key)!);
         if (isValidPreset(val)) {
@@ -104,12 +98,10 @@ export function collectSettingsBundle(modelUrl: string | null): RVSettingsBundle
     modelUrl: modelUrl ?? undefined,
     settings: {
       visual: loadVisualSettings(),
-      physics: loadPhysicsSettings(),
       interface: loadInterfaceSettings(),
       search: loadSearchSettings(),
       multiuser: loadMultiuserSettings(),
       groupVisibility: loadGroupVisibilitySettings(),
-      panelLayouts: Object.keys(panelLayouts).length > 0 ? panelLayouts : undefined,
       cameraStart: Object.keys(cameraStart).length > 0 ? cameraStart : undefined,
     },
   };
@@ -176,11 +168,6 @@ export function applySettingsBundle(bundle: RVSettingsBundle): void {
     saveVisualSettings({ ...current, ...s.visual });
   }
 
-  if (s.physics) {
-    const current = loadPhysicsSettings();
-    savePhysicsSettings({ ...current, ...s.physics });
-  }
-
   if (s.interface) {
     const current = loadInterfaceSettings();
     saveInterfaceSettings({ ...current, ...s.interface });
@@ -201,13 +188,10 @@ export function applySettingsBundle(bundle: RVSettingsBundle): void {
     saveGroupVisibilitySettings({ ...current, ...s.groupVisibility });
   }
 
-  if (s.panelLayouts) {
-    for (const [key, val] of Object.entries(s.panelLayouts)) {
-      try {
-        localStorage.setItem(`rv-panel-${key}`, JSON.stringify(val));
-      } catch { /* quota exceeded — skip */ }
-    }
-  }
+  // s.panelLayouts is intentionally ignored — panel positions are no
+  // longer persisted; each panel re-anchors to the user's last click on
+  // open. Older bundles may still carry this field; that's fine, we
+  // accept and silently drop it.
 
   if (s.cameraStart) {
     for (const [modelKey, preset] of Object.entries(s.cameraStart)) {

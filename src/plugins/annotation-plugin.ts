@@ -25,6 +25,7 @@ import type { LoadResult } from '../core/engine/rv-scene-loader';
 import type { UISlotEntry } from '../core/rv-ui-plugin';
 import type { Annotation, AnnotationPluginAPI } from '../core/types/plugin-types';
 import { AnnotationRenderer, ANNOTATION_LAYER } from './rv-annotation-renderer';
+import { pointerToNDC } from '../core/engine/rv-pointer-utils';
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -371,6 +372,10 @@ export class AnnotationPlugin implements RVViewerPlugin, AnnotationPluginAPI {
   }
 
   onRender(): void {
+    // Re-bind to the live active camera each frame — the viewer can swap
+    // perspective ↔ orthographic at runtime, and a captured stale reference
+    // would freeze LOD scaling at the moment of the swap.
+    if (this._renderer && this._viewer) this._renderer.setCamera(this._viewer.camera);
     this._renderer?.updateLOD();
     this._updateNodeAttachments();
   }
@@ -464,9 +469,7 @@ export class AnnotationPlugin implements RVViewerPlugin, AnnotationPluginAPI {
     if (!this._viewer) return null;
 
     const canvas = this._viewer.renderer.domElement;
-    const rect = canvas.getBoundingClientRect();
-    this._pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-    this._pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    pointerToNDC(e.clientX, e.clientY, canvas, this._pointer);
 
     this._worldRaycaster.setFromCamera(this._pointer, this._viewer.camera);
     // Cast against all visible meshes on layer 0
@@ -492,9 +495,7 @@ export class AnnotationPlugin implements RVViewerPlugin, AnnotationPluginAPI {
     if (!this._viewer || !this._renderer) return null;
 
     const canvas = this._viewer.renderer.domElement;
-    const rect = canvas.getBoundingClientRect();
-    this._pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-    this._pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    pointerToNDC(e.clientX, e.clientY, canvas, this._pointer);
 
     this._annotationRaycaster.setFromCamera(this._pointer, this._viewer.camera);
     this._annotationRaycaster.layers.set(ANNOTATION_LAYER);

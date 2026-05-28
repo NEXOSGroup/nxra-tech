@@ -23,6 +23,13 @@ Three extension points:
 2. **Events** — typed pub/sub between plugins and UI
 3. **UI Components** — Left panels, chart overlays, tooltips, slot-based layout areas
 
+> **For wiring a single GLB to drives, sensors, transports, signals and AAS
+> links, use Component Behaviors — not plugins.** See
+> **[doc-behaviors.md](doc-behaviors.md)**. Behaviors are auto-discovered
+> per-file, scoped to matching GLBs, and auto-disposed on model-cleared.
+> Plugins remain the right tool for cross-cutting, global features (XR,
+> Multiuser, custom HMI panels, etc.).
+
 ---
 
 ## 1. UI Architecture
@@ -41,7 +48,7 @@ Three extension points:
     │   ├── HierarchyBrowser           //     Docked left panel (when open)
     │   ├── PropertyInspector          //     Second left panel beside hierarchy
     │   ├── MachineControlPanel        //     Docked left panel (when open)
-    │   └── Settings LeftPanel         //     Model / Visual / Physics / Interfaces / Dev / Tests
+    │   └── Settings LeftPanel         //     Model / Visual / Interfaces / Dev / Tests
     <ButtonPanel />                    //   Left sidebar — logo + slot: button-group
     <MessagePanel />                   //   Right sidebar — slot: messages
     <BottomBar />                      //   Bottom — search/filter bar (slot: search-bar)
@@ -80,7 +87,6 @@ The Settings panel is a `LeftPanel` (540px wide) with these tabs:
 |-----|---------|----------|
 | Model | Renderer (WebGL/WebGPU), model selector, reset all settings | `isTabLocked('model')` |
 | Visual | Antialiasing, shadow map, lighting mode, ambient/directional light, tone mapping, camera projection/FOV | `isTabLocked('visual')` |
-| Physics | Rapier.js toggle, gravity, friction, substeps, debug wireframes | `isTabLocked('physics')` |
 | Interfaces | Protocol selector (WebSocket, ctrlX, MQTT), connection settings, auto-connect | `isTabLocked('interfaces')` |
 | Dev Tools | FPS overlay, console log, stats, performance budget bars, GPU benchmark | `isTabLocked('devtools')` |
 | Tests | Run Vitest browser tests, show pass/fail results | `isTabLocked('tests')` |
@@ -125,7 +131,7 @@ Individual UI elements mark themselves with `data-ui-panel` attribute for identi
 
 ## 2. Components, Signals, and Unity Mapping
 
-### How Unity Components Map to the WebViewer
+### How Unity Components Map to realvirtual WEB
 
 The Unity scene is exported as a **GLB file** with custom `extras` data on each node. During loading, the `rv-scene-loader.ts` traverses the GLB scene graph and maps Unity components to TypeScript counterparts:
 
@@ -175,9 +181,9 @@ Like Unity's `Awake()` / `Start()` lifecycle:
 
 This ensures all components exist before any references are resolved.
 
-### Adding a New Component Type (Unity → WebViewer)
+### Adding a New Component Type (Unity → realvirtual WEB)
 
-To map an existing Unity component to the WebViewer:
+To map an existing Unity component to realvirtual WEB:
 
 **Step 1: Create the TypeScript component** in `src/core/engine/`:
 
@@ -386,6 +392,45 @@ class MyPlugin extends RVBehavior {
 }
 ```
 
+### Viewer Helper Methods
+
+These typed helpers are preferred over direct `viewer.scene.traverse(...)` or `viewer.camera`
+property access.
+
+```typescript
+// Iterate over every node registered in NodeRegistry (has userData.realvirtual).
+// NOTE: This is NOT equivalent to scene.traverse() — it only visits nodes with
+// rv_extras metadata. It does NOT do a full DFS over every Three.js Object3D.
+viewer.eachNode((path: string, node: Object3D) => {
+  console.log(path, node.userData.realvirtual);
+});
+
+// Project a 3D Object3D to screen pixel coordinates.
+// Pass an optional Vector2 as `out` for GC-free hot-path use.
+const screenPos = viewer.projectToScreen(someNode);         // returns new Vector2
+viewer.projectToScreen(someNode, outVec2);                  // writes into outVec2
+
+// Project a world-space Vector3 to screen pixel coordinates.
+const screenPos2 = viewer.projectPoint(new THREE.Vector3(1, 0, 0));
+
+// Get a snapshot of current camera state (position, target, quaternion).
+const state = viewer.getCameraState();   // { position: Vector3, target: Vector3, quaternion: Quaternion }
+viewer.getCameraState(outState);         // GC-free: write into provided object
+
+// Set multiple OrbitControls options at once.
+viewer.setControlsConfig({
+  rotateSpeed: 0.8,
+  panSpeed: 0.5,
+  zoomSpeed: 1.2,
+  dampingFactor: 0.05,
+  enabled: true,
+});
+
+// Toggle renderer stats logging (renders info, draw calls).
+viewer.setDebugLogging(true);
+viewer.setDebugLogging(false);
+```
+
 ### Accessing Components from Plugins
 
 ```typescript
@@ -423,6 +468,20 @@ After loading a GLB, `loadModel()` returns a `LoadResult` with:
 
 This result is passed to all plugins via `onModelLoaded(result, viewer)`.
 
+### NodeRegistry growth from lazy LayoutObject expansion
+
+When the user expands a LayoutObject row in the Hierarchy Panel, the tree builder injects the Three.js subtree into the panel and registers any previously-unseen child paths in `NodeRegistry`. Plugins that iterate `registry.forEachNode(...)` should therefore not assume the set of paths stays stable for the lifetime of a model — new paths can appear at any time when the user opens a placed catalog item. Treat `NodeRegistry` as an open set: keep listeners idempotent and address nodes by path (`getNode(path)`), never by integer index.
+
+### Selection sources (`selectNode(path, showInspector, source)`)
+
+The hierarchy editor distinguishes three kinds of selection:
+
+- `'viewport'` — 3D-pick from the canvas; resolves up to the enclosing LayoutObject root so clicking any sub-mesh selects the whole placed object. This is the default behavior the raycast pipeline produces.
+- `'tree'` — explicit pick from the Hierarchy Panel; keeps the exact path so nested drive/sensor properties become editable.
+- `'api'` (default) — programmatic call from plugins or tests; same as `'tree'`.
+
+The two-argument legacy form `selectNode(path, true)` still works (treated as `source = 'api'`). New plugin code should pass an explicit source.
+
 ---
 
 ## 3. Core Plugins
@@ -437,6 +496,9 @@ interface RVViewerPlugin {
   readonly order?: number;              // Execution order (lower = earlier, default: 100)
   readonly handlesTransport?: boolean;  // true = replaces kinematic transport
   readonly slots?: UISlotEntry[];       // Optional UI components for HMI layout slots
+
+  /** Called by viewer.use() — receives the narrower PluginContext facade. */
+  init?(viewer: RVViewer, context?: PluginContext): void;
 
   onModelLoaded?(result: LoadResult, viewer: RVViewer): void;
   onModelCleared?(viewer: RVViewer): void;
@@ -453,18 +515,133 @@ interface RVViewerPlugin {
 1. LogicEngine.fixedUpdate(dt)         — LogicStep sequencing
 2. ReplayRecordings[].fixedUpdate(dt)  — Recording playback (legacy, not yet a plugin)
 3. prePlugins[].onFixedUpdatePre(dt)   — Set drive targets, apply interface data
-4. ErraticDrivers[].update(dt)         — Random drive targets (legacy, not yet a plugin)
-5. drives[].update(dt)                 — Drive physics (sorted by DriveOrderPlugin)
-6. transportManager.update(dt)         — MU movement, sensors (skipped if handlesTransport)
-7. postPlugins[].onFixedUpdatePost(dt) — Read results, sample data, emit events
-8. driveRecorder.sample(dt)            — Drive recording (legacy, not yet a plugin)
+   + onTick(PRE) callbacks             — TickStage.PRE stage
+4. drives[].update(dt)                 — Drive physics (sorted by DriveOrderPlugin)
+5. transportManager.update(dt)         — MU movement, sensors (skipped if handlesTransport)
+   + onTick(SIM) callbacks             — TickStage.SIM stage
+6. postPlugins[].onFixedUpdatePost(dt) — Read results, sample data, emit events
+   + onTick(POST) callbacks            — TickStage.POST stage
 ```
 
-> **Note:** Steps 2, 4, and 8 are legacy hardcoded calls that predate the plugin system.
-> They will be migrated to `onFixedUpdatePre` / `onFixedUpdatePost` plugins in a future
-> refactoring pass. New features should always use the plugin system.
+> **Note:** Step 2 is a legacy hardcoded call that predates the plugin system.
+> New features should always use the plugin system or `simLoop.onTick()`.
 
 Plugins are cached into per-phase arrays sorted by `order`. Each callback is wrapped in try/catch — a faulty plugin cannot crash the simulation.
+
+### Plugin Order Constants (PLUGIN_ORDER)
+
+Instead of magic numbers, use the predefined order constants from `src/core/rv-plugin-order.ts`:
+
+```typescript
+import { PLUGIN_ORDER } from '../core/rv-plugin-order';
+
+export class MyInterface extends BaseIndustrialInterface {
+  readonly order = PLUGIN_ORDER.INTERFACE_ADAPTER;  // 10 — runs early in Pre phase
+}
+
+export class MyAnalyticsPlugin extends RVBehavior {
+  readonly order = PLUGIN_ORDER.DEFAULT;            // 100 — standard order
+}
+```
+
+| Constant | Value | Intended Use |
+|----------|-------|-------------|
+| `PLUGIN_ORDER.CORE_PRE` | 0 | Infrastructure (DriveOrderPlugin) |
+| `PLUGIN_ORDER.INTERFACE_ADAPTER` | 10 | Signal/data exchange plugins |
+| `PLUGIN_ORDER.DEFAULT` | 100 | Most plugins (default) |
+| `PLUGIN_ORDER.DEBUG` | 990 | Debug/monitoring overlays |
+| `PLUGIN_ORDER.TEST` | 9999 | Test plugins |
+
+### PluginContext — Narrower API for New Plugins
+
+`viewer.use(plugin)` calls `plugin.init?(viewer, context)`. The `PluginContext`
+provides a narrower, more stable API surface than the full `RVViewer`:
+
+```typescript
+interface PluginContext {
+  /** EventEmitter — typed by ViewerEvents */
+  readonly events: EventEmitter<ViewerEvents>;
+
+  // Sub-facades — always instantiated eagerly, safe to call from init():
+  readonly scene: SceneFacade;       // eachNode, projectToScreen/Point
+  readonly camera: CameraFacade;     // getState, animateTo, setConfig
+  readonly controls: ControlsFacade; // setConfig (rotateSpeed, panSpeed, …)
+  readonly simLoop: SimLoopFacade;   // onTick(stage, callback, order?)
+
+  // Live getters — may be null before model load; do NOT cache in init():
+  readonly signals: SignalStore | null;
+  readonly nodes: NodeRegistry | null;
+  readonly transport: TransportManager | null;
+}
+```
+
+**Important:** `ctx.signals`, `ctx.nodes`, and `ctx.transport` are **live getters**
+that return `null` before a model is loaded. Do **not** cache these in `init()` —
+read them inside callbacks where the model is guaranteed to be present.
+
+#### BaseViewerPlugin — Recommended Base Class for Context-Aware Plugins
+
+```typescript
+import { BaseViewerPlugin } from '../core/rv-plugin';
+import { PLUGIN_ORDER } from '../core/rv-plugin-order';
+import { TickStage } from '../core/rv-tick-stages';
+
+export class MyPlugin extends BaseViewerPlugin {
+  readonly id = 'my-plugin';
+  readonly order = PLUGIN_ORDER.DEFAULT;
+
+  // init() is called by viewer.use() — context is stored in this.context automatically.
+  // Call super.init(viewer, context) if you override.
+  protected override init(viewer: RVViewer, context: PluginContext): void {
+    super.init(viewer, context);   // stores context in this.context
+
+    // Register a tick callback at the PRE stage (before drive physics):
+    this.context.simLoop.onTick(TickStage.PRE, (dt) => {
+      const signals = this.context.signals;  // live getter — null before model load
+      if (!signals) return;
+      signals.set('MySignal', true);
+    });
+  }
+
+  onModelLoaded(result: LoadResult, viewer: RVViewer): void {
+    // Safe to use context.signals here — model is loaded
+    const signals = this.context.signals;
+    if (signals) signals.set('Ready', true);
+  }
+}
+```
+
+Prefer `this.context.scene`, `this.context.camera`, and `this.context.controls` in plugins for a more stable API surface.
+
+### SimLoopFacade — Stage-Based Tick Registration
+
+As an alternative to `onFixedUpdatePre` / `onFixedUpdatePost`, use the stage-based
+`simLoop.onTick()` API for finer control:
+
+```typescript
+import { TickStage } from '../core/rv-tick-stages';
+
+// In init():
+this.context.simLoop.onTick(TickStage.PRE, (dt) => {
+  // Runs BEFORE drive physics — same slot as onFixedUpdatePre
+}, PLUGIN_ORDER.INTERFACE_ADAPTER);  // optional order within stage
+
+this.context.simLoop.onTick(TickStage.POST, (dt) => {
+  // Runs AFTER drive physics + transport — same slot as onFixedUpdatePost
+});
+```
+
+Stage constants:
+
+| Stage | Value | When | Use for |
+|-------|-------|------|---------|
+| `TickStage.PRE` | 0 | Before drive physics | Set drive targets, flush incoming signals |
+| `TickStage.SIM` | 1 | During physics (drive + transport) | Advanced physics plugins |
+| `TickStage.POST` | 2 | After drive physics + transport | Sample data, emit events, send outgoing signals |
+
+Both `onFixedUpdatePre` / `onFixedUpdatePost` and `onTick()` coexist. Legacy plugins
+remain fully functional. Defensive iteration ensures that a plugin removing itself
+during a tick does not corrupt the iterator.
 
 ### RVBehavior Base Class (Recommended)
 
@@ -632,9 +809,10 @@ useEffect(() => {
 }, [viewer]);
 ```
 
-For type safety on custom events, extend `ViewerEvents` in `rv-viewer.ts`:
+For type safety on custom events, extend `ViewerEvents` in `rv-viewer-events.ts`:
 
 ```typescript
+// src/core/rv-viewer-events.ts — add to ViewerEvents interface
 export interface ViewerEvents {
   // ... existing events ...
   'alarm:triggered': { severity: string; message: string; time: number };
@@ -743,7 +921,7 @@ The `order` property controls execution order within each phase (Pre, Post, Rend
 
 | order | Intended Use |
 |-------|-------------|
-| 0 | Infrastructure (DriveOrderPlugin, physics) |
+| 0 | Infrastructure (DriveOrderPlugin) |
 | 50 | Interface data exchange |
 | 100 | Default (most plugins) |
 | 200 | Analytics, recording |
@@ -754,7 +932,13 @@ The `order` property controls execution order within each phase (Pre, Post, Rend
 
 ### Built-in Event Types
 
-The full `ViewerEvents` interface lives at [src/core/rv-viewer.ts](src/core/rv-viewer.ts) (search for `export interface ViewerEvents`). Snapshot of the categories:
+The canonical import path for `ViewerEvents` is:
+
+```typescript
+import type { ViewerEvents } from './core/rv-viewer-events';
+```
+
+The full `ViewerEvents` interface lives at [src/core/rv-viewer-events.ts](src/core/rv-viewer-events.ts). Snapshot of the categories:
 
 ```typescript
 interface ViewerEvents {
@@ -764,29 +948,31 @@ interface ViewerEvents {
   'connection-state-changed': { state: 'Connected' | 'Disconnected'; previous: 'Connected' | 'Disconnected' };
   'simulation-pause-changed': { paused: boolean; reasons: readonly string[]; reason: string };
 
-  // Hover / focus / selection
-  'drive-hover':        { drive: RVDrive | null; clientX: number; clientY: number };
-  'drive-focus':        { drive: RVDrive | null; node: Object3D | null };
+  // Hover / focus / selection (component-agnostic)
   'object-hover':       ObjectHoverData | null;       // { node, nodeType, nodePath, pointer, hitPoint, mesh }
   'object-unhover':     ObjectUnhoverData;            // { node, nodeType }
   'object-click':       ObjectClickData;              // { node, nodeType, nodePath, pointer }
   'object-clicked':     { path: string; node: Object3D };
   'object-focus':       { path: string; node: Object3D };
+  'object-blur':        void;                          // previous focus was cleared
   'selection-changed':  SelectionSnapshot;
   'exclusive-hover-mode': { mode: HoverableType | null };
 
-  // Filters / charts (UI plumbing)
+  // Filters / charts (UI plumbing — bound to specific HMI panels)
   'drive-chart-toggle':    { open: boolean };
   'drive-filter':          { filter: string; filteredDrives: RVDrive[] };
   'node-filter':           { filter: string; filteredNodes: NodeSearchResult[]; tooMany: boolean };
   'sensor-chart-toggle':   { open: boolean };
   'groups-overlay-toggle': { open: boolean };
 
-  // Simulation (emitted by plugins)
-  'sensor-changed':     { sensorPath: string; occupied: boolean };
-  'mu-spawned':         { totalSpawned: number };
-  'mu-consumed':        { totalConsumed: number };
-  'drive-at-target':    { drivePath: string; position: number };
+  // Generic component lifecycle event — emitted by drives, sensors, MUs and plugin-defined components.
+  // Known: sensor/changed { occupied }, mu/spawned { totalSpawned }, mu/consumed { totalConsumed }.
+  'component-event': {
+    componentType: string;
+    kind: string;
+    path: string;
+    payload?: unknown;
+  };
 
   // Industrial interfaces
   'interface-connected':    { interfaceId: string; type: string };
@@ -819,7 +1005,12 @@ interface ViewerEvents {
 
 ```typescript
 // Typed (compile-time checked):
-viewer.emit('sensor-changed', { sensorPath: 'Cell/Sensor1', occupied: true });
+viewer.emit('component-event', {
+  componentType: 'sensor',
+  kind: 'changed',
+  path: 'Cell/Sensor1',
+  payload: { occupied: true },
+});
 
 // Custom/untyped (for plugin-specific events):
 viewer.emit('my-plugin:data-ready', { values: [1, 2, 3] });
@@ -829,13 +1020,15 @@ viewer.emit('my-plugin:data-ready', { values: [1, 2, 3] });
 
 ```typescript
 // Returns unsubscribe function
-const off = viewer.on('sensor-changed', (data) => {
-  console.log(data.sensorPath, data.occupied);
+const off = viewer.on('component-event', (e) => {
+  if (e.componentType === 'sensor' && e.kind === 'changed') {
+    console.log(e.path, (e.payload as { occupied: boolean }).occupied);
+  }
 });
 off();  // Unsubscribe
 
 // In React — auto-cleanup via useEffect
-useSimulationEvent('sensor-changed', (data) => {
+useSimulationEvent('component-event', (e) => {
   // Callback ref is stable — no re-subscriptions on re-render
 });
 ```
@@ -1498,7 +1691,6 @@ class MockHost {
 
 | Plugin | ID | File | Purpose |
 |--------|----|------|---------|
-| `RapierPhysicsPlugin` | `rapier-physics` | [src/core/engine/rapier-physics-plugin.ts](src/core/engine/rapier-physics-plugin.ts) | Rapier.js physics-based transport (replaces kinematic) |
 | `DriveOrderPlugin` | `drive-order` | [src/plugins/drive-order-plugin.ts](src/plugins/drive-order-plugin.ts) | Topological sort for CAM/Gear master-slave |
 | `SensorMonitorPlugin` | `sensor-monitor` | [src/plugins/sensor-monitor-plugin.ts](src/plugins/sensor-monitor-plugin.ts) | Event-based sensor change tracking |
 | `TransportStatsPlugin` | `transport-stats` | [src/plugins/transport-stats-plugin.ts](src/plugins/transport-stats-plugin.ts) | 10 Hz spawn/consume RingBuffers |
@@ -1862,7 +2054,7 @@ A single faulty plugin must never freeze the simulation. Errors are logged but e
 Instead of checking `if (plugin.onFixedUpdatePre)` for every plugin at 60Hz, plugins are sorted into cached arrays once during `use()`. The hot path is a simple for-loop.
 
 **Why handlesTransport flag?**
-When a physics engine (Rapier.js) replaces the kinematic transport, it sets `handlesTransport: true`. The core loop skips `transportManager.update(dt)` automatically. No core code changes needed.
+A plugin can opt to take over transport by setting `handlesTransport: true`. The core loop then skips `transportManager.update(dt)` automatically so the plugin can drive MU movement, sensor detection, and sink consumption on its own. No core code changes needed.
 
 **Why render chart overlays outside HMIShell?**
 `HMIShell` has `pointer-events: none` on its container so the 3D scene remains interactive. Chart panels need pointer events for drag/resize, so they render as siblings in `App.tsx`.
@@ -1917,8 +2109,49 @@ interface GizmoOptions {
   depthTest?: boolean;      // default true (text default false)
   text?: string;            // required for shape: 'text'
   textOffsetY?: number;     // world-units above subtree-top
+  keepInComposer?: boolean; // default false — see "Keeping 3D UI out of SSAO"
 }
 ```
+
+### Keeping 3D UI out of SSAO
+
+The viewer runs Screen-Space Ambient Occlusion (`GTAOPass` / `N8AO`) inside the
+`EffectComposer`. GTAO builds its **own** depth+normal gbuffer with a
+`scene.overrideMaterial`, so a gizmo's `depthWrite: false` does **not** keep it
+out of SSAO — **only the camera layer mask does**. Any 3D UI left on the default
+layer 0 ends up in the AO pass and casts dark halos onto nearby geometry. This
+is the single most common regression when adding new 3D UI.
+
+You don't have to think about this when using `GizmoOverlayManager`: by default
+every gizmo is tagged onto `HIGHLIGHT_OVERLAY_LAYER`, which the render loop pulls
+out of the composer before AO and re-renders on top afterwards. New UI built on
+the manager is therefore **AO-safe automatically**.
+
+Bloom/glow gizmos (`emissiveIntensity > 0`, or the `mesh-glow-hull` /
+`sphere-glow-hull` shapes — which toggle emissive on/off at runtime, e.g.
+`WebSensor` states) must stay **inside** the composer so `UnrealBloomPass` can
+glow them. They are auto-detected (or set `keepInComposer: true`) and placed on
+`NO_AO_LAYER` instead — see below — so they keep bloom **and** stay out of SSAO.
+
+#### Two layers, two helpers
+
+There are two ways to keep 3D UI out of SSAO, depending on whether it should draw
+on top of everything or stay in the scene:
+
+| Helper (`rv-group-registry`) | Layer | When to use | Render behavior |
+|---|---|---|---|
+| `markAsOverlay(obj)` | `HIGHLIGHT_OVERLAY_LAYER` | On-top UI: wireframes, handles, labels, snap guides | Pulled out of the composer, re-rendered on top (depthTest off) |
+| `markNoAO(obj)` | `NO_AO_LAYER` | In-scene UI that must be depth-occluded or needs bloom: placement ghost, grid, glow gizmos | Stays in the RenderPass (correct depth + bloom); only the AO pass skips it |
+
+`markNoAO` works via a **dedicated AO clone camera**: the real cameras enable
+`NO_AO_LAYER` so the `RenderPass` draws those objects normally, while
+`PostProcessingManager.syncAoCamera()` hands GTAO/N8AO a clone with `NO_AO_LAYER`
+disabled — so they never enter the AO gbuffer. No look change, full robustness:
+once an object is tagged, it's excluded regardless of depth/bloom settings.
+
+The overlay-layer set lives in one place (`OVERLAY_LAYERS` in
+`rv-group-registry`); add a new overlay layer there and every render path picks
+it up.
 
 ### Material sharing & blink
 
@@ -2092,6 +2325,24 @@ Both expose RingBuffers via the plugin instance — read them through `usePlugin
 ### MCP bridge & MCP tool authoring
 
 [src/plugins/mcp-bridge-plugin.ts](src/plugins/mcp-bridge-plugin.ts) opens a WebSocket to the Python MCP server. Tools are declared on `RVBehavior` subclasses with the `@McpTool` and `@McpParam` decorators in [src/core/engine/rv-mcp-tools.ts](src/core/engine/rv-mcp-tools.ts) — the bridge auto-discovers them on connect and registers JSON tool schemas. To add a new tool: subclass `RVBehavior`, decorate an async method, and register the plugin. The user-facing tool catalog is [webviewer.mcp.md](webviewer.mcp.md).
+
+### SimController (Play / Pause / Reset)
+
+[src/plugins/sim-controller/](src/plugins/sim-controller/) registers a 2-button TopBar widget plus Pause-Badge. It is the **canonical example** of how to hold the simulation pause via a named reason — see "Pause-Reason Pattern" below.
+
+### Pause-Reason Pattern (Defense-in-Depth)
+
+The viewer's pause state is a **set of named reasons**, not a boolean. Multiple subsystems can hold pause simultaneously (`viewer.setSimulationPaused('my-reason', true)`), and the simulation only resumes when every reason has been released. The same `reason` string can be set/cleared multiple times — only set membership matters.
+
+Existing reasons: `'user'` (SimController), `'layout-edit'` (Layout-Planner), `'ar-placement'` (WebXR), `'shared-view'` (Multiuser).
+
+To safely participate without leaking a frozen simulation, plugins must release their reason on every shutdown path. **Defense-in-Depth, three stages**:
+
+1. **UI close path** — every code path that closes the plugin's panel/mode must call the same release. Audit every `onClick`, `lpm.close()`, `setActive(false)` and confirm they end with `viewer.setSimulationPaused(myReason, false)`.
+2. **`dispose()` safety net** — release the reason unconditionally in `dispose()`. Catches the case where the user closes the viewer / swaps the model while the panel is still open.
+3. **Manual escape (dev tools only)** — `viewer.clearPauseReasons(reason?)` exists as a last-resort override. It logs a `[SimControl]` warning so leaks remain observable; never call it from production code paths.
+
+Reference implementations: [src/plugins/sim-controller/index.ts](src/plugins/sim-controller/index.ts) and the `setActive` / `dispose` of [src/plugins/layout-planner/index.ts](src/plugins/layout-planner/index.ts).
 
 ### Where the public RVViewer API is documented
 

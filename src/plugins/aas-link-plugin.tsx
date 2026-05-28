@@ -15,7 +15,7 @@
 
 import { useState, useEffect, useSyncExternalStore, useCallback } from 'react';
 import { Box, Typography, CircularProgress, IconButton, Button, Tooltip as MuiTooltip } from '@mui/material';
-import { OpenInNew, PictureAsPdf, Description, ShoppingCart } from '@mui/icons-material';
+import { OpenInNew, PictureAsPdf, Description, ShoppingCart, WarningAmber } from '@mui/icons-material';
 import type { RVViewerPlugin } from '../core/rv-plugin';
 import type { LoadResult } from '../core/engine/rv-scene-loader';
 import type { RVViewer } from '../core/rv-viewer';
@@ -26,7 +26,7 @@ import { registerCapabilities } from '../core/engine/rv-component-registry';
 import { NodeRegistry } from '../core/engine/rv-node-registry';
 import { ChartPanel } from '../core/hmi/ChartPanel';
 import { RV_SCROLL_CLASS } from '../core/hmi/shared-sx';
-import { loadIndex, loadAasxById, type AasParsedData } from './aas-link-parser';
+import { loadIndex, loadAasxById, getIndexEntry, type AasParsedData, type AasIndexEntry } from './aas-link-parser';
 import type { OrderManagerPluginAPI } from '../core/types/plugin-types';
 import { useCustomBranding } from '../core/hmi/branding-store';
 import { extractOrderData } from './order-manager-plugin';
@@ -236,6 +236,55 @@ function Row({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** Default warning text when an AAS is flagged demoOnly without a custom note. */
+const DEFAULT_DEMO_NOTE = 'Demo only — not validated by the supplier.';
+
+/**
+ * Resolve whether an AAS should display the demo warning.
+ * Priority: qualifier on the AssetAdministrationShell > index.json fallback.
+ * Returns the note text when a warning should be shown, otherwise null.
+ */
+function resolveDemoNote(parsed: AasParsedData | null, entry: AasIndexEntry | null): string | null {
+  // Qualifier wins — travels with the AASX, semantically correct location.
+  // Convention: <Qualifier type="DemoOnly" value="true"/> flips the flag,
+  // optional <Qualifier type="DemoNote" value="custom text"/> overrides the message.
+  const flag = parsed?.qualifiers?.find(q => /^demoonly$/i.test(q.type));
+  if (flag && /^(true|1|yes)$/i.test(flag.value)) {
+    const note = parsed?.qualifiers?.find(q => /^demonote$/i.test(q.type));
+    return note?.value || DEFAULT_DEMO_NOTE;
+  }
+  // Fallback: index.json demoOnly flag — for AASX files we cannot modify.
+  if (entry?.demoOnly) return entry.demoNote ?? DEFAULT_DEMO_NOTE;
+  return null;
+}
+
+/**
+ * Warning banner shown when an AAS is flagged as demo-only via either
+ * a `DemoOnly` qualifier inside the AASX or `demoOnly: true` in index.json.
+ * Renders nothing if neither flag is set.
+ */
+function DemoBanner({ parsed, entry }: { parsed: AasParsedData | null; entry: AasIndexEntry | null }) {
+  const note = resolveDemoNote(parsed, entry);
+  if (!note) return null;
+  return (
+    <Box
+      sx={{
+        display: 'flex', alignItems: 'center', gap: 0.75,
+        bgcolor: 'rgba(255, 167, 38, 0.12)',
+        border: '1px solid rgba(255, 167, 38, 0.4)',
+        borderRadius: 0.5,
+        px: 0.75, py: 0.5,
+        mt: 0.5, mb: 0.5,
+      }}
+    >
+      <WarningAmber sx={{ fontSize: 14, color: '#ffa726', flexShrink: 0 }} />
+      <Typography sx={{ color: '#ffcc80', fontSize: 10, lineHeight: 1.3 }}>
+        {note}
+      </Typography>
+    </Box>
+  );
+}
+
 /** Section header. */
 function SectionHeader({ text }: { text: string }) {
   return (
@@ -257,6 +306,7 @@ export function AasTooltipContent({ data, isPinned, viewer }: TooltipContentProp
   const accentColor = branding?.primaryColor ?? '#26a69a';
   const [state, setState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [parsed, setParsed] = useState<AasParsedData | null>(null);
+  const [indexEntry, setIndexEntry] = useState<AasIndexEntry | null>(null);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -268,6 +318,10 @@ export function AasTooltipContent({ data, isPinned, viewer }: TooltipContentProp
 
     setState('loading');
     let cancelled = false;
+
+    getIndexEntry(data.aasId)
+      .then((entry) => { if (!cancelled) setIndexEntry(entry ?? null); })
+      .catch(() => { /* index unavailable — skip demo banner */ });
 
     loadAasxById(data.aasId)
       .then((result) => {
@@ -320,6 +374,9 @@ export function AasTooltipContent({ data, isPinned, viewer }: TooltipContentProp
           </>
         )}
       </Box>
+
+      {/* Demo-only warning banner (renders nothing if entry is not flagged) */}
+      <DemoBanner parsed={parsed} entry={indexEntry} />
 
       {/* Loading state */}
       {state === 'loading' && (
@@ -506,15 +563,20 @@ export function AasDetailHeaderAction({ data }: { data: Record<string, unknown> 
 export function AasDetailPanel() {
   const state = useAasDetailState();
   const [parsed, setParsed] = useState<AasParsedData | null>(null);
+  const [indexEntry, setIndexEntry] = useState<AasIndexEntry | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    if (!state.open || !state.aasId) { setParsed(null); return; }
+    if (!state.open || !state.aasId) { setParsed(null); setIndexEntry(null); return; }
 
     setLoading(true);
     setError('');
     let cancelled = false;
+
+    getIndexEntry(state.aasId)
+      .then((entry) => { if (!cancelled) setIndexEntry(entry ?? null); })
+      .catch(() => { /* index unavailable — skip demo banner */ });
 
     loadAasxById(state.aasId)
       .then((result) => { if (!cancelled) { setParsed(result); setLoading(false); } })
@@ -537,13 +599,13 @@ export function AasDetailPanel() {
       subtitle={state.aasId}
       defaultWidth={460}
       defaultHeight={500}
-      panelId="aas-detail"
       zIndex={1600}
     >
       <Box
         className={RV_SCROLL_CLASS}
         sx={{ flex: 1, overflow: 'auto', px: 1.5, py: 1 }}
       >
+        <DemoBanner parsed={parsed} entry={indexEntry} />
         {loading && (
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 2 }}>
             <CircularProgress size={16} sx={{ color: 'rgba(255,255,255,0.5)' }} />

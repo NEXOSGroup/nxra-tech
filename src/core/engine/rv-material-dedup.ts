@@ -3,6 +3,7 @@
 
 import { Object3D, Mesh, Material, Color, Texture, MeshStandardMaterial } from 'three';
 import { debug } from './rv-debug';
+import { traverseMeshes } from './rv-traverse-utils';
 
 export interface DedupResult {
   /** Number of Material references present in the scene before dedup */
@@ -45,10 +46,7 @@ export function deduplicateMaterials(root: Object3D): DedupResult {
   let originalCount = 0;
   let disposedCount = 0;
 
-  root.traverse((node) => {
-    if (!(node as Mesh).isMesh) return;
-    const mesh = node as Mesh;
-
+  traverseMeshes(root, (mesh) => {
     if (Array.isArray(mesh.material)) {
       // Multi-material mesh — replace array elements in place, NEVER the
       // array reference itself, or geometry.groups misaligns.

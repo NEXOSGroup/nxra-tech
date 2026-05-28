@@ -21,7 +21,8 @@
  * focus group on top.
  */
 
-import type { Object3D } from 'three';
+import type { Camera, Object3D } from 'three';
+import { MEASUREMENT_LAYER, NO_AO_LAYER } from './rv-constants';
 
 /** Three.js layer bit used to mark the currently isolated group's subtree. */
 export const ISOLATE_FOCUS_LAYER = 2;
@@ -35,6 +36,68 @@ export const ISOLATE_FOCUS_LAYER = 2;
  * with `clearDepth()` so wireframes stay visible on top of the dim wash.
  */
 export const HIGHLIGHT_OVERLAY_LAYER = 3;
+
+/**
+ * SINGLE SOURCE OF TRUTH for the "on-top UI overlay" layers.
+ *
+ * These layers hold 3D UI that must NOT influence Screen-Space Ambient
+ * Occlusion: hover/select wireframes, planner gizmos, measurement markers and
+ * labels. Why a layer (and not just `depthWrite:false`)? `GTAOPass` builds its
+ * own depth+normal gbuffer with `scene.overrideMaterial`, so each object's own
+ * `depthWrite:false` is ignored — the ONLY thing that keeps an object out of
+ * SSAO is the camera layer mask.
+ *
+ * The viewer disables these layers on the camera before `composer.render()`
+ * (so GTAO/N8AO never see them) and re-renders them on top afterwards in
+ * `_renderOverlayLayers()`. Add a new overlay layer to this array and every
+ * render path picks it up automatically via the helpers below.
+ */
+export const OVERLAY_LAYERS: readonly number[] = [HIGHLIGHT_OVERLAY_LAYER, MEASUREMENT_LAYER];
+
+/**
+ * Disable every overlay layer on a camera so they're excluded from the
+ * EffectComposer's main pass (and thus from the GTAO/N8AO gbuffer). The
+ * caller is responsible for restoring the previous layer mask.
+ */
+export function disableOverlayLayers(camera: Camera): void {
+  for (const layer of OVERLAY_LAYERS) camera.layers.disable(layer);
+}
+
+/**
+ * Restrict a camera to ONLY the overlay layers — the idiom used by the
+ * post-composer overlay re-render and isolate pass 4. `set` the first layer
+ * (which clears the mask), then `enable` the rest.
+ */
+export function setOverlayLayersOnly(camera: Camera): void {
+  camera.layers.set(OVERLAY_LAYERS[0]);
+  for (let i = 1; i < OVERLAY_LAYERS.length; i++) camera.layers.enable(OVERLAY_LAYERS[i]);
+}
+
+/**
+ * Tag an object and all descendants as an on-top UI overlay so it never
+ * contaminates SSAO. Puts the subtree on HIGHLIGHT_OVERLAY_LAYER ONLY
+ * (removing layer 0) → excluded from the composer and re-rendered on top.
+ *
+ * Use this for any hand-rolled 3D UI added directly to the scene. Gizmos
+ * created through `GizmoOverlayManager` already get this automatically.
+ */
+export function markAsOverlay(object: Object3D): void {
+  object.traverse(o => o.layers.set(HIGHLIGHT_OVERLAY_LAYER));
+}
+
+/**
+ * Tag an object and all descendants as in-scene UI that must not contribute to
+ * SSAO, while still rendering normally (correct depth-occlusion + bloom).
+ *
+ * Use this — instead of {@link markAsOverlay} — when the UI needs to be occluded
+ * by scene geometry or needs UnrealBloom (e.g. the placement ghost, the planner
+ * grid, glow gizmos). Puts the subtree on NO_AO_LAYER ONLY; the real cameras
+ * keep this layer enabled (so the RenderPass draws it) while the AO clone camera
+ * disables it (so GTAO/N8AO skip it). See NO_AO_LAYER in rv-constants.
+ */
+export function markNoAO(object: Object3D): void {
+  object.traverse(o => o.layers.set(NO_AO_LAYER));
+}
 
 /**
  * Tag a node and all descendants with ISOLATE_FOCUS_LAYER. Idempotent.

@@ -39,6 +39,7 @@ interface PdfViewerState {
   open: boolean;
   url: string;
   title: string;
+  initialPage?: number;
   loading: boolean;
   error: string;
 }
@@ -63,6 +64,7 @@ function notifyPdf(): void {
 export function openPdfViewer(
   title: string,
   source: PdfSource,
+  options?: { initialPage?: number },
 ): void {
   // Revoke previous blob URL if switching PDFs
   if (_pdfState.url && _activeBlobUrls.has(_pdfState.url)) {
@@ -70,11 +72,13 @@ export function openPdfViewer(
     _activeBlobUrls.delete(_pdfState.url);
   }
 
+  const initialPage = options?.initialPage;
+
   if (source.type === 'url') {
-    _pdfState = { open: true, url: source.url, title, loading: false, error: '' };
+    _pdfState = { open: true, url: source.url, title, initialPage, loading: false, error: '' };
     notifyPdf();
   } else {
-    _pdfState = { open: true, url: '', title, loading: true, error: '' };
+    _pdfState = { open: true, url: '', title, initialPage, loading: true, error: '' };
     notifyPdf();
 
     extractFileBlob(source.aasId, source.zipPath, source.basePath)
@@ -156,7 +160,7 @@ function PdfViewerBridge() {
     );
   }
 
-  return <DocViewerOverlay url={state.url} title={state.title} onClose={closePdfViewer} />;
+  return <DocViewerOverlay url={state.url} title={state.title} initialPage={state.initialPage} onClose={closePdfViewer} />;
 }
 
 // Register the PdfViewerBridge as a controller (rendered by App.tsx getControllers() loop)

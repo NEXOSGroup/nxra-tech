@@ -2,7 +2,7 @@
 
 ## What This Is
 
-A Teams app package that embeds the realvirtual WebViewer as a tab inside Microsoft Teams channels, chats, and meetings.
+A Teams app package that embeds realvirtual WEB as a tab inside Microsoft Teams channels, chats, and meetings.
 
 ## Setup
 
@@ -13,7 +13,7 @@ In the Bunny CDN dashboard, add these response headers to your pull zone:
 - **Header**: `Content-Security-Policy`
 - **Value**: `frame-ancestors https://teams.microsoft.com https://*.microsoft.com https://*.skype.com`
 
-This allows Teams to iframe your WebViewer. Without this header, Teams will show a blank page.
+This allows Teams to iframe realvirtual WEB. Without this header, Teams will show a blank page.
 
 ### 2. Build the App Package
 
@@ -53,7 +53,7 @@ Compress-Archive -Path manifest.json, color.png, outline.png -DestinationPath re
 ## How It Works
 
 - The Teams app is just metadata (manifest + icons, ~50 KB)
-- It tells Teams to load your Bunny-hosted WebViewer in an iframe
+- It tells Teams to load your Bunny-hosted realvirtual WEB in an iframe
 - The `?teams=1` URL parameter triggers the Teams JS SDK handshake
 - `?lockSettings=true` hides the settings panel for a clean embedded experience
 - The actual 3D viewer and models are served from Bunny CDN

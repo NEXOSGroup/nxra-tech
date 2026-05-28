@@ -5,8 +5,8 @@
  * Tests for GLB wrapper unwrapping and pivotToFloor helpers.
  */
 import { describe, test, expect } from 'vitest';
-import { Group, Mesh, BoxGeometry, MeshBasicMaterial, PerspectiveCamera, DirectionalLight } from 'three';
-import { unwrapGltfRoot, pivotToFloorCenter } from '../../realvirtual-WebViewer-Private~/src/plugins/layout-planner';
+import { Group, Mesh, BoxGeometry, MeshBasicMaterial, PerspectiveCamera, DirectionalLight, Object3D } from 'three';
+import { unwrapGltfRoot, pivotToFloorCenter } from '../src/plugins/layout-planner';
 
 // Helper to create a simple mesh
 function makeMesh(name: string): Mesh {
@@ -79,6 +79,55 @@ describe('unwrapGltfRoot', () => {
 
     expect(result.userData.realvirtual).toEqual({ type: 'kinematic' });
     expect(result.children[0].userData.realvirtual).toEqual({ type: 'drive' });
+  });
+
+  test('strips filename-based gltf.scene wrapper (e.g. EuropalletEmpty.glb)', () => {
+    // UnityGLTF sets scenes[0].name to "<export-filename>.glb", which Three.js
+    // surfaces as gltf.scene.name. Without stripping, library assets would
+    // appear nested inside a filename-shaped LayoutObject wrapper.
+    const content = makeGroup('EuropalletEmpty', makeMesh('Pallet'));
+    const root = makeGroup('EuropalletEmpty.glb', content);
+
+    const result = unwrapGltfRoot(root);
+    expect(result.name).toBe('EuropalletEmpty');
+    expect(result.children).toHaveLength(1);
+    expect(result.children[0].name).toBe('Pallet');
+  });
+
+  test('strips Three.js-sanitized filename wrapper (e.g. EuropalletEmptyglb)', () => {
+    // Some loader pipelines sanitize "." out of node names, leaving "<name>glb".
+    const content = makeGroup('EuropalletEmpty', makeMesh('Pallet'));
+    const root = makeGroup('EuropalletEmptyglb', content);
+
+    const result = unwrapGltfRoot(root);
+    expect(result.name).toBe('EuropalletEmpty');
+  });
+
+  test('descends into Object3D content child (not Group)', () => {
+    // Three.js GLTFLoader creates plain Object3D (not Group) for empty
+    // glTF nodes — the unwrap must still descend through them.
+    const inner = new Object3D();
+    inner.name = 'EuropalletEmpty';
+    inner.add(makeMesh('Pallet'));
+    const root = makeGroup('EuropalletEmpty.glb', inner);
+
+    const result = unwrapGltfRoot(root);
+    expect(result.name).toBe('EuropalletEmpty');
+    expect(result.children).toHaveLength(1);
+    expect(result.children[0].name).toBe('Pallet');
+  });
+
+  test('does NOT strip filename wrapper when multiple content children exist', () => {
+    // Multi-root export (e.g. "Export Selected to WebViewer" with several
+    // selected objects) must keep the scene wrapper, otherwise sibling
+    // roots would lose their common container.
+    const a = makeGroup('Conveyor', makeMesh('belt'));
+    const b = makeGroup('Robot', makeMesh('arm'));
+    const root = makeGroup('Scene.glb', a, b);
+
+    const result = unwrapGltfRoot(root);
+    expect(result.name).toBe('Scene.glb');
+    expect(result.children).toHaveLength(2);
   });
 });
 

@@ -19,7 +19,7 @@ describe('GizmoOverlayManager', () => {
     scene.add(n1, n2);
     mgr.create(n1, { shape: 'transparent-shell', color: 0xff0000, opacity: 0.5, blinkHz: 0 });
     mgr.create(n2, { shape: 'transparent-shell', color: 0xff0000, opacity: 0.5, blinkHz: 0 });
-    expect((mgr as any)._materialCache.size).toBe(1);
+    expect((mgr as any)._cache.size).toBe(1);
   });
 
   it('creates distinct materials for different blinkHz (KEY FIX)', () => {
@@ -28,7 +28,7 @@ describe('GizmoOverlayManager', () => {
     scene.add(n1, n2);
     mgr.create(n1, { shape: 'transparent-shell', color: 0xff0000, opacity: 0.5, blinkHz: 1 });
     mgr.create(n2, { shape: 'transparent-shell', color: 0xff0000, opacity: 0.5, blinkHz: 2 });
-    expect((mgr as any)._materialCache.size).toBe(2);
+    expect((mgr as any)._cache.size).toBe(2);
   });
 
   it('setGlobalVisibility toggles all gizmos', () => {
@@ -61,7 +61,7 @@ describe('GizmoOverlayManager', () => {
     const n = new Mesh(new BoxGeometry());
     scene.add(n);
     mgr.create(n, { shape: 'transparent-shell', color: 0xff0000, opacity: 1.0, blinkHz: 1 });
-    const matList = Array.from((mgr as any)._materialCache.values()) as any[];
+    const matList = Array.from((mgr as any)._cache.values()) as any[];
     const meta = matList[0];
 
     // Spin tick across enough frames to trigger both phases

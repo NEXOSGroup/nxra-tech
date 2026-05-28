@@ -45,6 +45,11 @@ export interface ViewerVisualState {
   sceneFixtures: Set<import('three').Object3D>;
   _shadowsDirty: boolean;
   _renderDirty: boolean;
+  /** Optional viewer hook — when present, the manager registers its async
+   *  IBL (env-map) generation here so that any in-flight `viewer.loadModel`
+   *  or `viewer.loadScene` waits for the environment before resolving.
+   *  Without this, the scene reveals unlit and lighting "pops in" later. */
+  trackLoadingWork?: (p: Promise<unknown>) => void;
 }
 
 /**
@@ -205,11 +210,16 @@ export class VisualSettingsManager {
         this.state.sceneFixtures.delete(this.state.ambientLight);
       }
       this.state.renderer.toneMapping = TONE_MAP_LOOKUP[this._toneMapping];
-      this.loadEnvMap().then(() => {
+      // Track the IBL load with the viewer so a concurrent model-load
+      // doesn't reveal the scene before the environment is applied.
+      // Re-entry is fine: loadEnvMap is cached (returns immediately after
+      // first success), and a resolved promise just no-ops the drain.
+      const envPromise = this.loadEnvMap().then(() => {
         if (this._lightingMode === 'default') {
           this.state.scene.environment = this._envMapTexture;
         }
       });
+      this.state.trackLoadingWork?.(envPromise);
     } else {
       if (!this.state.ambientLight.parent) {
         this.state.scene.add(this.state.ambientLight);

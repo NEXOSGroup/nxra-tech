@@ -39,8 +39,9 @@ export function buildPanelSx(opts: {
   isMobile: boolean;
   leftOffset?: number;
   mobile?: 'full-screen' | 'hidden';
+  anchor?: 'left' | 'right';
 }): Record<string, unknown> {
-  const { width, isMobile, leftOffset, mobile = 'full-screen' } = opts;
+  const { width, isMobile, leftOffset, mobile = 'full-screen', anchor = 'left' } = opts;
 
   if (isMobile && mobile === 'hidden') {
     return {
@@ -74,12 +75,16 @@ export function buildPanelSx(opts: {
     };
   }
 
+  const offset = leftOffset ?? LEFT_PANEL_LEFT;
+  const anchorSide = anchor === 'right'
+    ? { right: offset, left: 'auto' as const }
+    : { left: offset, right: 'auto' as const };
+
   return {
     position: 'fixed',
-    left: leftOffset ?? LEFT_PANEL_LEFT,
+    ...anchorSide,
     top: LEFT_PANEL_TOP,
     bottom: LEFT_PANEL_BOTTOM,
-    right: 'auto',
     width,
     zIndex: LEFT_PANEL_ZINDEX,
     display: 'flex',
@@ -117,6 +122,12 @@ export interface LeftPanelProps {
   footer?: React.ReactNode;
   /** Mobile display policy. 'full-screen' or 'hidden'. Default: 'full-screen'. */
   mobile?: 'full-screen' | 'hidden';
+  /**
+   * Which screen edge the panel docks to. Default: 'left' (preserves all
+   * existing call sites). Pass 'right' to dock the panel to the right edge —
+   * resize handle and offset mirror automatically.
+   */
+  anchor?: 'left' | 'right';
   /** Additional sx props merged into root Paper. */
   sx?: SxProps;
   /** Header padding override sx. */
@@ -136,6 +147,7 @@ export function LeftPanel({
   toolbar,
   footer,
   mobile = 'full-screen',
+  anchor = 'left',
   sx: sxOverride,
   headerSx,
 }: LeftPanelProps) {
@@ -143,13 +155,16 @@ export function LeftPanel({
   const [dragging, setDragging] = useState(false);
 
   // ── Resize handle ──
+  // For a right-anchored panel the handle lives on the LEFT edge and dragging
+  // LEFT (negative delta) must INCREASE the width — so we flip the sign.
   const handleResizeStart = useCallback((e: React.PointerEvent) => {
     e.preventDefault();
     const startX = e.clientX;
     const startWidth = width;
+    const sign = anchor === 'right' ? -1 : 1;
 
     const onMove = (ev: PointerEvent) => {
-      const delta = ev.clientX - startX;
+      const delta = (ev.clientX - startX) * sign;
       const newWidth = clampWidth(startWidth + delta, minWidth, maxWidth);
       onResize?.(newWidth);
     };
@@ -162,9 +177,9 @@ export function LeftPanel({
     setDragging(true);
     document.addEventListener('pointermove', onMove);
     document.addEventListener('pointerup', onUp);
-  }, [width, minWidth, maxWidth, onResize]);
+  }, [width, minWidth, maxWidth, onResize, anchor]);
 
-  const panelSx = buildPanelSx({ width, isMobile, leftOffset, mobile });
+  const panelSx = buildPanelSx({ width, isMobile, leftOffset, mobile, anchor });
 
   return (
     <Paper
@@ -216,13 +231,14 @@ export function LeftPanel({
         </Box>
       )}
 
-      {/* Optional resize handle — right edge */}
+      {/* Optional resize handle — sits on the inward-facing edge
+          (right edge for left-anchored panels, left edge for right-anchored). */}
       {resizable && !isMobile && (
         <Box
           onPointerDown={handleResizeStart}
           sx={{
             position: 'absolute',
-            right: 0,
+            ...(anchor === 'right' ? { left: 0 } : { right: 0 }),
             top: 0,
             bottom: 0,
             width: 5,

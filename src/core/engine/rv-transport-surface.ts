@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
-import { Object3D, Vector3, Quaternion, MathUtils, Mesh, RepeatWrapping } from 'three';
+import { ArrowHelper, Box3, Object3D, Vector3, Quaternion, MathUtils, Matrix4, Mesh, MeshBasicMaterial, PlaneGeometry, DoubleSide, RepeatWrapping } from 'three';
 import { debug } from './rv-debug';
 import { MM_TO_METERS } from './rv-constants';
 import type { MeshStandardMaterial, Texture } from 'three';
@@ -10,10 +10,20 @@ import type { RVDrive } from './rv-drive';
 import type { RVMovingUnit, InstancedMovingUnit } from './rv-mu';
 import type { ComponentSchema, ComponentContext, RVComponent } from './rv-component-registry';
 import { registerComponent } from './rv-component-registry';
+import { traverseMeshes } from './rv-traverse-utils';
+import type { GizmoOverlayManager } from './rv-gizmo-manager';
 
 // Pre-allocated temp vectors (no GC in hot path)
 const _movement = new Vector3();
 const _offset = new Vector3();
+
+// Shared geometry/material for transport-surface drop planes. These transient
+// planes are NEVER added to the scene (never rendered, never selectable) — they
+// are handed to the planner's drop-to-surface raycast as candidate targets so
+// objects can be placed on a conveyor top even when it has no solid top mesh.
+const _dropPlaneGeometry = new PlaneGeometry(1, 1);
+_dropPlaneGeometry.rotateX(-Math.PI / 2); // unit quad, lying flat (normal = +Y)
+const _dropPlaneMaterial = new MeshBasicMaterial({ side: DoubleSide });
 
 /**
  * RVTransportSurface - Moves MUs along a direction at the associated Drive's speed.
@@ -65,6 +75,19 @@ export class RVTransportSurface implements RVComponent {
   /** Accumulated radial texture offset (wraps to avoid precision loss) */
   private _radialOffsetX = 0;
 
+  // ── Selection-gizmo state (managed by our own selection subscription) ──
+  /** Blue transparent fill over the top face of the surface while selected.
+   *  Lives under `this.node` so it follows the asset's transform. */
+  private _selTopSurface: Mesh | null = null;
+  /** Direction arrow shown alongside the top surface. Lives under `this.node`. */
+  private _selArrow: ArrowHelper | null = null;
+  /** Captured at init() so we can build the gizmo without the full context. */
+  private _selGizmoMgr: GizmoOverlayManager | null = null;
+  /** Unsubscribe handle for the direct 'selection-changed' subscription. */
+  private _selUnsub: (() => void) | null = null;
+  /** Captured registry — used to map selection paths back to nodes. */
+  private _selRegistry: { getNode(path: string): Object3D | null | undefined } | null = null;
+
   constructor(node: Object3D, aabb: AABB) {
     this.node = node;
     this.aabb = aabb;
@@ -111,6 +134,31 @@ export class RVTransportSurface implements RVComponent {
       this.drive.jogForward = true;
     }
 
+    // Stash a reference to the GizmoOverlayManager + node registry so the
+    // selection-gizmo logic can build the visualisation without holding
+    // the full context.
+    this._selGizmoMgr = context.gizmoManager ?? null;
+    this._selRegistry = context.registry;
+
+    // Subscribe to selection events DIRECTLY. We can't use the standard
+    // `onSelect(selected)` lifecycle hook here because the
+    // ComponentEventDispatcher honours only ONE component per node
+    // (first-writer wins — see `_rvComponentInstance` in
+    // rv-component-registry.ts). Since auto-bound library assets place
+    // both `Drive` AND `TransportSurface` on the same node (Transport-Z),
+    // the Drive grabs the slot and our `onSelect` would never fire. The
+    // direct subscription side-steps that limitation.
+    if (context.events) {
+      const lastState = { selected: false };
+      this._selUnsub = context.events.on('selection-changed', (snap) => {
+        const nowSelected = this._isSurfaceImpliedBySelection(snap.selectedPaths ?? []);
+        if (nowSelected === lastState.selected) return;
+        lastState.selected = nowSelected;
+        if (nowSelected) this._showSelectionGizmo();
+        else this._hideSelectionGizmo();
+      });
+    }
+
     // Register in transport manager
     context.transportManager.surfaces.push(this);
 
@@ -120,6 +168,198 @@ export class RVTransportSurface implements RVComponent {
       ` radial=${this.Radial}` +
       (this.drive ? ` drive=${this.drive.name} jogFwd=${this.drive.jogForward}` : ' NO DRIVE')
     );
+  }
+
+  /**
+   * Whether the current selection should reveal this surface's gizmo. The
+   * surface is shown when it sits on the SAME branch as a selected node:
+   * either a selected ancestor contains this surface (the common case — the
+   * conveyor click resolves to the parent Drive node, which is an ancestor of
+   * the child surface node), or a selected child mesh lives under this surface.
+   */
+  private _isSurfaceImpliedBySelection(paths: readonly string[]): boolean {
+    for (const p of paths) {
+      const selNode = this._selRegistry?.getNode(p);
+      if (!selNode) continue;
+      // Selected a parent: the surface is at-or-below the selected node.
+      if (this._isAncestorOrSelf(selNode, this.node)) return true;
+      // Selected a child mesh: the selection is at-or-below the surface.
+      if (this._isAncestorOrSelf(this.node, selNode)) return true;
+    }
+    return false;
+  }
+
+  /** True if `ancestor` is `node` itself or any of its parents. */
+  private _isAncestorOrSelf(ancestor: Object3D, node: Object3D): boolean {
+    let cur: Object3D | null = node;
+    while (cur) {
+      if (cur === ancestor) return true;
+      cur = cur.parent;
+    }
+    return false;
+  }
+
+  /**
+   * Selection-driven visualisation: a wireframe AABB box plus a cyan
+   * direction arrow at the AABB centre, both rendered always-on-top and
+   * opt-out of raycasting so they never steal hover/click.
+   *
+   * Subscription is installed in `init()` directly on the viewer event bus
+   * (see comment there for why we bypass the standard `onSelect` lifecycle
+   * hook). Cleaned up in `dispose()`.
+   */
+  dispose(): void {
+    this._hideSelectionGizmo();
+    if (this._selUnsub) { this._selUnsub(); this._selUnsub = null; }
+  }
+
+  private _showSelectionGizmo(): void {
+    this._hideSelectionGizmo();
+    if (!this._selGizmoMgr) return;
+
+    // Blue transparent fill over the TOP face of the surface's bounding box.
+    // Built in the node's LOCAL frame and parented to `this.node`, so it
+    // follows (and rotates with) the asset.
+    this.node.updateMatrixWorld(true);
+    const localBox = this._computeLocalAABB();
+    if (localBox && !localBox.isEmpty()) {
+      const lmin = localBox.min;
+      const lmax = localBox.max;
+      const sx = Math.max(lmax.x - lmin.x, 1e-4);
+      const sz = Math.max(lmax.z - lmin.z, 1e-4);
+      const geo = new PlaneGeometry(sx, sz);
+      geo.rotateX(-Math.PI / 2); // lie flat in the local XZ plane (normal = +Y)
+      const mat = new MeshBasicMaterial({
+        color: 0x8ec5ff,         // light blue
+        transparent: true,
+        opacity: 0.2,
+        side: DoubleSide,
+        depthTest: false,
+        depthWrite: false,
+      });
+      const surf = new Mesh(geo, mat);
+      surf.position.set((lmin.x + lmax.x) / 2, lmax.y, (lmin.z + lmax.z) / 2);
+      surf.renderOrder = 2001;
+      surf.userData._highlightOverlay = true;
+      surf.raycast = () => { /* never a click target */ };
+      this.node.add(surf);
+      this._selTopSurface = surf;
+    }
+
+    // Subtree AABB → local centre for the arrow origin.
+    const box = new Box3().setFromObject(this.node);
+    const center = new Vector3();
+    const size = new Vector3();
+    box.getCenter(center);
+    box.getSize(size);
+    if (!Number.isFinite(size.x) || size.lengthSq() === 0) return;
+    const localOrigin = this.node.worldToLocal(center.clone());
+
+    // Use the runtime `direction` (world-space resolved) — but the arrow
+    // sits in the surface's LOCAL frame so we transform back to local.
+    const worldDir = this.direction.clone();
+    if (worldDir.lengthSq() === 0) worldDir.copy(this.TransportDirection);
+    if (worldDir.lengthSq() === 0) return;
+    worldDir.normalize();
+
+    // worldToLocal works on POINTS — to convert a DIRECTION we apply the
+    // inverse rotation (the world quaternion's conjugate) since translation
+    // doesn't affect direction vectors.
+    const invQuat = new Quaternion();
+    this.node.getWorldQuaternion(invQuat).invert();
+    const localDir = worldDir.applyQuaternion(invQuat);
+
+    // Fixed 0.5 m arrow in WORLD space. The arrow is parented to `this.node`,
+    // so its length is interpreted in node-local units — divide by the node's
+    // world scale along the arrow direction so it renders at a true 0.5 m
+    // regardless of any scale baked into the surface (e.g. library placements).
+    const ARROW_WORLD_LENGTH = 0.5; // metres
+    const ws = new Vector3();
+    this.node.getWorldScale(ws);
+    const scaleAlongDir = Math.hypot(ws.x * localDir.x, ws.y * localDir.y, ws.z * localDir.z) || 1;
+    const length = ARROW_WORLD_LENGTH / scaleAlongDir;
+    const arrow = new ArrowHelper(
+      localDir,
+      localOrigin,
+      length,
+      0x00ddff,         // cyan — high contrast on most scene backgrounds
+      length * 0.18,    // head length
+      length * 0.10,    // head width
+    );
+    arrow.line.renderOrder = 2002;
+    arrow.cone.renderOrder = 2002;
+    type LineMat = { depthTest: boolean };
+    type MeshMat = { depthTest: boolean; depthWrite: boolean; transparent: boolean };
+    (arrow.line.material as unknown as LineMat).depthTest = false;
+    const coneMat = arrow.cone.material as unknown as MeshMat;
+    coneMat.depthTest = false;
+    coneMat.depthWrite = false;
+    coneMat.transparent = true;
+    arrow.userData._highlightOverlay = true;
+    arrow.raycast = () => { /* never a click target */ };
+    this.node.add(arrow);
+    this._selArrow = arrow;
+  }
+
+  private _hideSelectionGizmo(): void {
+    if (this._selTopSurface) {
+      this._selTopSurface.parent?.remove(this._selTopSurface);
+      this._selTopSurface.geometry.dispose();
+      (this._selTopSurface.material as MeshBasicMaterial).dispose();
+      this._selTopSurface = null;
+    }
+    if (this._selArrow) {
+      this._selArrow.parent?.remove(this._selArrow);
+      this._selArrow.dispose();
+      this._selArrow = null;
+    }
+  }
+
+  /** AABB of all mesh descendants expressed in `this.node`'s LOCAL frame.
+   *  Returns null if the subtree has no mesh geometry. */
+  private _computeLocalAABB(): Box3 | null {
+    const box = new Box3();
+    const invNode = new Matrix4().copy(this.node.matrixWorld).invert();
+    const m = new Matrix4();
+    const tmp = new Box3();
+    let found = false;
+    this.node.traverse((child) => {
+      const mesh = child as Mesh;
+      if (mesh.isMesh && mesh.geometry) {
+        if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+        const gb = mesh.geometry.boundingBox;
+        if (gb) {
+          m.multiplyMatrices(invNode, mesh.matrixWorld);
+          tmp.copy(gb).applyMatrix4(m);
+          box.union(tmp);
+          found = true;
+        }
+      }
+    });
+    return found ? box : null;
+  }
+
+  /**
+   * Build a transient horizontal drop-target plane at the TOP of this surface's
+   * AABB, in WORLD space. Used by the planner's drop-to-surface so objects can
+   * be placed on the conveyor top even when the surface has no solid top mesh
+   * (e.g. an AABB-only / virtual conveyor). The returned mesh is NOT added to
+   * the scene — it is only a raycast candidate for the duration of a drag.
+   * Returns null for a degenerate (zero-area) footprint.
+   */
+  createDropPlane(): Mesh | null {
+    this.aabb.update();
+    const min = this.aabb.min;
+    const max = this.aabb.max;
+    const sx = max.x - min.x;
+    const sz = max.z - min.z;
+    if (!Number.isFinite(sx) || !Number.isFinite(sz) || sx <= 1e-4 || sz <= 1e-4) return null;
+    const plane = new Mesh(_dropPlaneGeometry, _dropPlaneMaterial);
+    plane.position.set((min.x + max.x) / 2, max.y, (min.z + max.z) / 2);
+    plane.scale.set(sx, 1, sz);
+    plane.userData._rvDropSurface = true;
+    plane.updateMatrixWorld(true);
+    return plane;
   }
 
   /**
@@ -154,6 +394,11 @@ export class RVTransportSurface implements RVComponent {
   /** Is the surface actively transporting? */
   get isActive(): boolean {
     return this.drive != null && this.speed > 0;
+  }
+
+  /** Authoritative current runtime value for UI display (live source of truth). */
+  getLiveState(): Record<string, unknown> {
+    return { Speed: this.speed };
   }
 
   /**
@@ -224,9 +469,7 @@ export class RVTransportSurface implements RVComponent {
   private _initTextureAnimation(): void {
     let meshCount = 0;
     let texCount = 0;
-    this.node.traverse((child) => {
-      const mesh = child as Mesh;
-      if (!mesh.isMesh) return;
+    traverseMeshes(this.node, (mesh) => {
       meshCount++;
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       for (let i = 0; i < mats.length; i++) {

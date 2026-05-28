@@ -14,11 +14,10 @@
 
 import { useState, useEffect } from 'react';
 import { Vector3, Raycaster, Object3D, Euler, MathUtils } from 'three';
-import type { RVViewerPlugin } from '../core/rv-plugin';
+import { BaseViewerPlugin } from '../core/rv-base-plugin';
 import type { RVViewer } from '../core/rv-viewer';
 import type { LoadResult } from '../core/engine/rv-scene-loader';
 import type { UISlotEntry } from '../core/rv-ui-plugin';
-import { isMobileDevice } from '../hooks/use-mobile-layout';
 import { loadVisualSettings } from '../core/hmi/visual-settings-store';
 import { activateContext, deactivateContext } from '../core/hmi/ui-context-store';
 import type { WebXRPlugin } from './webxr-plugin';
@@ -47,7 +46,6 @@ const BACKWARD_KEYS = new Set(['KeyS', 'ArrowDown']);
 const LEFT_KEYS = new Set(['KeyA', 'ArrowLeft']);
 const RIGHT_KEYS = new Set(['KeyD', 'ArrowRight']);
 const SPRINT_KEYS = new Set(['ShiftLeft', 'ShiftRight']);
-const TOGGLE_KEY = 'KeyF';
 
 // ─── Reusable vectors (pre-allocated, zero GC in update loop) ───────────
 
@@ -77,7 +75,7 @@ export function useFpvActive(): boolean {
 
 // ─── FPV Plugin ─────────────────────────────────────────────────────────
 
-export class FpvPlugin implements RVViewerPlugin {
+export class FpvPlugin extends BaseViewerPlugin {
   readonly id = 'fpv';
   readonly order = 5; // Before drive physics
 
@@ -132,9 +130,6 @@ export class FpvPlugin implements RVViewerPlugin {
   private _onBlur: (() => void) | null = null;
   private _onVisibilityChange: (() => void) | null = null;
 
-  // XR event unsubs
-  private _unsubs: (() => void)[] = [];
-
   // ── Lifecycle ──────────────────────────────────────────────────────
 
   onModelLoaded(_result: LoadResult, viewer: RVViewer): void {
@@ -155,19 +150,17 @@ export class FpvPlugin implements RVViewerPlugin {
     this._setupEventListeners(viewer);
 
     // Listen for XR session start to exit FPV
-    const unsubXrStart = viewer.on('xr-session-start', () => {
+    this.sub(viewer.on('xr-session-start', () => {
       if (this._active) this.exit();
-    });
-    this._unsubs.push(unsubXrStart);
+    }));
   }
 
-  onModelCleared(viewer: RVViewer): void {
+  override onModelCleared(viewer: RVViewer): void {
     // Exit FPV if active (scene geometry gone, ground cache stale)
     if (this._active) this._exitImmediate();
     this._groundTargets = [];
-    // Clean up XR event listeners
-    this._unsubs.forEach((u) => u());
-    this._unsubs = [];
+    // Clean up XR event listeners + future subs registered via this.sub()
+    super.onModelCleared(viewer);
     this._viewer = viewer;
   }
 
@@ -210,12 +203,12 @@ export class FpvPlugin implements RVViewerPlugin {
     viewer.markRenderDirty();
   }
 
-  dispose(): void {
+  override dispose(): void {
     if (this._active) this._exitImmediate();
     this._removeOverlay();
     this._removeEventListeners();
-    this._unsubs.forEach((u) => u());
-    this._unsubs = [];
+    // Flush XR event subs + any future subs registered via this.sub()
+    super.dispose();
   }
 
   // ── Public API ─────────────────────────────────────────────────────
@@ -472,21 +465,15 @@ export class FpvPlugin implements RVViewerPlugin {
 
     const canvas = viewer.renderer.domElement;
 
-    // Keyboard
+    // Keyboard — WASD/sprint while active. FPV is entered via the BottomBar
+    // button (or programmatic toggle()); no global hotkey: F is reserved for
+    // "frame selection" in the viewer's keybindings.
     this._onKeyDown = (e: KeyboardEvent) => {
       // Input focus guard: skip WASD when typing in input/textarea
       const tag = (document.activeElement as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
-      if (!this._active) {
-        // F key toggle (only when not in input)
-        if (e.code === TOGGLE_KEY && !isMobileDevice()) {
-          e.preventDefault();
-          this.toggle();
-        }
-        return;
-      }
-
+      if (!this._active) return;
       this._keys.add(e.code);
     };
 

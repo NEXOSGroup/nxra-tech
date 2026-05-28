@@ -3,7 +3,7 @@
 
 /**
  * Minimal typed event emitter for the WebViewer core.
- * No external dependencies. Used by RVViewer for 'model-loaded', 'drive-hover', etc.
+ * No external dependencies. Used by RVViewer for 'model-loaded', 'object-hover', etc.
  *
  * Generic TEvents map enables compile-time type checking for known events.
  * Untyped overloads allow custom plugin events without modifying ViewerEvents.

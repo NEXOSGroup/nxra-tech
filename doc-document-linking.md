@@ -1,6 +1,6 @@
 # Document Linking System
 
-The WebViewer supports linking PDF documents and AASX (Asset Administration Shell) packages to 3D scene nodes. Linked documents appear in the tooltip and can be opened in a built-in PDF viewer overlay.
+realvirtual WEB supports linking PDF documents and AASX (Asset Administration Shell) packages to 3D scene nodes. Linked documents appear in the tooltip and can be opened in a built-in PDF viewer overlay.
 
 ## Architecture
 

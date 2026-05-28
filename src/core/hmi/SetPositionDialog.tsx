@@ -5,11 +5,9 @@
  * SetTransformDialog — Draggable floating panel for setting position and
  * rotation of layout objects.
  *
- * Triggered by the "Set Transform" context menu item. Operates on one or more
- * LayoutObject nodes. Uses a module-level store so context menu actions can
- * open it without React prop drilling.
- *
- * Draggable by the title bar (same pattern as ChartPanel / DriveChartOverlay).
+ * Reads the selected node the SAME way as PropertyInspector: via
+ * useEditorPlugin().state.selectedNodePath + viewer.registry.getNode().
+ * This guarantees both panels always show the same values.
  */
 
 import { useState, useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
@@ -19,38 +17,41 @@ import {
   Box,
   Typography,
   IconButton,
+  Tooltip,
 } from '@mui/material';
-import { Close } from '@mui/icons-material';
+import { Close, RestartAlt } from '@mui/icons-material';
 import { MathUtils } from 'three';
 import type { RVViewer } from '../rv-viewer';
+import { USER_PAUSE_REASON } from '../engine/rv-constants';
 import { Vector3Editor } from './rv-field-editors';
+import { useViewer } from '../../hooks/use-viewer';
+import { useEditorPlugin } from '../../hooks/use-editor-plugin';
 
-// ─── Module-level store ─────────────────────────────────────────────────
+// ─── Module-level open/close store (minimal — just tracks open state) ───
 
-interface SetTransformRequest {
-  open: boolean;
-  paths: string[];
-  viewer: RVViewer | null;
-}
-
-const CLOSED: SetTransformRequest = Object.freeze({ open: false, paths: [], viewer: null });
-let _state: SetTransformRequest = CLOSED;
+let _open = false;
 const _listeners = new Set<() => void>();
+function notify() { for (const l of _listeners) l(); }
 
-function notify() {
-  for (const l of _listeners) l();
-}
-
-/** Open the Set Transform dialog for the given layout object paths. */
+/** Open the Set Transform dialog. Syncs the extras editor selection so the dialog reads the correct node. */
 export function openSetPositionDialog(viewer: RVViewer, paths: string[]): void {
-  _state = { open: true, paths: [...paths], viewer };
+  // Ensure the extras editor's selectedNodePath matches the target path.
+  // PropertyInspector reads from this same source, so this keeps them in sync.
+  if (paths.length > 0) {
+    const editorPlugin = viewer.getPlugin?.('rv-extras-editor') as
+      { selectNode?: (path: string, showInspector: boolean) => void } | undefined;
+    if (editorPlugin?.selectNode) {
+      editorPlugin.selectNode(paths[0], false);
+    }
+  }
+  _open = true;
   notify();
 }
 
 /** Close the Set Transform dialog. */
 export function closeSetPositionDialog(): void {
-  if (!_state.open) return;
-  _state = CLOSED;
+  if (!_open) return;
+  _open = false;
   notify();
 }
 
@@ -58,12 +59,9 @@ function subscribe(listener: () => void) {
   _listeners.add(listener);
   return () => { _listeners.delete(listener); };
 }
+function getSnapshot() { return _open; }
 
-function getSnapshot() {
-  return _state;
-}
-
-// ─── Drag hook (simplified from ChartPanel) ─────────────────────────────
+// ─── Drag hook ──────────────────────────────────────────────────────────
 
 function useDrag(initialPos: { x: number; y: number }) {
   const [pos, setPos] = useState(initialPos);
@@ -71,7 +69,6 @@ function useDrag(initialPos: { x: number; y: number }) {
   const offset = useRef({ x: 0, y: 0 });
 
   const onPointerDown = useCallback((e: React.PointerEvent) => {
-    // Don't drag from interactive elements
     const tag = (e.target as HTMLElement).tagName;
     if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'SVG' || tag === 'PATH') return;
     dragging.current = true;
@@ -94,18 +91,26 @@ function useDrag(initialPos: { x: number; y: number }) {
 // ─── Component ──────────────────────────────────────────────────────────
 
 export function SetPositionDialog() {
-  const req = useSyncExternalStore(subscribe, getSnapshot);
+  const open = useSyncExternalStore(subscribe, getSnapshot);
+  const viewer = useViewer();
+  const { state } = useEditorPlugin();
+  const selectedPath = state.selectedNodePath;
+
   const [position, setPosition] = useState({ x: 0, y: 0, z: 0 });
   const [rotation, setRotation] = useState({ x: 0, y: 0, z: 0 });
   const drag = useDrag({ x: Math.round(window.innerWidth / 2 - 160), y: Math.round(window.innerHeight / 2 - 120) });
-
-  // Track whether the user is actively editing a field (suppress polling during edits)
   const editingRef = useRef(false);
 
-  // Read live node transform into state
+  // Get the node — same way as PropertyInspector, with fallback to SelectionManager
+  let node = selectedPath ? viewer.registry?.getNode(selectedPath) ?? null : null;
+  if (!node) {
+    // Fallback: try the SelectionManager's primary path
+    const selPath = viewer.selectionManager?.getSnapshot().primaryPath;
+    if (selPath) node = viewer.registry?.getNode(selPath) ?? null;
+  }
+
+  // Read transform from node into local state
   const readNodeTransform = useCallback(() => {
-    if (!req.viewer?.registry || req.paths.length === 0) return;
-    const node = req.viewer.registry.getNode(req.paths[0]);
     if (!node) return;
     setPosition({
       x: +node.position.x.toFixed(4),
@@ -117,50 +122,53 @@ export function SetPositionDialog() {
       y: +MathUtils.radToDeg(node.rotation.y).toFixed(2),
       z: +MathUtils.radToDeg(node.rotation.z).toFixed(2),
     });
-  }, [req.viewer, req.paths]);
+  }, [node]);
 
-  // Seed initial values + re-center on open
+  // Seed on open
   useEffect(() => {
-    if (!req.open) return;
+    if (!open) return;
     readNodeTransform();
     drag.setPos({ x: Math.round(window.innerWidth / 2 - 160), y: Math.round(window.innerHeight / 2 - 120) });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [req.open]);
+  }, [open, selectedPath]);
 
-  // Poll node transform at 200ms while dialog is open (for gizmo drag updates)
+  // Poll at 200ms for live gizmo updates
   useEffect(() => {
-    if (!req.open) return;
+    if (!open) return;
     const id = setInterval(() => {
       if (!editingRef.current) readNodeTransform();
     }, 200);
     return () => clearInterval(id);
-  }, [req.open, readNodeTransform]);
+  }, [open, readNodeTransform]);
 
+  // Apply user edits
   const applyTransform = useCallback((pos: { x: number; y: number; z: number }, rot: { x: number; y: number; z: number }) => {
-    if (!req.viewer?.registry) return;
-    for (const path of req.paths) {
-      const node = req.viewer.registry.getNode(path);
-      if (!node) continue;
-      const rv = node.userData?.realvirtual as Record<string, Record<string, unknown>> | undefined;
-      if (rv?.LayoutObject?.Locked) continue;
+    if (!node) return;
+    const rv = node.userData?.realvirtual as Record<string, Record<string, unknown>> | undefined;
+    if (rv?.LayoutObject?.Locked) return;
 
-      node.position.set(pos.x, pos.y, pos.z);
-      node.rotation.set(MathUtils.degToRad(rot.x), MathUtils.degToRad(rot.y), MathUtils.degToRad(rot.z));
-      node.updateMatrixWorld(true);
-      req.viewer.emit('layout-transform-update', {
-        path,
-        position: [pos.x, pos.y, pos.z] as [number, number, number],
-        rotation: [rot.x, rot.y, rot.z] as [number, number, number],
-      });
-    }
-    req.viewer.markRenderDirty();
-  }, [req.viewer, req.paths]);
+    node.position.set(pos.x, pos.y, pos.z);
+    node.rotation.set(MathUtils.degToRad(rot.x), MathUtils.degToRad(rot.y), MathUtils.degToRad(rot.z));
+    node.updateMatrixWorld(true);
+
+    // Auto-stop the simulation when the user changes a placed object's
+    // transform via the dialog. Uses the user-owned pause reason so the
+    // toolbar Play button (or Space) resumes it.
+    viewer.setSimulationPaused?.(USER_PAUSE_REASON, true);
+
+    const path = viewer.registry?.getPathForNode(node) ?? selectedPath ?? '';
+    viewer.emit('layout-transform-update', {
+      path,
+      position: [pos.x, pos.y, pos.z] as [number, number, number],
+      rotation: [rot.x, rot.y, rot.z] as [number, number, number],
+    });
+    viewer.markRenderDirty();
+  }, [node, viewer, selectedPath]);
 
   const handlePositionChange = useCallback((v: { x: number; y: number; z: number }) => {
     editingRef.current = true;
     setPosition(v);
     applyTransform(v, rotation);
-    // Release editing lock after a short delay (allows polling to resume)
     setTimeout(() => { editingRef.current = false; }, 300);
   }, [applyTransform, rotation]);
 
@@ -173,16 +181,14 @@ export function SetPositionDialog() {
 
   // ESC to close
   useEffect(() => {
-    if (!req.open) return;
+    if (!open) return;
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') closeSetPositionDialog(); };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [req.open]);
+  }, [open]);
 
-  if (!req.open) return null;
+  if (!open || !node) return null;
 
-  const count = req.paths.length;
-  const title = count > 1 ? `Set Transform (${count})` : 'Set Transform';
   const labelSx = { fontSize: 10, color: 'text.secondary', width: 55, flexShrink: 0 };
 
   return (
@@ -217,9 +223,14 @@ export function SetPositionDialog() {
         }}
       >
         <Typography sx={{ fontSize: 11, fontWeight: 600, flex: 1, color: 'text.primary' }}>
-          {title}
+          Set Transform
         </Typography>
-        <IconButton size="small" onClick={closeSetPositionDialog} sx={{ p: 0.25, color: 'text.secondary' }}>
+        <IconButton
+          size="small"
+          onClick={closeSetPositionDialog}
+          onPointerDown={(e) => e.stopPropagation()}
+          sx={{ p: 0.25, color: 'text.secondary' }}
+        >
           <Close sx={{ fontSize: 14 }} />
         </IconButton>
       </Box>
@@ -231,12 +242,22 @@ export function SetPositionDialog() {
           <Box sx={{ flex: 1 }}>
             <Vector3Editor value={position} onChange={handlePositionChange} />
           </Box>
+          <Tooltip title="Reset position to 0">
+            <IconButton size="small" onClick={() => handlePositionChange({ x: 0, y: 0, z: 0 })} sx={{ p: 0.25, ml: 0.5, color: 'text.secondary' }}>
+              <RestartAlt sx={{ fontSize: 14 }} />
+            </IconButton>
+          </Tooltip>
         </Box>
         <Box sx={{ display: 'flex', alignItems: 'center' }}>
           <Typography sx={labelSx}>Rotation</Typography>
           <Box sx={{ flex: 1 }}>
             <Vector3Editor value={rotation} onChange={handleRotationChange} />
           </Box>
+          <Tooltip title="Reset rotation to 0">
+            <IconButton size="small" onClick={() => handleRotationChange({ x: 0, y: 0, z: 0 })} sx={{ p: 0.25, ml: 0.5, color: 'text.secondary' }}>
+              <RestartAlt sx={{ fontSize: 14 }} />
+            </IconButton>
+          </Tooltip>
         </Box>
       </Box>
 

@@ -34,3 +34,13 @@ export {
 // Concrete implementations
 export { WebSocketRealtimeInterface } from './websocket-realtime-interface';
 export { CtrlXInterface } from './ctrlx-interface';
+export { MqttInterface } from './mqtt-interface';
+export {
+  TwinCatHmiInterface,
+  mapTcHmiType,
+  mapTcHmiAccess,
+  type TcHmiCommand,
+  type TcHmiRequest,
+  type TcHmiResponseCommand,
+  type TcHmiResponse,
+} from './twincat-hmi-interface';

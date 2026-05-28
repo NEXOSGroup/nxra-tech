@@ -5,9 +5,11 @@
  * RVPipe — Process-industry pipe component.
  *
  * A pipe carries a resource (fluid) between two endpoints (Tank / Pump / ProcessingUnit).
- * Flow rate may be negative to indicate reverse direction. The class owns its tooltip
- * content via `getTooltipData()` and keeps `node.userData._rvPipe` in sync so legacy
- * consumers (rv-pipe-flow.ts) continue to work.
+ * Flow rate may be negative to indicate reverse direction. Carries optional
+ * industry-typical instrumentation (line pressure, temperature, fluid velocity,
+ * nominal diameter DN). The class owns its tooltip content via `getTooltipData()`
+ * and keeps `node.userData._rvPipe` in sync so legacy consumers (rv-pipe-flow.ts)
+ * continue to work.
  */
 
 import type { Object3D } from 'three';
@@ -35,6 +37,11 @@ export class RVPipe {
     destination: { type: 'componentRef' },
     uvDirection: { type: 'number', default: 1 },
     circuitId: { type: 'number', default: -1 },
+    // Industry-typical instrumentation (all optional — 0 means "not shown" in tooltip)
+    pressure: { type: 'number', default: 0 },        // bar gauge
+    temperatureC: { type: 'number', default: 0 },    // °C
+    velocityMs: { type: 'number', default: 0 },      // m/s — flow velocity (erosion check)
+    dnSize: { type: 'number', default: 0 },          // nominal diameter DN, e.g. 50, 100, 200
   };
 
   readonly node: Object3D;
@@ -48,6 +55,10 @@ export class RVPipe {
   circuitId = -1;
   sourcePath: string | null = null;
   destinationPath: string | null = null;
+  pressure = 0;
+  temperatureC = 0;
+  velocityMs = 0;
+  dnSize = 0;
 
   constructor(node: Object3D, extras: Record<string, unknown>) {
     this.node = node;
@@ -76,6 +87,24 @@ export class RVPipe {
     this.syncUserData();
   }
 
+  /** Plugin API: set line pressure (bar gauge). */
+  setPressure(bar: number): void {
+    this.pressure = bar;
+    this.syncUserData();
+  }
+
+  /** Plugin API: set fluid temperature (°C). */
+  setTemperature(celsius: number): void {
+    this.temperatureC = celsius;
+    this.syncUserData();
+  }
+
+  /** Plugin API: set fluid velocity (m/s). */
+  setVelocity(ms: number): void {
+    this.velocityMs = ms;
+    this.syncUserData();
+  }
+
   getTooltipData(): { type: 'pipe'; nodePath: string } {
     return { type: 'pipe', nodePath: NodeRegistry.computeNodePath(this.node) };
   }
@@ -88,6 +117,10 @@ export class RVPipe {
       sourcePath: this.sourcePath,
       destinationPath: this.destinationPath,
       uvDirection: this.uvDirection,
+      pressure: this.pressure,
+      temperatureC: this.temperatureC,
+      velocityMs: this.velocityMs,
+      dnSize: this.dnSize,
     };
   }
 }
@@ -95,6 +128,7 @@ export class RVPipe {
 registerTooltipComponent(RVPipe, {
   hoverable: true,
   badgeColor: '#26c6da',
+  filterLabel: 'Pipes',
   hoverEnabledByDefault: true,
   hoverPriority: 10,
   pinPriority: 5,

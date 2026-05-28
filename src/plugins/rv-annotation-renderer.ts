@@ -38,6 +38,7 @@ import type { Annotation } from '../core/types/plugin-types';
  *   0 — default: geometry, raycasting
  *   2 — ISOLATE_FOCUS_LAYER (rv-group-registry): currently isolated group's subtree
  *   6 — ANNOTATION_LAYER (this file): annotation pins, labels, connector lines
+ *   7 — MEASUREMENT_LAYER (rv-measurement-renderer): measurement markers, lines, distance labels
  */
 export const ANNOTATION_LAYER = 6;
 

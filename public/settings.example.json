@@ -14,12 +14,6 @@
     "orbitDampingFactor": 0.08
   },
 
-  "physics": {
-    "enabled": false,
-    "gravity": 9.81,
-    "friction": 1.5
-  },
-
   "interface": {
     "activeType": "none",
     "autoConnect": false,
@@ -43,6 +37,10 @@
 
   "pluginConfig": {
     "_comment": "Per-plugin configuration. Missing keys fall back to built-in defaults.",
+    "orientationGizmo": {
+      "_comment": "Viewport orientation gizmo (top-right corner). Set enabled: false to hide.",
+      "enabled": true
+    },
     "kiosk": {
       "_comment": "Kiosk Mode — opt-in auto-demo after idle timeout. Default is DISABLED (backwards-compatible for existing deployments). Trade-show / showroom installations set enabled: true.",
       "enabled": false,
@@ -55,6 +53,17 @@
       "cameraAnimationTimeoutMs": 5000,
       "maxDwellMs": 60000,
       "maxConcurrentMessages": 5
+    },
+    "gaussian-splat": {
+      "_comment": "Gaussian Splat overlay — load photorealistic 3D scans (.splat/.ply/.ksplat) as environment backdrop.",
+      "enabled": false,
+      "url": "",
+      "position": [0, 0, 0],
+      "rotation": [0, 0, 0],
+      "scale": 1.0,
+      "gpuAcceleratedSort": true,
+      "compressionLevel": 2,
+      "progressiveLoad": false
     }
   }
 }

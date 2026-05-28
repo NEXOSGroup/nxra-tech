@@ -5,7 +5,7 @@
  * Tests for Layout Persistence — JSON serialization/deserialization of layouts.
  */
 import { describe, test, expect } from 'vitest';
-import { serializeLayout, deserializeLayout, type PlacedComponent } from '../../realvirtual-WebViewer-Private~/src/plugins/layout-planner';
+import { serializeLayout, deserializeLayout, type PlacedComponent } from '../src/plugins/layout-planner';
 
 const testComponents: PlacedComponent[] = [
   { id: 'a1', catalogId: 'belt-1000', glbUrl: 'https://lib.example.com/belt.glb', label: 'Belt 1m', position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },

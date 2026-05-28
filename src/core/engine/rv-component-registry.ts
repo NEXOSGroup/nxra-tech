@@ -23,6 +23,7 @@ import type { GizmoOverlayManager } from './rv-gizmo-manager';
 import type { ComponentEventDispatcher } from './rv-component-event-dispatcher';
 import type { ObjectHoverData } from './rv-raycast-manager';
 import type { EventEmitter } from '../rv-events';
+import type { ViewerEvents } from '../rv-viewer-events';
 
 // ─── Schema Types ────────────────────────────────────────────────
 
@@ -55,10 +56,8 @@ export interface ComponentContext {
   /** Optional — available when RVViewer instantiates one. Components don't
    *  need to touch this directly; they just implement onHover/onClick/onSelect. */
   componentEventDispatcher?: ComponentEventDispatcher;
-  /** Optional — viewer event bus for cross-component / UI↔engine signaling.
-   *  Untyped at the registry layer to avoid pulling ViewerEvents (rv-viewer)
-   *  into the engine; consumers that need typed events cast on usage. */
-  events?: EventEmitter;
+  /** Optional — viewer event bus for cross-component / UI↔engine signaling. */
+  events?: EventEmitter<ViewerEvents>;
 }
 
 /** Interface all auto-mapped components implement */
@@ -77,6 +76,21 @@ export interface RVComponent {
   /** Called when ownership changes (e.g. multiuser connect/disconnect).
    *  Components self-manage their multiuser behavior in this callback. */
   onOwnershipChanged?(isOwner: boolean): void;
+
+  /** Optional: authoritative current runtime values, keyed by the SAME
+   *  PascalCase display/schema names. This is the single source of truth the
+   *  UI (inspector, hierarchy badges, tooltips) reads for live state — it
+   *  overrides the static GLB config and any overlay edit. Components without
+   *  runtime state omit this method (their values come from static config).
+   *  Must be a cheap, allocation-light, read-only snapshot. */
+  getLiveState?(): Record<string, unknown>;
+
+  /** Optional: apply an inspector edit to the live runtime state and return
+   *  true if handled. Implement this when a field has a config↔runtime split
+   *  (e.g. Drive's `TargetSpeed` config vs `targetSpeed` runtime) so editing it
+   *  takes effect immediately. Return false to let the caller fall back to a
+   *  plain same-named field assignment. */
+  setLiveField?(fieldName: string, value: unknown): boolean;
 
   // ── Optional component-level event callbacks (dispatched by
   //    ComponentEventDispatcher). Components opt in by implementing any of these.
@@ -481,4 +495,21 @@ export function getConsumedFieldsFromSchema(componentType: string): string[] {
  */
 export function getRegisteredSchemaTypes(): string[] {
   return [...registeredSchemas.keys()];
+}
+
+/**
+ * Return `{ field: default }` for every schema field that declares a `default`.
+ * Used to seed synthesized components (e.g. naming-convention drives) so they
+ * carry the full editable field set — otherwise a drive derived from a
+ * `Drive-Lin-Z` node would only expose `Direction` in the inspector, unlike an
+ * authored Drive component which serializes every field.
+ */
+export function getSchemaDefaults(componentType: string): Record<string, unknown> {
+  const schema = registeredSchemas.get(componentType);
+  if (!schema) return {};
+  const out: Record<string, unknown> = {};
+  for (const [key, desc] of Object.entries(schema)) {
+    if (desc.default !== undefined) out[key] = desc.default;
+  }
+  return out;
 }

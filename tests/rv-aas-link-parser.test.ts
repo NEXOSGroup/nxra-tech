@@ -212,6 +212,79 @@ describe('parseAasXml', () => {
     expect(data.documents).toBeDefined();
     expect(Array.isArray(data.documents)).toBe(true);
   });
+
+  it('should return empty qualifiers array when none are present', () => {
+    const data = parseAasXml(FESTO_XML);
+    expect(data.qualifiers).toEqual([]);
+  });
+
+  it('should extract qualifiers attached directly to the AssetAdministrationShell', () => {
+    const xml = `<?xml version="1.0"?>
+      <aas:aasenv xmlns:aas="http://www.admin-shell.io/aas/2/0">
+        <aas:assetAdministrationShells>
+          <aas:assetAdministrationShell>
+            <aas:idShort>Demo</aas:idShort>
+            <aas:identification idType="IRI">urn:demo</aas:identification>
+            <aas:qualifier>
+              <aas:type>DemoOnly</aas:type>
+              <aas:value>true</aas:value>
+            </aas:qualifier>
+            <aas:qualifier>
+              <aas:type>DemoNote</aas:type>
+              <aas:value>Community demo — not validated</aas:value>
+            </aas:qualifier>
+          </aas:assetAdministrationShell>
+        </aas:assetAdministrationShells>
+      </aas:aasenv>`;
+    const data = parseAasXml(xml);
+    expect(data.qualifiers).toHaveLength(2);
+    expect(data.qualifiers?.[0]).toEqual({ type: 'DemoOnly', value: 'true' });
+    expect(data.qualifiers?.[1]).toEqual({ type: 'DemoNote', value: 'Community demo — not validated' });
+  });
+
+  it('should handle V3-style <qualifiers> wrapper around <qualifier> children', () => {
+    const xml = `<?xml version="1.0"?>
+      <aas:aasenv xmlns:aas="https://admin-shell.io/aas/3/0">
+        <aas:assetAdministrationShells>
+          <aas:assetAdministrationShell>
+            <aas:idShort>Demo</aas:idShort>
+            <aas:id>urn:demo</aas:id>
+            <aas:qualifiers>
+              <aas:qualifier>
+                <aas:type>DemoOnly</aas:type>
+                <aas:value>true</aas:value>
+              </aas:qualifier>
+            </aas:qualifiers>
+          </aas:assetAdministrationShell>
+        </aas:assetAdministrationShells>
+      </aas:aasenv>`;
+    const data = parseAasXml(xml);
+    expect(data.qualifiers).toEqual([{ type: 'DemoOnly', value: 'true' }]);
+  });
+
+  it('should not pick up qualifiers from nested submodels', () => {
+    const xml = `<?xml version="1.0"?>
+      <aas:aasenv xmlns:aas="http://www.admin-shell.io/aas/2/0">
+        <aas:assetAdministrationShells>
+          <aas:assetAdministrationShell>
+            <aas:idShort>Demo</aas:idShort>
+            <aas:identification idType="IRI">urn:demo</aas:identification>
+          </aas:assetAdministrationShell>
+        </aas:assetAdministrationShells>
+        <aas:submodels>
+          <aas:submodel>
+            <aas:idShort>Nameplate</aas:idShort>
+            <aas:identification idType="IRI">urn:sm</aas:identification>
+            <aas:qualifier>
+              <aas:type>InternalFlag</aas:type>
+              <aas:value>shouldNotAppear</aas:value>
+            </aas:qualifier>
+          </aas:submodel>
+        </aas:submodels>
+      </aas:aasenv>`;
+    const data = parseAasXml(xml);
+    expect(data.qualifiers).toEqual([]);
+  });
 });
 
 describe('cleanLabel', () => {

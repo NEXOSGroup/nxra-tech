@@ -20,6 +20,7 @@ export const NavButton = memo(function NavButton({ icon, label, badge, active, o
         size="medium"
         onClick={onClick}
         sx={{
+          flexShrink: 0,
           color: active ? 'primary.main' : 'text.secondary',
           bgcolor: active ? 'rgba(79, 195, 247, 0.12)' : 'transparent',
           '&:hover': {

@@ -35,6 +35,7 @@ import {
   LEFT_PANEL_BOTTOM,
   LEFT_PANEL_ZINDEX,
 } from './layout-constants';
+import { ISA_RED } from './isa-colors';
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -165,7 +166,7 @@ export function AnnotationPanel() {
               <IconButton
                 size="small"
                 onClick={(e) => { e.stopPropagation(); handleDelete(ann.id); }}
-                sx={{ color: 'rgba(255,255,255,0.3)', p: 0.2, '&:hover': { color: '#ef5350' } }}
+                sx={{ color: 'rgba(255,255,255,0.3)', p: 0.2, '&:hover': { color: ISA_RED } }}
               >
                 <Delete sx={{ fontSize: 12 }} />
               </IconButton>

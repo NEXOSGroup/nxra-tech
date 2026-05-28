@@ -35,6 +35,7 @@ import {
   type RaycastGroup,
 } from './rv-raycast-geometry';
 import { getCapabilities } from './rv-component-registry';
+import { pointerToNDC } from './rv-pointer-utils';
 
 // ─── Public types ───────────────────────────────────────────────────
 
@@ -160,7 +161,15 @@ export class RaycastManager {
 
   constructor(
     private readonly renderer: { readonly domElement: HTMLCanvasElement },
-    private readonly camera: Camera,
+    /**
+     * Getter that returns the CURRENTLY ACTIVE camera — never capture by
+     * reference. The viewer can swap perspective ↔ orthographic at runtime
+     * (`viewer.projection = ...` / `viewer.animateProjectionTo(...)`), and
+     * Three.js's `Raycaster.setFromCamera` constructs different rays for
+     * each projection type. A captured stale reference produces wrong rays
+     * after a projection swap → wrong selection / hover hits.
+     */
+    private readonly getCamera: () => Camera,
     private readonly scene: Scene,
     private readonly registry: NodeRegistry,
     private readonly highlighter: RVHighlightManager,
@@ -181,6 +190,11 @@ export class RaycastManager {
       (obj) => !!obj.userData?._driveHoverOverlay,
       (obj) => obj.name.endsWith('_sensorViz'),
       (obj) => !!obj.userData?._tankFillViz,
+      // Source pause-ghost (plan-180) and floor-marker (plan-181). Both are
+      // children of `RVSource.node` and should never block selection of the
+      // pallet/layout-object below them — they're purely visual identifiers.
+      (obj) => !!obj.userData?._isSourceGhost,
+      (obj) => !!obj.userData?._isSourceMarker,
     );
 
     // Default: only drives are hoverable
@@ -293,6 +307,15 @@ export class RaycastManager {
   }
 
   /**
+   * Read the current allow filter (or null if none).
+   * Useful for plugins that need to save/restore the filter so they can coexist
+   * with other plugins also using setAllowFilter.
+   */
+  getAllowFilter(): ((node: Object3D) => boolean) | null {
+    return this._allowFilter;
+  }
+
+  /**
    * Set the isolation gate — when set, only nodes passing this gate are
    * hoverable/clickable. Wired by RVViewer from GroupRegistry +
    * AutoFilterRegistry so isolation enforcement is a single invariant rather
@@ -352,11 +375,9 @@ export class RaycastManager {
     hitNormal: [number, number, number];
   } | null {
     if (!this.registry || this._targets.length === 0) return null;
-    const rect = this.renderer.domElement.getBoundingClientRect();
-    this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-    this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    pointerToNDC(e.clientX, e.clientY, this.renderer.domElement, this.pointer);
 
-    this.raycaster.setFromCamera(this.pointer, this.camera);
+    this.raycaster.setFromCamera(this.pointer, this.getCamera());
     const hits = this.raycaster.intersectObjects(this._targets, false);
 
     for (const hit of hits) {
@@ -385,7 +406,7 @@ export class RaycastManager {
     node: Object3D; nodeType: string; nodePath: string;
   } | null {
     if (this._targets.length === 0) return null;
-    const cam = xrCamera ?? this.camera;
+    const cam = xrCamera ?? this.getCamera();
     const w = window.innerWidth;
     const h = window.innerHeight;
 
@@ -477,11 +498,9 @@ export class RaycastManager {
     if (now - this.lastRaycastMs < THROTTLE_MS) return;
     this.lastRaycastMs = now;
 
-    const rect = this.renderer.domElement.getBoundingClientRect();
-    this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-    this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    pointerToNDC(e.clientX, e.clientY, this.renderer.domElement, this.pointer);
 
-    this.raycaster.setFromCamera(this.pointer, this.camera);
+    this.raycaster.setFromCamera(this.pointer, this.getCamera());
     this._doRaycast();
   }
 

@@ -5,11 +5,11 @@ import { Scene, Object3D, Box3, BufferAttribute, Mesh, BufferGeometry } from 'th
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { RVDrive } from './rv-drive';
-import { RVErraticDriver } from './rv-erratic';
-import { RVDriveSimple } from './rv-drive-simple';
-import { RVDriveCylinder } from './rv-drive-cylinder';
 import { AABB } from './rv-aabb';
+import { registerSignal, constructDrive, SIGNAL_TYPES } from './rv-signal-construction';
+import { classifyShadows } from './rv-mesh-classifier';
 import type { EventEmitter } from '../rv-events';
+import type { ViewerEvents } from '../rv-viewer-events';
 // Side-effect imports: trigger registerComponent() at module load
 import './rv-transport-surface';
 import './rv-sensor';
@@ -24,6 +24,7 @@ import './rv-web-sensor';
 import { RVPipe } from './rv-pipe';
 import { RVTank } from './rv-tank';
 import { RVPump } from './rv-pump';
+import { RVProcessingUnit } from './rv-processing-unit';
 import { applySchema, resolveComponentRefs, getRegisteredFactories, registerCapabilities, type RVComponent, type ComponentContext, type ComponentSchema } from './rv-component-registry';
 import type { GizmoOverlayManager } from './rv-gizmo-manager';
 import { RVTransportManager } from './rv-transport-manager';
@@ -42,6 +43,9 @@ import { mergeStaticUberMeshes, type StaticUberMergeResult } from './rv-static-m
 import { mergeKinematicGroupMeshes, type KinematicMergeResult } from './rv-kinematic-merge-uber';
 import { mergeStaticGeometries, type StaticMergeResult } from './rv-static-merge';
 import { buildRaycastGeometries, type RaycastGeometrySet } from './rv-raycast-geometry';
+import { applyOverlayToNode, type RVExtrasOverlay } from './rv-extras-overlay-store';
+import { applyKinematicsSpec } from '../behavior-runtime';
+import { scanLibraryComponent } from '../library-component-loader';
 
 // Singleton loader instances
 const dracoLoader = new DRACOLoader();
@@ -109,6 +113,11 @@ export interface RecorderSettings {
 import type { ModelConfig } from './rv-model-config';
 
 export interface LoadResult {
+  /** The GLB root Object3D added to `scene` by `loadGLB`. Lets the caller
+   *  track the new model deterministically without diffing `scene.children`
+   *  before/after the load (which is fragile when overlays/gizmos attach
+   *  directly to the scene). */
+  root: Object3D;
   drives: RVDrive[];
   transportManager: RVTransportManager;
   signalStore: SignalStore;
@@ -173,15 +182,7 @@ function createAABBFromExtras(node: Object3D, rv: Record<string, unknown>): AABB
   return meshAABB;
 }
 
-/** Map of known drive behavior types → class + schema for data-driven instantiation */
-const DRIVE_BEHAVIOR_MAP: Record<string, { ctor: new (n: Object3D) => RVComponent; schema: ComponentSchema }> = {
-  Drive_ErraticPosition: { ctor: RVErraticDriver, schema: RVErraticDriver.schema },
-  Drive_Simple: { ctor: RVDriveSimple, schema: RVDriveSimple.schema },
-  Drive_Cylinder: { ctor: RVDriveCylinder, schema: RVDriveCylinder.schema },
-};
-
-/** Signal type names recognized from GLB extras */
-const SIGNAL_TYPES = ['PLCOutputBool', 'PLCInputBool', 'PLCOutputFloat', 'PLCInputFloat', 'PLCOutputInt', 'PLCInputInt'];
+// DRIVE_BEHAVIOR_MAP and SIGNAL_TYPES moved to ./rv-signal-construction.ts
 
 export interface LoadGLBOptions {
   /** When true, apply WebGPU-specific geometry fixes (e.g., Uint16 index conversion). Default: false */
@@ -190,7 +191,14 @@ export interface LoadGLBOptions {
   gizmoManager?: GizmoOverlayManager;
   /** Optional viewer event bus — passed into ComponentContext for components
    *  that need to react to UI↔engine signals (e.g. RVSafetyDoor visibility toggle). */
-  events?: EventEmitter;
+  events?: EventEmitter<ViewerEvents>;
+  /**
+   * Optional rv-extras overlay applied during the main traversal — BEFORE
+   * components read `userData.realvirtual`. This guarantees component
+   * constructors see the overridden values directly, eliminating the race
+   * window the post-load re-application path used to have.
+   */
+  overlay?: RVExtrasOverlay;
 }
 
 /** Pending component awaiting resolveComponentRefs + init() in Step 2 */
@@ -291,14 +299,9 @@ export function processMeshes(root: Object3D): MeshProcessResult {
   root.traverse((node: Object3D) => {
     if ((node as Mesh).isMesh) {
       const mesh = node as Mesh;
-      const mat = mesh.material as { transparent?: boolean; alphaTest?: number; opacity?: number; alphaMap?: unknown; map?: { format?: number } } | undefined;
-      const hasAlpha = mat && (
-        mat.transparent === true ||
-        (mat.alphaTest ?? 0) > 0 ||
-        mat.alphaMap != null ||
-        (mat.opacity ?? 1) < 1
-      );
-      if (hasAlpha) {
+      const shouldCast = classifyShadows(mesh);
+      if (!shouldCast) {
+        const mat = mesh.material as { transparent?: boolean; alphaTest?: number; opacity?: number } | undefined;
         debug('loader', `No shadow: ${node.name} (transparent=${mat?.transparent}, alphaTest=${mat?.alphaTest}, opacity=${mat?.opacity})`);
         mesh.castShadow = false;
       } else {
@@ -391,6 +394,7 @@ export function traverseAndRegister(
   registry: NodeRegistry,
   signalStore: SignalStore,
   renamedNodes: Map<Object3D, string>,
+  overlay?: RVExtrasOverlay,
 ): TraverseResult {
   const drives: RVDrive[] = [];
   const pending: PendingComponent[] = [];
@@ -415,6 +419,11 @@ export function traverseAndRegister(
     const path = NodeRegistry.computeNodePath(node);
     registry.registerNode(path, node);
 
+    // Apply rv-extras overlay BEFORE components read userData.realvirtual.
+    // The overlay can introduce new component types on a node — so always run
+    // this step regardless of whether the node already has rv-extras.
+    if (overlay) applyOverlayToNode(node, path, overlay);
+
     const rv = node.userData?.realvirtual as Record<string, unknown> | undefined;
     if (!rv) return;
 
@@ -423,16 +432,7 @@ export function traverseAndRegister(
       if (rv[sigType]) {
         const sigData = rv[sigType] as Record<string, unknown>;
         validateExtras(sigType, sigData);
-        const status = sigData['Status'] as { Value?: boolean | number } | undefined;
-        const signalName = (sigData['Name'] as string) || renamedNodes.get(node) || node.name;
-        if (sigType.includes('Bool')) {
-          signalStore.register(signalName, path, status?.Value as boolean ?? false, sigType);
-        } else if (sigType.includes('Float')) {
-          signalStore.register(signalName, path, status?.Value as number ?? 0, sigType);
-        } else if (sigType.includes('Int')) {
-          signalStore.register(signalName, path, status?.Value as number ?? 0, sigType);
-        }
-        registry.register(sigType, path, { address: path, signalName });
+        registerSignal(node, sigType, sigData, path, signalStore, registry, renamedNodes.get(node));
       }
     }
 
@@ -441,39 +441,14 @@ export function traverseAndRegister(
       const driveData = rv['Drive'] as Record<string, unknown>;
       validateExtras('Drive', driveData);
 
-      const dirStr = driveData['Direction'] as string | undefined;
-      if (dirStr) {
-        const drive = new RVDrive(node);
-        applySchema(drive as unknown as Record<string, unknown>, RVDrive.schema, driveData);
-
-        // Collect DriveBehaviours
-        const behaviors: string[] = [];
-        const behaviorExtras: Record<string, Record<string, unknown>> = {};
-        for (const key of Object.keys(rv)) {
-          if (key !== 'Drive' && key.startsWith('Drive_')) {
-            behaviors.push(key);
-            const bExtras = rv[key] as Record<string, unknown>;
-            behaviorExtras[key] = bExtras;
-            validateExtras(key, bExtras);
-          }
-        }
-        drive.Behaviors = behaviors;
-        drive.BehaviorExtras = behaviorExtras;
-        drive.initDrive();
-
+      const driveResult = constructDrive(
+        node, rv, driveData, path, registry,
+        (bKey, bExtras) => { validateExtras(bKey, bExtras); },
+      );
+      if (driveResult) {
+        const { drive, pendingBehaviors, behaviors } = driveResult;
         drives.push(drive);
-        registry.register('Drive', path, drive);
-        node.userData._rvType = 'Drive';
-
-        // Instantiate recognized drive behaviors via data-driven map
-        for (const bName of behaviors) {
-          const entry = DRIVE_BEHAVIOR_MAP[bName];
-          if (entry) {
-            const inst = new entry.ctor(node);
-            applySchema(inst as unknown as Record<string, unknown>, entry.schema, behaviorExtras[bName] ?? {});
-            pending.push({ component: inst, type: bName, path });
-          }
-        }
+        for (const pb of pendingBehaviors) pending.push(pb);
 
         debug('loader',
           `Drive: ${node.name} [${drive.Direction}${drive.ReverseDirection ? ' REV' : ''}]` +
@@ -550,13 +525,7 @@ export function traverseAndRegister(
       registry.register('Pump', path, node);
     }
     if (rv['ProcessingUnit']) {
-      validateExtras('ProcessingUnit', rv['ProcessingUnit'] as Record<string, unknown>);
-      node.userData._rvType = 'ProcessingUnit';
-      const puData = rv['ProcessingUnit'] as Record<string, unknown>;
-      const connRefs = puData['connections'] as Array<{ path?: string }> | undefined;
-      node.userData._rvProcessingUnit = {
-        connectionPaths: connRefs?.map(r => r?.path ?? null).filter(Boolean) ?? [],
-      };
+      new RVProcessingUnit(node, rv['ProcessingUnit'] as Record<string, unknown>);
       processingUnitNodes.push(node);
       registry.register('ProcessingUnit', path, node);
     }
@@ -647,6 +616,48 @@ export function traverseAndRegister(
 }
 
 /**
+ * Reconcile overlay overrides that the Phase-5 traverse could not apply because
+ * the override's stored node-path differs from the path the node had during
+ * traversal — chiefly when kinematic re-parenting (Phase 8b) moves a node and
+ * changes its path, but also for space/underscore/suffix/alias differences.
+ *
+ * Runs after the registry is final (Phase 8c). For each override node-path it
+ * resolves the node through the registry (which normalizes + suffix/alias
+ * matches), then applies the override. `applyOverlayToNode` is idempotent and
+ * returns whether anything changed — overrides already applied during traversal
+ * (exact path match) report no change and are skipped. Only genuinely-missed
+ * overrides trigger a re-sync of the live component so runtime reflects the
+ * override (e.g. a drive's targetSpeed), without re-caching the base transform.
+ */
+export function reconcileOverlayOverrides(
+  registry: NodeRegistry,
+  overlay: RVExtrasOverlay,
+): void {
+  for (const nodePath of Object.keys(overlay.nodes)) {
+    const node = registry.getNode(nodePath);
+    if (!node) continue;
+    const changed = applyOverlayToNode(node, nodePath, overlay);
+    if (!changed) continue; // already applied during traversal (exact match)
+
+    // Push the now-applied userData values into each live component instance.
+    const fields = overlay.nodes[nodePath];
+    const rv = node.userData?.realvirtual as Record<string, Record<string, unknown>> | undefined;
+    for (const componentType of Object.keys(fields)) {
+      const instance = registry.getByPath<RVComponent>(componentType, nodePath);
+      if (!instance) continue;
+      const data = rv?.[componentType] ?? {};
+      const schema = getRegisteredFactories().get(componentType)?.schema
+        ?? (instance.constructor as { schema?: ComponentSchema }).schema;
+      if (schema) applySchema(instance as unknown as Record<string, unknown>, schema, data);
+      // Drives have a config→runtime split (TargetSpeed/Direction → targetSpeed/
+      // axis); re-derive them safely without re-caching the base transform.
+      if (instance instanceof RVDrive) instance.reapplyConfig();
+    }
+    debug('loader', `[overlay] reconciled missed override at "${nodePath}"`);
+  }
+}
+
+/**
  * Register alias paths for nodes renamed by Three.js dedup.
  * Must happen AFTER Step 1 (signals registered) and BEFORE Step 2 (refs resolved).
  */
@@ -695,7 +706,7 @@ export function initializeComponents(
   transportManager: RVTransportManager,
   root: Object3D,
   gizmoManager?: GizmoOverlayManager,
-  events?: EventEmitter,
+  events?: EventEmitter<ViewerEvents>,
 ): void {
   const context: ComponentContext = { registry, signalStore, scene, transportManager, root, gizmoManager, events };
   for (const { component } of pending) {
@@ -718,7 +729,7 @@ export function runOnSceneReady(
   transportManager: RVTransportManager,
   root: Object3D,
   gizmoManager?: GizmoOverlayManager,
-  events?: EventEmitter,
+  events?: EventEmitter<ViewerEvents>,
 ): void {
   const context: ComponentContext = { registry, signalStore, scene, transportManager, root, gizmoManager, events };
   for (const { component } of pending) {
@@ -1002,6 +1013,43 @@ export function buildLogicEngine(
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Sidecar JSON loader
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Attempt to fetch a `<glb>.kin.json` sidecar next to the GLB URL.
+ *
+ * Returns the parsed KinematicsSpec on success, null on 404 (silent),
+ * or null with a console warning on parse error.
+ *
+ * The URL transformation strips an optional `?query` part before swapping
+ * the `.glb` extension so cache-busted GLB URLs still locate their sidecar.
+ *
+ * Exported for testing.
+ */
+export async function tryFetchSidecarSpec(glbUrl: string): Promise<import('../behavior-runtime').KinematicsSpec | null> {
+  if (!glbUrl) return null;
+  const [base, query] = glbUrl.split('?', 2);
+  if (!/\.glb$/i.test(base)) return null;
+  const sidecarUrl = base.replace(/\.glb$/i, '.kin.json') + (query ? `?${query}` : '');
+  let resp: Response;
+  try {
+    resp = await fetch(sidecarUrl);
+  } catch {
+    return null; // network error — silent
+  }
+  if (!resp.ok) return null; // 404 / 403 — silent
+  try {
+    const text = await resp.text();
+    if (!text.trim()) return null;
+    return JSON.parse(text) as import('../behavior-runtime').KinematicsSpec;
+  } catch (e) {
+    console.warn(`[sidecar] parse error for ${sidecarUrl}:`, e);
+    return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // loadGLB — Orchestrator calling phase functions
 // ═══════════════════════════════════════════════════════════════════
 
@@ -1030,8 +1078,36 @@ export async function loadGLB(url: string, scene: Scene, options?: LoadGLBOption
   const manager = new RVTransportManager();
   manager.scene = scene;
 
-  // Phase 5: Main traversal — register nodes, signals, drives, components
-  const traverseResult = traverseAndRegister(root, registry, signalStore, renamedNodes);
+  // Phase 4b: Sidecar JSON — try to fetch `<glb>.kin.json` next to the GLB.
+  // Silent on 404 (no warning); parse errors are warned but not fatal.
+  // Spec is applied before component construction so factories see the writes.
+  try {
+    const sidecarSpec = await tryFetchSidecarSpec(url);
+    if (sidecarSpec) {
+      const report = applyKinematicsSpec(root, sidecarSpec);
+      debug('loader', `Sidecar applied: drives=${report.applied.drives} transports=${report.applied.transports} sensors=${report.applied.sensors}`);
+    }
+  } catch (e) {
+    console.warn(`[loadGLB] sidecar load failed for ${url}:`, e);
+  }
+
+  // Phase 4c: Library-Component naming-convention scan — walks the entire
+  // GLB tree and derives a spec from Drive-*/Transport-* names. No marker
+  // required; the patterns are specific enough that false positives are
+  // unlikely. Deep-merge preserves any manually-authored rv_extras (F13).
+  // `hasLibraryMarker` is still available for diagnostics/logging.
+  {
+    const spec = scanLibraryComponent(root);
+    if ((spec.drives?.length ?? 0) > 0 || (spec.transports?.length ?? 0) > 0) {
+      applyKinematicsSpec(root, spec);
+      debug('loader', `Naming-convention scan: drives=${spec.drives!.length} transports=${spec.transports!.length}`);
+    }
+  }
+
+  // Phase 5: Main traversal — register nodes, signals, drives, components.
+  // The optional overlay is applied per-node BEFORE component construction
+  // so drives/sensors see the overridden field values directly.
+  const traverseResult = traverseAndRegister(root, registry, signalStore, renamedNodes, options?.overlay);
 
   // Phase 6: Register node aliases for renamed nodes
   registerNodeAliases(renamedNodes, registry, signalStore);
@@ -1062,6 +1138,17 @@ export async function loadGLB(url: string, scene: Scene, options?: LoadGLBOption
     }
     debug('loader', `[Kinematic] Recomputed ${count} registry paths, ${remap.size} signal paths after re-parenting`);
   }
+
+  // Phase 8d: Reconcile overlay overrides that the Phase-5 traverse could not
+  // apply because the override's stored node-path didn't match the path used
+  // during traversal. This happens when kinematic re-parenting (Phase 8b)
+  // changes a node's path between traversal and the final registry — the
+  // inspector edited (and stored the override under) the post-reparent path,
+  // but the traverse applied overrides keyed by the pre-reparent path. It also
+  // covers space/underscore/suffix/alias path differences. The registry is now
+  // complete (paths recomputed in 8c), so resolve each override key against it
+  // and apply anything that didn't land, re-syncing the live component.
+  if (options?.overlay) reconcileOverlayOverrides(registry, options.overlay);
 
   // Phase 8d: Late-init pass — components opting into onSceneReady() now see
   // the final hierarchy (kinematic re-parenting complete). Used by gizmos that
@@ -1156,6 +1243,7 @@ export async function loadGLB(url: string, scene: Scene, options?: LoadGLBOption
   );
 
   return {
+    root,
     drives: traverseResult.drives,
     transportManager: manager,
     signalStore,
@@ -1206,6 +1294,8 @@ export function processExtras(
   signalStore: SignalStore,
   transportManager: RVTransportManager,
   scene: Scene,
+  gizmoManager?: GizmoOverlayManager,
+  events?: EventEmitter<ViewerEvents>,
 ): ProcessExtrasResult {
   const drives: RVDrive[] = [];
   const pending: PendingComponent[] = [];
@@ -1213,6 +1303,12 @@ export function processExtras(
 
   // ── STEP 1 "Awake": Traverse, construct, applySchema, register ──
   root.traverse((node: Object3D) => {
+    // Skip Layout-Planner ghost / held-preview / drag-ghost clones. These are
+    // pure-visual previews that may have copied a source's rv-extras via
+    // Object3D.clone(); instantiating components on them would create recursive
+    // Sources that spawn endlessly and nest under the source.
+    if (node.userData?._isSourceGhost || node.userData?._isSourcePreview || node.userData?._isGhost) return;
+
     // Register node in registry
     const path = NodeRegistry.computeNodePath(node);
     registry.registerNode(path, node);
@@ -1224,50 +1320,19 @@ export function processExtras(
     for (const sigType of SIGNAL_TYPES) {
       if (rv[sigType]) {
         const sigData = rv[sigType] as Record<string, unknown>;
-        const status = sigData['Status'] as { Value?: boolean | number } | undefined;
-        const signalName = (sigData['Name'] as string) || node.name;
-        if (sigType.includes('Bool')) {
-          signalStore.register(signalName, path, status?.Value as boolean ?? false, sigType);
-        } else if (sigType.includes('Float') || sigType.includes('Int')) {
-          signalStore.register(signalName, path, status?.Value as number ?? 0, sigType);
+        if (registerSignal(node, sigType, sigData, path, signalStore, registry)) {
+          signalsRegistered++;
         }
-        registry.register(sigType, path, { address: path, signalName });
-        signalsRegistered++;
       }
     }
 
     // ── Drive ──
     if (rv['Drive']) {
       const driveData = rv['Drive'] as Record<string, unknown>;
-      const dirStr = driveData['Direction'] as string | undefined;
-      if (dirStr) {
-        const drive = new RVDrive(node);
-        applySchema(drive as unknown as Record<string, unknown>, RVDrive.schema, driveData);
-
-        const behaviors: string[] = [];
-        const behaviorExtras: Record<string, Record<string, unknown>> = {};
-        for (const key of Object.keys(rv)) {
-          if (key !== 'Drive' && key.startsWith('Drive_')) {
-            behaviors.push(key);
-            behaviorExtras[key] = rv[key] as Record<string, unknown>;
-          }
-        }
-        drive.Behaviors = behaviors;
-        drive.BehaviorExtras = behaviorExtras;
-        drive.initDrive();
-
-        drives.push(drive);
-        registry.register('Drive', path, drive);
-        node.userData._rvType = 'Drive';
-
-        for (const bName of behaviors) {
-          const entry = DRIVE_BEHAVIOR_MAP[bName];
-          if (entry) {
-            const inst = new entry.ctor(node);
-            applySchema(inst as unknown as Record<string, unknown>, entry.schema, behaviorExtras[bName] ?? {});
-            pending.push({ component: inst, type: bName, path });
-          }
-        }
+      const driveResult = constructDrive(node, rv, driveData, path, registry);
+      if (driveResult) {
+        drives.push(driveResult.drive);
+        for (const pb of driveResult.pendingBehaviors) pending.push(pb);
       }
     }
 
@@ -1286,15 +1351,15 @@ export function processExtras(
   });
 
   // ── STEP 2 "Start": resolveComponentRefs + init() ──
-  const context: ComponentContext = { registry, signalStore, scene, transportManager, root };
+  // Thread gizmoManager + events so dynamically placed components (e.g. a
+  // TransportSurface dropped in from the library) can create selection
+  // overlays and subscribe to selection events, exactly like the main
+  // loadGLB() path does via initializeComponents().
+  const context: ComponentContext = { registry, signalStore, scene, transportManager, root, gizmoManager, events };
   for (const { component } of pending) {
     resolveComponentRefs(component as unknown as Record<string, unknown>, registry);
     component.init(context);
   }
-  // NOTE: gizmoManager omitted here — this second loader pass
-  // (dynamic add path) currently does not thread the gizmoManager
-  // through. Components needing overlays should use the main
-  // loadGLB() path which passes it via initializeComponents().
 
   // Rebuild signal index for O(1) lookup of newly added signals
   signalStore.buildIndex();

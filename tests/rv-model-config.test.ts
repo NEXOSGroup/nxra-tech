@@ -299,11 +299,11 @@ describe('Plugin Activation (selective vs all-by-default)', () => {
   it('SELECTIVE-MODE: core plugins always activate even when not declared', async () => {
     const host = new PluginHost();
     host.use({ id: 'drive-order', core: true });
-    host.use({ id: 'rapier-physics', core: true });
+    host.use({ id: 'sensor-monitor', core: true });
     host.use({ id: 'maintenance' });
 
     const activated = await host.activatePlugins([]);
-    expect(activated).toEqual(['drive-order', 'rapier-physics']);
+    expect(activated).toEqual(['drive-order', 'sensor-monitor']);
   });
 
   it('SELECTIVE-MODE: resolves lazy plugins when declared', async () => {

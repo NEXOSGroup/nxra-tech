@@ -27,7 +27,7 @@
  * so on/off is unambiguous regardless of flow magnitude.
  */
 
-import { Box3, Mesh, MeshStandardMaterial, Vector3 } from 'three';
+import { Box3, FrontSide, Mesh, MeshBasicMaterial, MeshStandardMaterial, Vector3 } from 'three';
 import type { Object3D } from 'three';
 import type { RVViewerPlugin } from '../core/rv-plugin';
 import type { LoadResult } from '../core/engine/rv-scene-loader';
@@ -35,25 +35,39 @@ import type { RVViewer } from '../core/rv-viewer';
 import { RVPipe } from '../core/engine/rv-pipe';
 import { RVTank } from '../core/engine/rv-tank';
 import { RVPump } from '../core/engine/rv-pump';
+import { RVProcessingUnit } from '../core/engine/rv-processing-unit';
+import { NodeRegistry } from '../core/engine/rv-node-registry';
+import { tooltipStore } from '../core/hmi/tooltip/tooltip-store';
+import { ISOLATE_FOCUS_LAYER } from '../core/engine/rv-group-registry';
 
 interface FluidDef {
   name: string;
   color: number;
   emissive: number;
+  /** Density in kg/m³ (typical for this medium). 0 = unknown. */
+  density: number;
+  /** Nominal storage temperature °C. */
+  temperature: number;
+  /** pH value, or 0 when not measured / N/A for non-aqueous solvents. */
+  ph: number;
 }
 
 // Paint / coatings / resin plant palette — spans raw solvents & resins →
 // intermediates → finished products → recycled solvent. Must stay in sync
 // with RESOURCE_COLORS in tank-fill-history-plugin.tsx so the 3-D pipe
 // color matches the trend-line color for every medium.
+// Dusty-pastel palette (MUI 300 shades) — deeper and more saturated than
+// baby-pastel 100/200 while still reading as soft. Emissive steps up one
+// more notch (MUI 400) so the flow glow is clearly visible against the
+// mesh color without destroying the muted feel.
 const FLUIDS: ReadonlyArray<FluidDef> = [
-  { name: 'Xylene',            color: 0xb39ddb, emissive: 0x7e57c2 },
-  { name: 'MEK',               color: 0x90caf9, emissive: 0x1976d2 },
-  { name: 'Epoxy Resin',       color: 0xffb74d, emissive: 0xef6c00 },
-  { name: 'Pigment Paste',     color: 0xd84315, emissive: 0xb71c1c },
-  { name: 'Automotive Paint',  color: 0x3949ab, emissive: 0x1a237e },
-  { name: 'Wood Varnish',      color: 0x6d4c41, emissive: 0x3e2723 },
-  { name: 'Recovered Solvent', color: 0x4db6ac, emissive: 0x00695c },
+  { name: 'Xylene',            color: 0x9575CD, emissive: 0x7E57C2, density:  860, temperature: 22, ph: 0    }, // dusty lavender
+  { name: 'MEK',               color: 0x4FC3F7, emissive: 0x29B6F6, density:  805, temperature: 20, ph: 0    }, // dusty sky
+  { name: 'Epoxy Resin',       color: 0xFFAB91, emissive: 0xFF8A65, density: 1150, temperature: 28, ph: 7.2  }, // dusty coral
+  { name: 'Pigment Paste',     color: 0xF48FB1, emissive: 0xF06292, density: 1400, temperature: 26, ph: 8.4  }, // dusty rose
+  { name: 'Automotive Paint',  color: 0x7986CB, emissive: 0x5C6BC0, density: 1100, temperature: 24, ph: 8.0  }, // dusty periwinkle
+  { name: 'Wood Varnish',      color: 0xA1887F, emissive: 0x8D6E63, density:  950, temperature: 23, ph: 0    }, // dusty taupe
+  { name: 'Recovered Solvent', color: 0x4DB6AC, emissive: 0x26A69A, density:  820, temperature: 30, ph: 0    }, // dusty teal
 ];
 
 /** Seconds between consecutive flip decisions on a given pipe. Wide range
@@ -74,7 +88,7 @@ function randomFlowMagnitude(): number {
 }
 
 /** Lerp an RGB color toward white by `amount` (0–1). Used to brighten the
- *  tank fill liquid + surface-ring so they read as "the medium, but lit". */
+ *  surface-ring so it pops against the darker liquid fill. */
 function brighten(hex: number, amount: number): number {
   const r = (hex >> 16) & 0xff;
   const g = (hex >> 8) & 0xff;
@@ -90,6 +104,26 @@ function nextFlipDelay(): number {
   return PIPE_FLIP_MIN_S + Math.random() * (PIPE_FLIP_MAX_S - PIPE_FLIP_MIN_S);
 }
 
+/** Fixed seed for the deterministic initial fluid assignment. Changing this
+ *  is the only way to shuffle which medium a given tank/pipe network starts
+ *  with — useful for demos / screenshots / reproducible bug reports. */
+const INITIAL_FLUID_SEED = 0x9e3779b9;
+
+/** Mulberry32 — small-state, good-quality seeded RNG. Returns a function
+ *  that yields uniform values in [0, 1). Used only for the one-shot initial
+ *  fluid assignment so periodic reshuffles can stay `Math.random()`-driven
+ *  and keep the scene feeling alive. */
+function makeSeededRng(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 export class ProcessIndustryPlugin implements RVViewerPlugin {
   readonly id = 'processindustry';
   readonly order = 150;
@@ -97,6 +131,55 @@ export class ProcessIndustryPlugin implements RVViewerPlugin {
   private pipes: RVPipe[] = [];
   private tanks: RVTank[] = [];
   private pumps: RVPump[] = [];
+  private processingUnits: RVProcessingUnit[] = [];
+
+  /** Per-pump stable "nominal" values. Drift is applied around these so the
+   *  tooltip isn't purely random between frames. Index-parallel to `pumps`. */
+  private pumpNominals: Array<{
+    suctionP: number;        // bar
+    dischargeP: number;      // bar at nominal flow
+    ratedFlowLpm: number;    // l/min at 100 %
+    ratedSpeedRpm: number;
+    ratedPowerKw: number;
+    ratedCurrentA: number;
+    bearingTempC: number;
+    motorTempC: number;
+    vibrationMmS: number;
+    npshA: number;
+    npshR: number;
+    runHours: number;
+  }> = [];
+
+  /** Per-tank stable "nominal" values (temp / pressure / limits / switches). */
+  private tankNominals: Array<{
+    nominalTempC: number;
+    nominalPressure: number;
+    tempHighLimit: number;
+    tempLowLimit: number;
+    pressureHighLimit: number;
+    heaterOn: boolean;
+    agitatorOn: boolean;
+    ph: number;          // 0 = not measured
+    density: number;     // kg/m³
+  }> = [];
+
+  /** Per-pipe stable nominal DN size + line temperature. Flow velocity is
+   *  derived from the live flowRate each frame. */
+  private pipeNominals: Array<{ dnSize: number; temperatureC: number; pressure: number }> = [];
+
+  /** Per-PU stable nominal OEE / MTBF / MTTR / cycle target. */
+  private puNominals: Array<{
+    availability: number;
+    performance: number;
+    quality: number;
+    cycleTargetS: number;
+    mtbfHours: number;
+    mttrMinutes: number;
+    runHoursBase: number;
+    downHoursBase: number;
+    goodBase: number;
+    scrapBase: number;
+  }> = [];
 
   /** Leaf-name → tanks/pipes with that exact leaf. Used as a fallback when a
    *  ComponentReference path doesn't resolve via the NodeRegistry, which
@@ -112,11 +195,12 @@ export class ProcessIndustryPlugin implements RVViewerPlugin {
    *  `source` to `destination`; negative flow transfers the opposite way. */
   private pipeEndpoints: Array<{ source: RVTank | null; destination: RVTank | null }> = [];
 
-  /** Connected tank+pipe subgraphs discovered at load time. Edges follow pipe↔tank
-   *  and pipe↔pipe references; Pumps and ProcessingUnits act as barriers. Every
-   *  tank and pipe in a subgraph is assigned the SAME fluid so the contents of a
-   *  physically connected piping network are coherent instead of randomly mixed. */
-  private fluidSubgraphs: Array<{ tanks: RVTank[]; pipes: RVPipe[] }> = [];
+  /** Connected tank+pipe+pump subgraphs discovered at load time. Edges follow
+   *  pipe↔tank and pipe↔pipe references plus pump↔pipe via the pump's `pipe`
+   *  reference; ProcessingUnits remain barriers. Every member of a subgraph is
+   *  assigned the SAME fluid so the contents of a physically connected piping
+   *  network are coherent instead of randomly mixed. */
+  private fluidSubgraphs: Array<{ tanks: RVTank[]; pipes: RVPipe[]; pumps: RVPump[] }> = [];
 
   /** Cached original materials per pipe node so we can restore on unload. */
   private originalMaterials = new Map<Mesh, MeshStandardMaterial | MeshStandardMaterial[] | unknown>();
@@ -166,24 +250,155 @@ export class ProcessIndustryPlugin implements RVViewerPlugin {
    *  opts in. */
   isColoringEnabled(): boolean { return this.coloringEnabled; }
 
+  /** Component types isolated together when coloring is enabled. Matches the
+   *  NodeRegistry keys used by the auto-filter registry (Tank is the short
+   *  alias; ResourceTank is the GLB extras key). */
+  private static readonly ISOLATED_TYPES: readonly string[] = ['Tank', 'Pipe', 'Pump', 'ProcessingUnit'];
+
   /** Toggle fluid recoloring for pipes and tanks. When switching on, every
-   *  pipe + tank is repainted AND the scrolling flow rings are tinted to
-   *  match the fluid. When switching off, each mesh's original GLB material
-   *  is restored and rings revert to default cyan. Idempotent. */
+   *  pipe is repainted, tank fill overlays are retinted, AND the scene is
+   *  focused on the pumping plant (pipes + tanks + pumps + processing units
+   *  isolated via the AutoFilterRegistry so the rest of the plant dims to the
+   *  backdrop layer). When switching off, materials and fill colors are
+   *  restored and the isolation is cleared. Idempotent. */
   setColoringEnabled(enabled: boolean): void {
     if (this.coloringEnabled === enabled) return;
     this.coloringEnabled = enabled;
     if (enabled) {
       for (const pipe of this.pipes) this.applyFlowMaterial(pipe);
       for (const tank of this.tanks) this.applyTankMaterial(tank);
+      for (const pump of this.pumps) this.applyPumpMaterial(pump);
+      // Isolate the pumping plant so the rest of the scene dims away.
+      this.viewer?.autoFilters?.isolateMultiple(ProcessIndustryPlugin.ISOLATED_TYPES);
     } else {
       for (const [mesh, original] of this.originalMaterials) {
         mesh.material = original as Mesh['material'];
       }
       this.viewer?.pipeFlowManager?.resetAllRingColors();
       this.viewer?.tankFillManager?.resetAllFillColors();
+      // Clear the plant isolation — but only if WE are the active isolator.
+      // If the user switched to a different filter via the Groups overlay in
+      // the meantime, leave their choice alone.
+      if (this.viewer?.autoFilters?.isMultiIsolateActive) {
+        this.viewer.autoFilters.showAll();
+      }
     }
   }
+
+  /** Tooltip-store ID prefix for the PU-mode pinned tooltips. Distinct from
+   *  the selection-driven pin id so a normal Click → Select doesn't collide. */
+  private static readonly PU_MODE_TOOLTIP_PREFIX = 'pu-mode:processing-unit:';
+
+  /** Whether processing-unit mode is currently active. Independent of color
+   *  mode — both can be on at the same time. */
+  private puModeEnabled = false;
+
+  /** Active set of node paths whose pinned tooltips were opened by PU mode.
+   *  Tracked so toggle-off only hides the entries WE created, never anything
+   *  the user pinned manually. */
+  private puModePinnedPaths: string[] = [];
+
+  /** White-wash highlight overlay meshes added under each PU while PU mode
+   *  is on. Stored per-PU so we can dispose+remove them cleanly on toggle off. */
+  private puHighlightOverlays = new Map<RVProcessingUnit, Mesh[]>();
+
+  /** Shared white transparent material for PU highlights — single instance
+   *  across all PUs (no per-mesh state to mutate). */
+  private puHighlightMaterial: MeshBasicMaterial | null = null;
+
+  /** Toggle "Processing Unit Mode" — when on, opens a pinned tooltip on every
+   *  ProcessingUnit so all OEE / cycle data is visible at a glance without the
+   *  user having to hover or click each unit. Idempotent. Off restores only
+   *  the entries opened by this plugin. */
+  setProcessingUnitModeEnabled(enabled: boolean): void {
+    if (this.puModeEnabled === enabled) return;
+    this.puModeEnabled = enabled;
+    if (enabled) {
+      this.puModePinnedPaths = [];
+      for (const pu of this.processingUnits) {
+        const path = NodeRegistry.computeNodePath(pu.node);
+        if (!path) continue;
+        const id = ProcessIndustryPlugin.PU_MODE_TOOLTIP_PREFIX + path;
+        tooltipStore.show({
+          id,
+          lifecycle: 'pinned',
+          targetPath: path,
+          data: { type: 'processing-unit', nodePath: path },
+          mode: 'world',
+          worldTarget: pu.node,
+          priority: 5,
+        });
+        this.puModePinnedPaths.push(path);
+        this.addPuHighlight(pu);
+      }
+    } else {
+      for (const path of this.puModePinnedPaths) {
+        tooltipStore.hide(ProcessIndustryPlugin.PU_MODE_TOOLTIP_PREFIX + path);
+      }
+      this.puModePinnedPaths = [];
+      this.clearAllPuHighlights();
+    }
+  }
+
+  /** Build the shared PU highlight material on first use. White, semi-transparent,
+   *  rendered slightly in front of the source mesh via polygon offset so it
+   *  doesn't z-fight. ISOLATE_FOCUS_LAYER is enabled at mesh creation so the
+   *  highlight stays bright in pass 3 of isolate mode. */
+  private getPuHighlightMaterial(): MeshBasicMaterial {
+    if (this.puHighlightMaterial) return this.puHighlightMaterial;
+    this.puHighlightMaterial = new MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.28,
+      side: FrontSide,
+      depthWrite: false,
+      depthTest: true,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -8,
+    });
+    return this.puHighlightMaterial;
+  }
+
+  /** Add a white-wash highlight overlay to every visible mesh under a PU. */
+  private addPuHighlight(pu: RVProcessingUnit): void {
+    if (this.puHighlightOverlays.has(pu)) return; // idempotent
+    const mat = this.getPuHighlightMaterial();
+    const overlays: Mesh[] = [];
+    pu.node.traverse((child) => {
+      const mesh = child as Mesh;
+      if (!mesh.isMesh || !mesh.geometry) return;
+      // Skip overlays we (or sibling managers) added so we don't recurse.
+      if (mesh.userData._puHighlightViz) return;
+      if (mesh.userData._tankFillViz || mesh.userData._pipeFlowViz) return;
+      const overlay = new Mesh(mesh.geometry, mat);
+      overlay.name = `${mesh.name}_puHighlight`;
+      overlay.userData._puHighlightViz = true;
+      overlay.userData._tankFillViz = true; // exclude from raycast + static merge
+      overlay.position.copy(mesh.position);
+      overlay.quaternion.copy(mesh.quaternion);
+      overlay.scale.copy(mesh.scale);
+      overlay.renderOrder = 3;
+      // Visible in isolation pass 3 (focus pass) so it pops in color/PU mode.
+      overlay.layers.enable(ISOLATE_FOCUS_LAYER);
+      mesh.parent?.add(overlay);
+      overlays.push(overlay);
+    });
+    this.puHighlightOverlays.set(pu, overlays);
+  }
+
+  /** Remove all PU highlight overlays and dispose the shared material. */
+  private clearAllPuHighlights(): void {
+    for (const overlays of this.puHighlightOverlays.values()) {
+      for (const o of overlays) o.parent?.remove(o);
+    }
+    this.puHighlightOverlays.clear();
+    this.puHighlightMaterial?.dispose();
+    this.puHighlightMaterial = null;
+  }
+
+  /** Whether processing-unit mode is currently active. */
+  isProcessingUnitModeEnabled(): boolean { return this.puModeEnabled; }
 
   // ─── Lifecycle ──────────────────────────────────────────────────────
 
@@ -194,6 +409,7 @@ export class ProcessIndustryPlugin implements RVViewerPlugin {
       if (inst instanceof RVPipe) this.pipes.push(inst);
       else if (inst instanceof RVTank) this.tanks.push(inst);
       else if (inst instanceof RVPump) this.pumps.push(inst);
+      else if (inst instanceof RVProcessingUnit) this.processingUnits.push(inst);
     });
 
     // Build leaf-name → instance indexes. Used as a fallback when the
@@ -285,9 +501,11 @@ export class ProcessIndustryPlugin implements RVViewerPlugin {
     // Xylene and Pigment Paste on the same two tanks that share a pipe).
     this.buildFluidSubgraphs(viewer);
 
-    // Assign a random fluid per subgraph — all tanks and pipes in the same
-    // subgraph end up with the same resourceName.
-    this.reassignFluids();
+    // Assign a fluid per subgraph — all tanks and pipes in the same
+    // subgraph end up with the same resourceName. Uses a SEEDED RNG so every
+    // run of the viewer shows the same initial medium per network; periodic
+    // reshuffles below still use Math.random for live variety.
+    this.reassignFluids(makeSeededRng(INITIAL_FLUID_SEED));
 
     // Kick-start: every pipe starts flowing at load so no pipe shows flow=0
     // during the window before its first scheduled flip.
@@ -296,6 +514,10 @@ export class ProcessIndustryPlugin implements RVViewerPlugin {
       pipe.setFlow(dir * randomFlowMagnitude());
       this.applyFlowMaterial(pipe);
     }
+
+    // Populate simulated industrial instrumentation so the enriched tooltips
+    // actually show data in standalone mode (pressure/temp/vibration/OEE/…).
+    this.initInstrumentation();
   }
 
   onFixedUpdatePost(dt: number): void {
@@ -315,6 +537,10 @@ export class ProcessIndustryPlugin implements RVViewerPlugin {
       this.applyFlowMaterial(pipe);
       this.pipeNextFlip[i] = this.tAccum + nextFlipDelay();
     }
+
+    // (a1) Drift industrial instrumentation every tick so temps / vibration /
+    //      OEE values gently vary. Cheap — a few trig ops per instance.
+    this.updateInstrumentation(dt);
 
     // (a2) Fluid transfer — runs every frame so tank levels evolve continuously
     //      while a pipe is on, not just at flip moments.
@@ -351,10 +577,23 @@ export class ProcessIndustryPlugin implements RVViewerPlugin {
     this.pipes = [];
     this.tanks = [];
     this.pumps = [];
+    this.processingUnits = [];
     this.tanksByLeaf.clear();
     this.pipesByLeaf.clear();
     this.pipeEndpoints = [];
     this.fluidSubgraphs = [];
+    this.pumpNominals = [];
+    this.tankNominals = [];
+    this.pipeNominals = [];
+    this.puNominals = [];
+    // Hide any PU-mode pinned tooltips opened by this plugin so they don't
+    // dangle into the next loaded model. Also tear down highlight overlays.
+    for (const path of this.puModePinnedPaths) {
+      tooltipStore.hide(ProcessIndustryPlugin.PU_MODE_TOOLTIP_PREFIX + path);
+    }
+    this.puModePinnedPaths = [];
+    this.puModeEnabled = false;
+    this.clearAllPuHighlights();
     this.pipeNextFlip = [];
     this.tAccum = 0;
     this.tNextGlobal = 0;
@@ -563,32 +802,35 @@ export class ProcessIndustryPlugin implements RVViewerPlugin {
   }
 
   /**
-   * Walk the pipe-tank graph and populate `this.fluidSubgraphs` with the
-   * connected components. Edges are undirected and follow the references each
-   * pipe declares:
+   * Walk the pipe-tank-pump graph and populate `this.fluidSubgraphs` with the
+   * connected components. Edges are undirected and follow these references:
    *   - Pipe → Tank            : edge pipe↔tank (direct endpoint is a tank).
    *   - Pipe → Pipe            : edge pipe↔pipe (chained pipes).
-   *   - Pipe → Pump / PU / ∅   : barrier — NO edge. A fluid identity stops here.
-   * Must be called AFTER tank and pipe instances are discovered; uses the same
-   * `resolveTank` / `resolvePipe` helpers the endpoint resolver uses, so leaf
-   * fallbacks work here too.
+   *   - Pump → Pipe            : edge pump↔pipe via the pump's `pipe` ref.
+   *   - Pipe → ProcessingUnit  : barrier — fluid identity stops at a PU.
+   * Tanks, pipes, AND pumps with the same non-negative `circuitId` are also
+   * unioned (authoring-time override that bridges PU barriers or missing refs).
+   * Must be called AFTER tank/pipe/pump instances are discovered.
    */
   private buildFluidSubgraphs(viewer: RVViewer): void {
-    const instanceByUuid = new Map<string, RVTank | RVPipe>();
+    type Member = RVTank | RVPipe | RVPump;
+    const instanceByUuid = new Map<string, Member>();
     const adj = new Map<string, Set<string>>();
 
-    const addNode = (uuid: string, inst: RVTank | RVPipe) => {
+    const addNode = (uuid: string, inst: Member) => {
       instanceByUuid.set(uuid, inst);
       if (!adj.has(uuid)) adj.set(uuid, new Set());
     };
     for (const tank of this.tanks) addNode(tank.node.uuid, tank);
     for (const pipe of this.pipes) addNode(pipe.node.uuid, pipe);
+    for (const pump of this.pumps) addNode(pump.node.uuid, pump);
 
     const addEdge = (a: string, b: string) => {
       adj.get(a)!.add(b);
       adj.get(b)!.add(a);
     };
 
+    // Pipe ↔ Tank / Pipe edges via pipe source/destination refs.
     for (const pipe of this.pipes) {
       for (const path of [pipe.sourcePath, pipe.destinationPath]) {
         if (!path) continue;
@@ -599,20 +841,34 @@ export class ProcessIndustryPlugin implements RVViewerPlugin {
           addEdge(pipe.node.uuid, neighbour.node.uuid);
           continue;
         }
-        // Anything else (Pump, ProcessingUnit, unresolvable) is a barrier.
+        // Anything else (ProcessingUnit, unresolvable) is a barrier.
       }
     }
 
-    // Authoring-time override: pipes with the same non-negative circuitId are
-    // declared to share a circuit. Link them so they end up in the same subgraph
-    // even when the reference-based traversal couldn't connect them (e.g. missing
-    // refs or a ProcessingUnit barrier the author wants to bridge explicitly).
-    const byCircuit = new Map<number, RVPipe[]>();
+    // Pump ↔ Pipe edge via the pump's connected pipe reference. A pump always
+    // belongs to the medium of the pipe it drives, so this is a hard edge.
+    for (const pump of this.pumps) {
+      if (!pump.pipePath) continue;
+      const pipe = this.resolvePipe(viewer, pump.pipePath);
+      if (pipe) addEdge(pump.node.uuid, pipe.node.uuid);
+    }
+
+    // Authoring-time override: pipes AND pumps with the same non-negative
+    // circuitId are declared to share a circuit. Link them so they end up in
+    // the same subgraph even when reference-based traversal couldn't connect
+    // them (missing refs, ProcessingUnit barriers, etc.).
+    const byCircuit = new Map<number, Array<RVPipe | RVPump>>();
     for (const pipe of this.pipes) {
       if (pipe.circuitId < 0) continue;
       const group = byCircuit.get(pipe.circuitId);
       if (group) group.push(pipe);
       else byCircuit.set(pipe.circuitId, [pipe]);
+    }
+    for (const pump of this.pumps) {
+      if (pump.circuitId < 0) continue;
+      const group = byCircuit.get(pump.circuitId);
+      if (group) group.push(pump);
+      else byCircuit.set(pump.circuitId, [pump]);
     }
     for (const group of byCircuit.values()) {
       if (group.length < 2) continue;
@@ -629,6 +885,7 @@ export class ProcessIndustryPlugin implements RVViewerPlugin {
       if (visited.has(startUuid)) continue;
       const tanks: RVTank[] = [];
       const pipes: RVPipe[] = [];
+      const pumps: RVPump[] = [];
       const queue: string[] = [startUuid];
       visited.add(startUuid);
       while (queue.length > 0) {
@@ -636,32 +893,55 @@ export class ProcessIndustryPlugin implements RVViewerPlugin {
         const inst = instanceByUuid.get(cur);
         if (inst instanceof RVTank) tanks.push(inst);
         else if (inst instanceof RVPipe) pipes.push(inst);
+        else if (inst instanceof RVPump) pumps.push(inst);
         for (const nb of adj.get(cur)!) {
           if (!visited.has(nb)) { visited.add(nb); queue.push(nb); }
         }
       }
-      this.fluidSubgraphs.push({ tanks, pipes });
+      this.fluidSubgraphs.push({ tanks, pipes, pumps });
     }
 
-    const multi = this.fluidSubgraphs.filter((sg) => sg.tanks.length + sg.pipes.length > 1).length;
+    const multi = this.fluidSubgraphs.filter((sg) => sg.tanks.length + sg.pipes.length + sg.pumps.length > 1).length;
     console.log(
       `[ProcessIndustryPlugin] Fluid subgraphs: ${this.fluidSubgraphs.length} ` +
       `(${multi} multi-node, ${this.fluidSubgraphs.length - multi} singletons) ` +
-      `covering ${this.tanks.length} tanks + ${this.pipes.length} pipes`,
+      `covering ${this.tanks.length} tanks + ${this.pipes.length} pipes + ${this.pumps.length} pumps`,
     );
   }
 
   /** Pick a random fluid per subgraph so every tank and pipe in a physically
    *  connected piping network carries the same medium. Repaints pipe AND
-   *  tank meshes (no-ops when coloring is disabled). */
-  private reassignFluids(): void {
+   *  tank meshes (no-ops when coloring is disabled).
+   *
+   *  Accepts an optional `rng` parameter. Pass a seeded RNG (via `makeSeededRng`)
+   *  for the initial load-time assignment so every run of the viewer sees the
+   *  same tank→medium mapping. The periodic scheduler keeps `Math.random()` so
+   *  reshuffles still surprise. Subgraph order is stable across runs because
+   *  it's driven by scene traversal order of the same GLB. */
+  private reassignFluids(rng: () => number = Math.random): void {
     for (const sg of this.fluidSubgraphs) {
-      const f = FLUIDS[Math.floor(Math.random() * FLUIDS.length)];
+      const f = FLUIDS[Math.floor(rng() * FLUIDS.length)];
       for (const tank of sg.tanks) tank.setResource(f.name);
       for (const pipe of sg.pipes) pipe.setResource(f.name);
+      for (const pump of sg.pumps) pump.setResource(f.name);
     }
     for (const pipe of this.pipes) this.applyFlowMaterial(pipe);
     for (const tank of this.tanks) this.applyTankMaterial(tank);
+    for (const pump of this.pumps) this.applyPumpMaterial(pump);
+
+    // Refresh density / pH / nominal temp so the tooltip reflects the new medium.
+    for (let i = 0; i < this.tanks.length; i++) {
+      const tank = this.tanks[i];
+      const nom = this.tankNominals[i];
+      if (!nom) continue;
+      const fluid = FLUIDS.find(f => f.name === tank.resourceName);
+      if (fluid) {
+        nom.density = fluid.density;
+        nom.ph = fluid.ph;
+        nom.nominalTempC = fluid.temperature + (rng() * 6 - 3);
+        this.applyTankNominals(i);
+      }
+    }
   }
 
   /**
@@ -706,41 +986,322 @@ export class ProcessIndustryPlugin implements RVViewerPlugin {
       mesh.material = mat;
     });
 
-    // Tint the scrolling rings to the fluid's color too.
+    // Tint the scrolling rings to the fluid's color too. Use a brightened
+    // shade (lerp 60 % toward white) so the rings pop against the dusty-pastel
+    // pipe material and stay clearly visible under the dim overlay in
+    // isolate / color mode — the ring opacity (0.6) would otherwise blend
+    // them into the pipe.
     const color = this.fluidColorByName.get(pipe.resourceName);
-    if (color != null) this.viewer?.pipeFlowManager?.setRingColor(pipe.node, color);
+    if (color != null) this.viewer?.pipeFlowManager?.setRingColor(pipe.node, brighten(color, 0.6));
   }
 
-  /** Paint a tank's vessel meshes with its fluid color and retint the liquid
-   *  fill + surface-line overlays to match. No-op when coloring is disabled.
-   *  The fill overlay material itself is kept (it has clipping planes we
-   *  can't replace) — only its `color` is swapped via the TankFillManager. */
-  private applyTankMaterial(tank: RVTank): void {
+  /** Paint a pump's body meshes with its medium color. No-op when coloring is
+   *  disabled. The pump shares the fluid template with pipes — no per-pump
+   *  clone is needed because pumps don't mutate emissive intensity per-instance
+   *  the way the pipe ring overlay does. Originals are cached in
+   *  `originalMaterials` so `setColoringEnabled(false)` restores them.
+   *
+   *  Pumps without a known medium (resourceName empty / not in palette) are
+   *  left untouched — typically these are pumps not connected to any tank
+   *  network (no circuitId, no pipe ref). */
+  private applyPumpMaterial(pump: RVPump): void {
     if (!this.coloringEnabled) return;
-
-    const fluid = tank.resourceName;
-    const template = this.fluidTemplates.get(fluid);
+    const template = this.fluidTemplates.get(pump.resourceName);
     if (!template) return;
 
-    tank.node.traverse((child) => {
+    pump.node.traverse((child) => {
       const mesh = child as Mesh;
       if (!mesh.isMesh) return;
-      if (mesh.userData._tankFillViz) return; // handled separately below
       if (!this.originalMaterials.has(mesh)) {
         this.originalMaterials.set(mesh, mesh.material);
       }
       mesh.material = template;
     });
+  }
 
-    // Retint the liquid inside the tank so "the fluid" visibly IS the fluid.
-    // The raw base color reads too dark through a transparent overlay, so we
-    // brighten it; the surface ring is brighter still so it pops against the
-    // fill but stays the same hue (not washed to white).
-    const base = this.fluidColorByName.get(fluid);
-    if (base != null) {
-      const fill = brighten(base, 0.30);
-      const line = brighten(base, 0.55);
-      this.viewer?.tankFillManager?.setFillColor(tank.node, fill, line);
+  /** Retint the tank's liquid-fill + surface-line overlays to the medium
+   *  color. No-op when coloring is disabled. The vessel itself keeps its
+   *  authored GLB material — we deliberately do NOT recolor vessel meshes so
+   *  the mechanical / P&ID look of the plant is preserved; only the contained
+   *  liquid reads as "this is medium X". The fill overlay material has
+   *  clipping planes we can't replace, so we only swap its `color` via the
+   *  TankFillManager. */
+  private applyTankMaterial(tank: RVTank): void {
+    if (!this.coloringEnabled) return;
+
+    const base = this.fluidColorByName.get(tank.resourceName);
+    if (base == null) return;
+
+    // Fill = the raw medium color (the liquid IS the medium). The meniscus
+    // ring is a slightly brighter version of the same hue so it pops against
+    // the fill without shifting hue.
+    const line = brighten(base, 0.25);
+    this.viewer?.tankFillManager?.setFillColor(tank.node, base, line);
+  }
+
+  // ─── Simulated industrial instrumentation ───────────────────────────
+
+  /**
+   * Populate one-time nominal values on every tank / pump / pipe / processing
+   * unit, then commit them to the component instances so tooltips immediately
+   * show meaningful data. Values are chosen to sit inside typical process-plant
+   * operating bands so the ISA-101 color bands in the tooltip stay mostly
+   * green, with a handful of warnings so the UI feedback is visible.
+   */
+  private initInstrumentation(): void {
+    // ── Tanks ──
+    this.tankNominals = this.tanks.map((tank) => {
+      const fluid = FLUIDS.find(f => f.name === tank.resourceName);
+      const density = fluid?.density ?? 1000;
+      const nominalTempC = (fluid?.temperature ?? 22) + (Math.random() * 6 - 3);
+      const ph = fluid?.ph ?? 0;
+      const nominalPressure = 1.0 + Math.random() * 1.8; // 1.0–2.8 bar
+      return {
+        nominalTempC,
+        nominalPressure,
+        tempHighLimit: 60,
+        tempLowLimit: 5,
+        pressureHighLimit: 4.0,
+        heaterOn: nominalTempC > 30 && Math.random() < 0.3,
+        agitatorOn: Math.random() < 0.6,
+        ph,
+        density,
+      };
+    });
+    for (let i = 0; i < this.tanks.length; i++) {
+      this.applyTankNominals(i);
     }
+
+    // ── Pumps ──
+    this.pumpNominals = this.pumps.map(() => {
+      // Rated curve points — chosen so typical ON state stays green.
+      const suction = 0.6 + Math.random() * 1.0;            // 0.6–1.6 bar
+      const discharge = suction + 3.0 + Math.random() * 3.0; // ΔP 3–6 bar
+      const ratedFlowLpm = 800 + Math.random() * 2000;       // nominal flow
+      const ratedPowerKw = 7.5 + Math.random() * 45;          // 7.5–52 kW
+      return {
+        suctionP: suction,
+        dischargeP: discharge,
+        ratedFlowLpm,
+        ratedSpeedRpm: 1460 + (Math.random() < 0.5 ? 0 : 1440), // 2-pole or 4-pole-ish
+        ratedPowerKw,
+        ratedCurrentA: ratedPowerKw * 1.8 + Math.random() * 4,
+        bearingTempC: 50 + Math.random() * 15,                 // 50–65°C baseline
+        motorTempC: 65 + Math.random() * 20,                   // 65–85°C baseline
+        vibrationMmS: 1.2 + Math.random() * 1.6,                // ISO10816 zone A/B
+        npshA: 5 + Math.random() * 4,                           // 5–9 m
+        npshR: 2 + Math.random() * 1.5,                         // 2–3.5 m
+        runHours: 200 + Math.random() * 8000,                   // lifetime noise
+      };
+    });
+    for (let i = 0; i < this.pumps.length; i++) {
+      this.applyPumpNominals(i);
+    }
+
+    // ── Pipes ──
+    const DN_OPTIONS = [50, 80, 100, 150, 200];
+    this.pipeNominals = this.pipes.map((pipe) => {
+      const dn = DN_OPTIONS[Math.floor(Math.random() * DN_OPTIONS.length)];
+      // Line temperature follows the source/destination tank temp when known.
+      const baseTemp = 22 + (Math.random() * 6 - 3);
+      return {
+        dnSize: dn,
+        temperatureC: baseTemp,
+        pressure: 1.5 + Math.random() * 3.5, // 1.5–5 bar
+      };
+    });
+    for (let i = 0; i < this.pipes.length; i++) {
+      const pipe = this.pipes[i];
+      const nom = this.pipeNominals[i];
+      pipe.dnSize = nom.dnSize;
+      pipe.temperatureC = nom.temperatureC;
+      pipe.pressure = nom.pressure;
+      this.applyPipeVelocity(i); // velocity derived from current flow
+    }
+
+    // ── Processing Units ──
+    const FAULT_SAMPLES = [
+      '', '', '', '', '', // mostly no fault
+      'Overtemp E-210 cleared',
+      'Agitator torque high',
+      'Feed pressure low',
+    ];
+    this.puNominals = this.processingUnits.map(() => {
+      const availability = 0.88 + Math.random() * 0.10;   // 88–98 %
+      const performance  = 0.80 + Math.random() * 0.15;   // 80–95 %
+      const quality      = 0.92 + Math.random() * 0.07;   // 92–99 %
+      const cycleTargetS = 40 + Math.random() * 60;       // 40–100 s
+      return {
+        availability,
+        performance,
+        quality,
+        cycleTargetS,
+        mtbfHours: 300 + Math.random() * 600,
+        mttrMinutes: 15 + Math.random() * 60,
+        runHoursBase: 180 + Math.random() * 300,
+        downHoursBase: 2 + Math.random() * 10,
+        goodBase: Math.floor(500 + Math.random() * 4000),
+        scrapBase: Math.floor(5 + Math.random() * 50),
+      };
+    });
+    for (let i = 0; i < this.processingUnits.length; i++) {
+      this.applyProcessingUnitNominals(i, FAULT_SAMPLES);
+    }
+  }
+
+  /** Apply current per-index tank nominals to the live instance + sync tooltip view. */
+  private applyTankNominals(i: number): void {
+    const tank = this.tanks[i];
+    const n = this.tankNominals[i];
+    tank.density = n.density;
+    tank.ph = n.ph;
+    tank.agitatorOn = n.agitatorOn;
+    tank.heatingOn = n.heaterOn;
+    tank.tempHighLimit = n.tempHighLimit;
+    tank.tempLowLimit = n.tempLowLimit;
+    tank.pressureHighLimit = n.pressureHighLimit;
+    tank.setTemperature(n.nominalTempC);
+    tank.setPressure(n.nominalPressure);
+  }
+
+  /** Apply current per-index pump nominals — flow-scaled. */
+  private applyPumpNominals(i: number): void {
+    const pump = this.pumps[i];
+    const n = this.pumpNominals[i];
+    const load = pump.isRunning ? Math.min(1, pump.flowRate / n.ratedFlowLpm) : 0;
+    pump.suctionPressure = n.suctionP;
+    pump.dischargePressure = pump.isRunning
+      ? n.suctionP + (n.dischargeP - n.suctionP) * (0.6 + 0.4 * load)
+      : n.suctionP;
+    pump.speedPercent = pump.isRunning ? 40 + load * 60 : 0;
+    pump.speedRpm = pump.isRunning ? n.ratedSpeedRpm * (0.4 + 0.6 * load) : 0;
+    pump.powerKw = pump.isRunning ? n.ratedPowerKw * (0.3 + 0.7 * load) : 0;
+    pump.currentA = pump.isRunning ? n.ratedCurrentA * (0.35 + 0.65 * load) : 0;
+    pump.bearingTempC = n.bearingTempC + (pump.isRunning ? load * 10 : -3);
+    pump.motorTempC = n.motorTempC + (pump.isRunning ? load * 15 : -5);
+    pump.vibrationMmS = n.vibrationMmS + (pump.isRunning ? load * 0.8 : 0);
+    pump.npshAvailable = n.npshA;
+    pump.npshRequired = n.npshR;
+    pump.runHours = n.runHours;
+    pump.setState(pump.vibrationMmS > 4.5 ? 'warning' : 'ok');
+    // Force a userData resync so the tooltip observes the new fields.
+    pump.start(pump.flowRate); // re-enters start() which calls syncUserData
+    if (pump.flowRate === 0) pump.stop();
+  }
+
+  /** Derive fluid velocity from live flow and pipe DN. v [m/s] = Q / A. */
+  private applyPipeVelocity(i: number): void {
+    const pipe = this.pipes[i];
+    const n = this.pipeNominals[i];
+    const dnMeters = n.dnSize / 1000;
+    const area = Math.PI * (dnMeters / 2) ** 2; // m²
+    const flowM3S = Math.abs(pipe.flowRate) / 60_000; // L/min → m³/s
+    pipe.setVelocity(area > 0 ? flowM3S / area : 0);
+  }
+
+  /** Apply per-index PU nominals to the live instance. */
+  private applyProcessingUnitNominals(i: number, faultSamples: readonly string[]): void {
+    const pu = this.processingUnits[i];
+    const n = this.puNominals[i];
+    pu.setState('running');
+    pu.setOee(n.availability, n.performance, n.quality);
+    pu.cycleTargetS = n.cycleTargetS;
+    pu.setCycleTime(n.cycleTargetS * (0.95 + Math.random() * 0.12)); // −5%…+7%
+    pu.throughputPerHour = pu.cycleTimeS > 0 ? Math.round(3600 / pu.cycleTimeS * n.availability) : 0;
+    pu.setCounts(n.goodBase, n.scrapBase);
+    pu.mtbfHours = n.mtbfHours;
+    pu.mttrMinutes = n.mttrMinutes;
+    pu.runHours = n.runHoursBase;
+    pu.downHours = n.downHoursBase;
+    pu.lastFault = faultSamples[Math.floor(Math.random() * faultSamples.length)];
+  }
+
+  /**
+   * Drift all instrumentation values each fixed tick. Keeps a low-frequency
+   * sine per instance phase-offset by index so nothing twitches identically.
+   */
+  private updateInstrumentation(dt: number): void {
+    const t = this.tAccum;
+
+    // Tanks — temperature + pressure gently drift, derive mass from density.
+    for (let i = 0; i < this.tanks.length; i++) {
+      const tank = this.tanks[i];
+      const n = this.tankNominals[i];
+      if (!n) continue;
+      const tempDrift = Math.sin(t * 0.15 + i * 0.7) * 0.8;
+      const presDrift = Math.sin(t * 0.25 + i * 1.1) * 0.08;
+      tank.setTemperature(n.nominalTempC + tempDrift);
+      tank.setPressure(Math.max(0, n.nominalPressure + presDrift));
+    }
+
+    // Pumps — re-apply curve-based values each frame so the tooltip reacts
+    // to live flowRate changes (flow is flipped by the scheduler above).
+    for (let i = 0; i < this.pumps.length; i++) {
+      const pump = this.pumps[i];
+      const n = this.pumpNominals[i];
+      if (!n) continue;
+      const load = pump.isRunning ? Math.min(1, pump.flowRate / n.ratedFlowLpm) : 0;
+      const jitter = 1 + Math.sin(t * 1.1 + i * 0.6) * 0.02;
+      pump.suctionPressure = n.suctionP * jitter;
+      pump.dischargePressure = pump.isRunning
+        ? (n.suctionP + (n.dischargeP - n.suctionP) * (0.6 + 0.4 * load)) * jitter
+        : n.suctionP * jitter;
+      pump.speedPercent = pump.isRunning ? 40 + load * 60 : 0;
+      pump.speedRpm = pump.isRunning ? n.ratedSpeedRpm * (0.4 + 0.6 * load) : 0;
+      pump.powerKw = pump.isRunning ? n.ratedPowerKw * (0.3 + 0.7 * load) : 0;
+      pump.currentA = pump.isRunning ? n.ratedCurrentA * (0.35 + 0.65 * load) : 0;
+      pump.bearingTempC = n.bearingTempC + (pump.isRunning ? load * 10 : -3)
+        + Math.sin(t * 0.3 + i) * 0.5;
+      pump.motorTempC = n.motorTempC + (pump.isRunning ? load * 15 : -5)
+        + Math.sin(t * 0.35 + i) * 0.7;
+      pump.vibrationMmS = Math.max(0,
+        n.vibrationMmS + (pump.isRunning ? load * 0.8 : 0)
+        + Math.sin(t * 1.9 + i * 0.9) * 0.25);
+      // Accumulate run hours only when actually running (real seconds → hours).
+      if (pump.isRunning) pump.runHours = n.runHours + (t / 3600);
+      pump.setState(pump.vibrationMmS > 4.5 ? 'warning' : 'ok');
+      // Sync userData view (setState already did). If we changed pressures only,
+      // hit start/stop to force a resync without disturbing flow.
+      if (pump.isRunning) pump.start(pump.flowRate); else pump.stop();
+    }
+
+    // Pipes — velocity derived from live flow; line temp gently drifts.
+    for (let i = 0; i < this.pipes.length; i++) {
+      const pipe = this.pipes[i];
+      const n = this.pipeNominals[i];
+      if (!n) continue;
+      this.applyPipeVelocity(i);
+      pipe.setTemperature(n.temperatureC + Math.sin(t * 0.1 + i * 0.5) * 0.7);
+      pipe.setPressure(Math.max(0, n.pressure + Math.sin(t * 0.2 + i) * 0.1));
+    }
+
+    // Processing Units — counts slowly accumulate, OEE components drift in a
+    // narrow band. Good/scrap increment roughly every cycleTargetS seconds.
+    for (let i = 0; i < this.processingUnits.length; i++) {
+      const pu = this.processingUnits[i];
+      const n = this.puNominals[i];
+      if (!n) continue;
+      const availDrift = Math.sin(t * 0.07 + i * 0.4) * 0.02;
+      const perfDrift  = Math.sin(t * 0.11 + i * 0.6) * 0.03;
+      const qualDrift  = Math.sin(t * 0.09 + i * 0.9) * 0.01;
+      pu.setOee(
+        n.availability + availDrift,
+        n.performance + perfDrift,
+        n.quality + qualDrift,
+      );
+      // Accumulate good / scrap at ~ target-rate (use elapsed t / target as a rough
+      // integer count increment; keeps numbers moving without a per-cycle trigger).
+      const goodEst = n.goodBase + Math.floor((t / n.cycleTargetS) * pu.quality);
+      const scrapEst = n.scrapBase + Math.floor((t / n.cycleTargetS) * (1 - pu.quality) * 0.2);
+      pu.setCounts(goodEst, scrapEst);
+      // Actual cycle time drifts ±8 % around the target.
+      pu.setCycleTime(n.cycleTargetS * (1 + Math.sin(t * 0.5 + i * 1.3) * 0.08));
+      pu.throughputPerHour = pu.cycleTimeS > 0
+        ? Math.round(3600 / pu.cycleTimeS * pu.availability)
+        : 0;
+      pu.runHours = n.runHoursBase + t / 3600;
+    }
+    // `dt` is consumed implicitly via `t = this.tAccum`. Silence the linter.
+    void dt;
   }
 }

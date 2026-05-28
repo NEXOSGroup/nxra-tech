@@ -2,6 +2,7 @@
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
 import { useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { Box, Paper, Typography, Button } from '@mui/material';
 import SlideshowOutlinedIcon from '@mui/icons-material/SlideshowOutlined';
 import { setWelcomeModalOpen } from './welcome-modal-store';
@@ -23,7 +24,7 @@ export function WelcomeModal({ open, onClose, onStartDemo }: WelcomeModalProps) 
 
   if (!open) return null;
 
-  return (
+  return createPortal(
     <Box
       sx={{
         position: 'fixed',
@@ -123,6 +124,7 @@ export function WelcomeModal({ open, onClose, onStartDemo }: WelcomeModalProps) 
           </Button>
         </Box>
       </Paper>
-    </Box>
+    </Box>,
+    document.body,
   );
 }

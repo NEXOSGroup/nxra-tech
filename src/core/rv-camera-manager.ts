@@ -14,6 +14,7 @@ import {
   OrthographicCamera,
   Vector3,
   Box3,
+  Matrix4,
   Mesh,
   Object3D,
 } from 'three';
@@ -61,12 +62,29 @@ export interface CameraAnimation {
 }
 
 /**
+ * Projection-swap animation state. Element-wise lerp between two camera
+ * projection matrices. The intermediate matrices aren't strictly valid
+ * projections, but the lerp visually reads as a smooth perspective ↔
+ * orthographic crossfade.
+ */
+export interface ProjectionAnimation {
+  /** Camera whose projectionMatrix we mutate during the tween. */
+  driveCam: PerspectiveCamera | OrthographicCamera;
+  fromMatrix: Matrix4;
+  toMatrix: Matrix4;
+  toType: ProjectionType;
+  elapsed: number;
+  duration: number;
+}
+
+/**
  * CameraManager handles perspective/orthographic switching,
  * smooth camera animations, FOV, and viewport offset computation.
  */
 export class CameraManager {
   private state: ViewerCameraState;
   cameraAnim: CameraAnimation | null = null;
+  projectionAnim: ProjectionAnimation | null = null;
 
   constructor(state: ViewerCameraState) {
     this.state = state;
@@ -159,6 +177,84 @@ export class CameraManager {
     if (t >= 1) this.cameraAnim = null;
   }
 
+  // ─── Projection Animation ─────────────────────────────────────────
+
+  /** Whether a projection-swap animation is currently in progress. */
+  get isProjectionAnimating(): boolean { return this.projectionAnim !== null; }
+
+  /**
+   * Smoothly transition between perspective and orthographic. Element-wise
+   * lerp between the two cameras' projection matrices over `duration`
+   * seconds, then commit the actual camera swap. Visually this looks like
+   * the perspective foreshortening fades out (or in) gradually.
+   *
+   * No-op if already in the requested mode. Restarts cleanly if called
+   * again mid-animation.
+   */
+  animateProjectionTo(v: ProjectionType, duration = 0.4): void {
+    const wantPersp = v === 'perspective';
+    const isPersp = this.projection === 'perspective';
+    if (wantPersp === isPersp && !this.projectionAnim) return;
+
+    // The driver camera is the one we keep rendering with for the duration of
+    // the tween — its projectionMatrix gets overwritten each frame. We always
+    // drive with the CURRENT active camera so the renderer doesn't see a
+    // mid-frame swap; the actual swap happens at t=1.
+    const driveCam = this.state._activeCamera;
+    const targetCam = wantPersp ? this.state.perspCamera : this.state.orthoCamera;
+
+    // Bring the target into sync so its projection matrix is the visual
+    // endpoint we're lerping toward.
+    targetCam.position.copy(driveCam.position);
+    targetCam.quaternion.copy(driveCam.quaternion);
+    if (!wantPersp) this.syncOrthoFrustum();
+    targetCam.updateProjectionMatrix();
+
+    this.projectionAnim = {
+      driveCam,
+      fromMatrix: driveCam.projectionMatrix.clone(),
+      toMatrix: targetCam.projectionMatrix.clone(),
+      toType: v,
+      elapsed: 0,
+      duration,
+    };
+  }
+
+  /** Cancel any in-progress projection animation; leaves whichever camera
+   *  is currently active in place (matrix is restored by the next render
+   *  pass via updateProjectionMatrix when needed). */
+  cancelProjectionAnimation(): void {
+    if (!this.projectionAnim) return;
+    // Restore the drive camera's matrix so it isn't left mid-lerp.
+    this.projectionAnim.driveCam.updateProjectionMatrix();
+    this.projectionAnim = null;
+  }
+
+  /** Advance projection animation by frame delta. */
+  tickProjectionAnimation(dtSec: number): void {
+    const anim = this.projectionAnim;
+    if (!anim) return;
+    anim.elapsed += dtSec;
+    const t = Math.min(anim.elapsed / anim.duration, 1);
+    const e = 1 - Math.pow(1 - t, 3); // ease-out cubic
+
+    // Element-wise lerp into the drive camera's projection matrix.
+    const out = anim.driveCam.projectionMatrix.elements;
+    const a = anim.fromMatrix.elements;
+    const b = anim.toMatrix.elements;
+    for (let i = 0; i < 16; i++) {
+      out[i] = a[i] + (b[i] - a[i]) * e;
+    }
+    anim.driveCam.projectionMatrixInverse.copy(anim.driveCam.projectionMatrix).invert();
+
+    if (t >= 1) {
+      // Commit the actual camera swap (rebinds OrbitControls, restores the
+      // target camera's clean projection matrix).
+      this.projectionAnim = null;
+      this.projection = anim.toType;
+    }
+  }
+
   // ─── Viewport Offset ──────────────────────────────────────────────
 
   /** Compute current viewport offset from open panels. */
@@ -181,46 +277,6 @@ export class CameraManager {
     }
 
     return left > 0 ? { left } : undefined;
-  }
-
-  /**
-   * Shift a world-space target point so the focused object appears centered
-   * in the visible viewport area (accounting for panels covering the edges).
-   */
-  applyViewportOffset(center: Vector3, dist: number, offset?: ViewportOffset): Vector3 {
-    if (!offset) return center;
-    const left = offset.left ?? 0;
-    const right = offset.right ?? 0;
-    const top = offset.top ?? 0;
-    const bottom = offset.bottom ?? 0;
-    if (left === 0 && right === 0 && top === 0 && bottom === 0) return center;
-
-    const canvas = this.state.renderer.domElement;
-    const canvasW = canvas.clientWidth || 1;
-    const canvasH = canvas.clientHeight || 1;
-
-    const horizontalFrac = (left - right) / canvasW;
-    const verticalFrac = (bottom - top) / canvasH;
-
-    if (Math.abs(horizontalFrac) < 0.001 && Math.abs(verticalFrac) < 0.001) return center;
-
-    const fovRad = this.state.perspCamera.fov * (Math.PI / 180);
-    const halfH = dist * Math.tan(fovRad / 2);
-    const halfW = halfH * this.state.perspCamera.aspect;
-
-    const camRight = new Vector3();
-    const camUp = new Vector3();
-    this.state._activeCamera.getWorldDirection(new Vector3());
-    camRight.setFromMatrixColumn(this.state._activeCamera.matrixWorld, 0).normalize();
-    camUp.setFromMatrixColumn(this.state._activeCamera.matrixWorld, 1).normalize();
-
-    // Negate: shift the orbit target AWAY from the panels so the object
-    // appears centered in the visible (unobscured) viewport area.
-    // E.g. left panel open → shift target LEFT → object renders to the RIGHT.
-    const adjusted = center.clone();
-    adjusted.addScaledVector(camRight, -horizontalFrac * halfW);
-    adjusted.addScaledVector(camUp, -verticalFrac * halfH);
-    return adjusted;
   }
 
   // ─── Focus & Fit ──────────────────────────────────────────────────

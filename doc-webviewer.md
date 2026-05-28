@@ -14,6 +14,7 @@ realvirtual WEB brings industrial 3D visualization to the browser — load realv
 - **Remote acceptance** — Share virtual commissioning models with customers for review and sign-off — worldwide, instantly.
 
 > For building custom plugins and extending the viewer, see **[doc-extending-webviewer.md](doc-extending-webviewer.md)**.
+> For how scenes, drafts, and edits are stored and resumed across reloads, see **[doc-persistence.md](doc-persistence.md)**.
 
 ## Quick Start
 
@@ -28,9 +29,17 @@ Drop `.glb` files into `public/models/` — they appear automatically in the mod
 ```bash
 npm run build        # Production build → dist/
 npm run preview      # Preview production build
-npm test             # Run all tests (headless Chromium via Playwright)
+npm test             # Run browser tests (headless Chromium via Playwright)
+npm run test:node    # Run Node.js tests (fs, glob, ESLint — see below)
+npm run test:all     # Run both: Node tests + browser tests
 npm run test:watch   # Watch mode
+npm run lint         # ESLint (flat-config, boundaries/dependencies rule)
 ```
+
+**Test naming convention:** Files matching `tests/*.node.test.ts` run in Node
+environment (use `vitest.node.config.ts`). Files matching `tests/*.test.ts` run in the
+browser environment. Use the Node config for tests that require `fs`, glob imports,
+or the ESLint instance itself.
 
 ## Architecture
 
@@ -106,8 +115,6 @@ src/
 │   │   ├── rv-aabb.ts                   # AABB primitive
 │   │   ├── rv-ring-buffer.ts            # Generic RingBuffer
 │   │   ├── rv-group-registry.ts         # Group definitions and visibility
-│   │   ├── rv-physics-world.ts          # Rapier.js wrapper
-│   │   ├── rapier-physics-plugin.ts     # Physics-based transport (replaces kinematic)
 │   │   ├── rv-xr-manager.ts             # WebXR session management
 │   │   ├── rv-xr-hit-test.ts            # AR hit-test reticle
 │   │   ├── rv-avatar-manager.ts         # Multiuser 3D avatar rendering
@@ -120,7 +127,6 @@ src/
 │       ├── ui-context-store.ts          # Context-aware UI visibility (activateContext, useUIVisible)
 │       ├── context-menu-store.ts        # Plugin-extensible right-click context menus
 │       ├── visual-settings-store.ts     # Visual settings (shadows, light, cameras)
-│       ├── physics-settings-store.ts    # Physics settings (Rapier.js)
 │       ├── search-settings-store.ts     # Search/filter settings
 │       ├── rv-storage-keys.ts           # Central localStorage key registry
 │       ├── hmi-entry.ts                 # HMI initialization (React root)
@@ -132,7 +138,6 @@ src/
 │       ├── settings/                    # Settings panel tabs (extracted from TopBar)
 │       │   ├── ModelTab.tsx             # Model/renderer selection
 │       │   ├── VisualTab.tsx            # Lighting, shadows, tone mapping
-│       │   ├── PhysicsTab.tsx           # Rapier.js toggle, gravity
 │       │   ├── InterfacesTab.tsx        # WebSocket/MQTT/ctrlX config
 │       │   ├── DevToolsTab.tsx          # FPS, benchmarks, debug
 │       │   └── TestsTab.tsx             # Feature test runner
@@ -231,14 +236,16 @@ Unity GLB Export (UnityGLTF + GLBComponentSerializer)
       2. Playback            — Recording playback
       3. Plugins Pre         — Set drive targets (ErraticDriver, ReplayRecording, etc.)
       4. Drive physics       — Sorted: master before slave (DriveOrderPlugin)
-      5. Transport           — Sources → Surfaces → Sensors → Sinks (or Rapier physics)
+      5. Transport           — Sources → Surfaces → Sensors → Sinks
       6. Plugins Post        — Sample data (SensorMonitor, TransportStats, DriveRecorder)
       7. Plugins Render      — Camera events, visual overlays
 ```
 
 ## Plugin System
 
-All extensions use the `RVViewerPlugin` interface. For convenience, extend `RVBehavior` — a MonoBehaviour-like abstract base class that manages viewer lifecycle, provides getters for drives/sensors/signals, and handles cleanup:
+All extensions use the `RVViewerPlugin` interface. `viewer.use(plugin)` calls `plugin.init?(viewer, context)`, giving each plugin a `PluginContext` — a narrower facade over scene, camera, controls, simLoop, and the signal/node/transport live-getters.
+
+For convenience, extend `BaseViewerPlugin` (context-aware) or `RVBehavior` (MonoBehaviour-like, also context-aware) instead of implementing `RVViewerPlugin` directly:
 
 ```typescript
 // Raw interface (for minimal plugins)
@@ -286,7 +293,6 @@ Plugins are registered via `viewer.use()` (eager) or `viewer.registerLazy()` (co
 ```typescript
 // Eager registration — plugin is always bundled
 viewer
-  .use(rapierPlugin)
   .use(new DriveOrderPlugin())
   .use(new SensorMonitorPlugin());
 
@@ -316,10 +322,10 @@ Plugin activation depends on whether the model declares an `rv_plugins` list:
 
 | Mode | Condition | Behavior |
 |------|-----------|----------|
-| **ALL-MODE** | No `rv_plugins` declared anywhere | All registered plugins receive `onModelLoaded` (backward compatible) |
+| **ALL-MODE** | No `rv_plugins` declared anywhere | All registered plugins receive `onModelLoaded` |
 | **SELECTIVE-MODE** | `rv_plugins` declared in modelname.json, GLB extras, or settings.json | Only declared plugins + `core: true` plugins activate |
 
-In selective mode, core plugins (physics, drive sorting, sensor monitoring) always activate regardless of the `rv_plugins` list. This ensures essential infrastructure is never accidentally disabled.
+In selective mode, core plugins (drive sorting, sensor monitoring) always activate regardless of the `rv_plugins` list. This ensures essential infrastructure is never accidentally disabled.
 
 See **[Model-Specific Plugin Configuration](#model-specific-plugin-configuration)** for how to declare `rv_plugins`.
 
@@ -329,7 +335,7 @@ Plugins with `slots` automatically register React components into HMI layout pos
 
 | Tier | Loaded when | Can be removed | Examples |
 |------|------------|----------------|----------|
-| **Core** (`core: true`) | Always — survive model switches | No (`removePlugin()` blocked); use `disablePlugin()` | `drive-order`, `sensor-monitor`, `transport-stats`, `camera-events`, `rapier-physics`, `rv-extras-editor`, `debug-endpoint`, `mcp-bridge` |
+| **Core** (`core: true`) | Always — survive model switches | No (`removePlugin()` blocked); use `disablePlugin()` | `drive-order`, `sensor-monitor`, `transport-stats`, `camera-events`, `rv-extras-editor`, `debug-endpoint`, `mcp-bridge` |
 | **Global Private** | Always when private folder present | Yes | `layout-planner`, `des-plugin`, `des-hmi` |
 | **Model-Specific** | Only when matching GLB is loaded | Yes (auto-removed on model switch) | `kpi-demo`, `demo-hmi`, `webxr`, `multiuser`, `fpv`, `annotations`, `aas-link`, `docs-browser`, `camera-startpos`, `blueprint`, `drive-recorder`, `sensor-recorder`, `order-manager`, `machine-control`, `maintenance` |
 
@@ -341,6 +347,13 @@ See **[doc-extending-webviewer.md](doc-extending-webviewer.md)** for detailed pl
 
 ### Transport
 Non-physics AABB-based transport (or Rapier.js physics when enabled). Sources spawn MUs, transport surfaces move them, sensors detect overlap, sinks consume.
+
+#### Source markers (floor ring + label)
+Every Source carries an always-visible **floor marker** — a thin semi-transparent ring on the ground plus a kamera-orientiertes label sprite showing the source's node name. The marker is visible in **Play, Pause, AR and Layout-Planner modes** so spawn locations stay identifiable even before the first MU appears. Each source's ring/label color is derived deterministically from its name (golden-ratio hue hash), giving consistent visual separation across sessions.
+
+Markers are children of the source node, so they follow Layout-Planner drags automatically. They are excluded from raycast hits via the central `RaycastManager.excludeFilters` (the same filter also catches the Plan-180 pause-ghost), so clicking through the marker selects the underlying layout object instead.
+
+Toggle globally via **Settings → Visual → Show source markers** (default ON) or programmatically via `viewer.setSourceMarkersVisible(false)` / the MCP tool `web_set_source_markers`. The choice persists to `localStorage['rv-source-markers-visible']`.
 
 ### LogicStep Engine
 Port of Unity's LogicStep sequencing: SerialContainer, ParallelContainer, SetSignalBool, WaitForSignalBool, WaitForSensor, Delay, DriveToPosition, SetDriveSpeed, Enable.
@@ -356,7 +369,7 @@ Change-only notification. Batch semantics for `setMany()`.
 Ported from Drive.cs — acceleration/deceleration, position limits, rotation and linear movement. CAM/Gear master-slave dependencies resolved via topological sort.
 
 ### WebSensor (3D-HMI status indicator)
-Pure UI marker authored in Unity (`Packages/io.realvirtual.professional/Runtime/WebViewerHMI/WebSensor.cs`) and rendered exclusively by the WebViewer (`rv-web-sensor.ts`). Four visual states — **Low / High / Warning / Error** plus an **Unbound** fallback — driven by either:
+Pure UI marker authored in Unity (`Packages/io.realvirtual.professional/Runtime/WebViewerHMI/WebSensor.cs`) and rendered exclusively by realvirtual WEB (`rv-web-sensor.ts`). Four visual states — **Low / High / Warning / Error** plus an **Unbound** fallback — driven by either:
 
 - a **PLCOutputBool** (`SignalBool`) → `false=Low`, `true=High`, OR
 - a **PLCOutputInt** (`SignalInt`) → mapped via flexible `IntStateMap` string (default `0=Low, 1=High, 2=Warning, 3=Error`)
@@ -374,7 +387,7 @@ A dedicated left-side panel (`SensorToolPanel.tsx`, button registered via `WebSe
 State persists in `localStorage` under key `rv-sensor-view-state`.
 
 ### Generic Gizmo Overlay System
-The `GizmoOverlayManager` (`viewer.gizmoManager`) is a reusable infrastructure for any component that needs to render a visual overlay over its node. WebSensor is the first consumer; future Drive direction arrows, Grip volumes, Station zones, etc. can all use the same API. Material sharing keyed by `(color, opacity, depthTest, blinkHz)` keeps memory low; one central `tick()` loop modulates all blinking gizmos in sync. See [doc-extending-webviewer.md § 17](./doc-extending-webviewer.md#17-gizmo-overlay-system-viewergizmomanager).
+The `GizmoOverlayManager` (`viewer.gizmoManager`) is a reusable infrastructure for any component that needs to render a visual overlay over its node. WebSensor is the first consumer; future Drive direction arrows, Grip volumes, Station zones, etc. can all use the same API. Material sharing keyed by `(color, opacity, depthTest, blinkHz)` keeps memory low; one central `tick()` loop modulates all blinking gizmos in sync. Gizmos are tagged onto the on-top overlay layer by default so they never contaminate SSAO (bloom/glow gizmos stay in the composer via `keepInComposer`); see [doc-extending-webviewer.md § 17 — "Keeping 3D UI out of SSAO"](./doc-extending-webviewer.md#17-gizmo-overlay-system-viewergizmomanager).
 
 ### Component Event Dispatcher
 Per-component event callbacks for `onHover` / `onClick` / `onSelect` are routed centrally via `viewer.componentEventDispatcher` — components implement optional methods on the `RVComponent` interface and the dispatcher resolves which component matches each viewer-level event (via `node.userData._rvComponentInstance` + parent-chain walk). Exception-isolated and listener-leak-safe. See [doc-extending-webviewer.md § 18](./doc-extending-webviewer.md#18-component-event-dispatcher-viewercomponenteventdispatcher).
@@ -488,8 +501,73 @@ import { useTooltipState } from './hooks/use-tooltip';
 const { active } = useTooltipState();  // current tooltip or null
 ```
 
+### Hierarchy Panel
+
+The Hierarchy Panel (left dockable panel, owned by `RvExtrasEditorPlugin`) renders a tree of every node carrying `userData.realvirtual` plus the live overlay-override state. Two view modes:
+
+- **All** — full tree with expand/collapse. Maps directly to the Three.js scene graph for components, and lazily injects extra rows for the inner structure of placed LayoutObjects (see below).
+- **Drives / Sensors / Signals / Logic** — flat, virtualised view filtered by component family. Logic mode preserves container indentation.
+
+#### LayoutObject expand behavior
+
+Placed catalog items (LayoutObjects from the Layout Planner) are expandable like normal GLB nodes. When the user opens the chevron on a LayoutObject:
+
+- Inner nodes that carry their own `userData.realvirtual` (drives, sensors, signals, etc.) appear as normal child rows and route through the Property Inspector as standalone selections.
+- Mesh-only descendants (no `userData.realvirtual`) appear as dimmed/italic rows. They are selectable for highlight + Transform-only inspection.
+- Sub-paths are registered on demand into the `NodeRegistry`, so plugins that query by path (`viewer.registry.getNode('RC/Drive-Lin-X')`) see them as first-class nodes.
+
+Selection sources differentiate intent:
+
+- 3D-viewport picks resolve up to the LayoutObject root (so the whole placed object highlights and lifts together).
+- Tree clicks keep the explicit sub-path, exposing nested drive properties to the inspector.
+
+When the LayoutObject's `Locked` flag is set, edits on any sub-path are rejected (`updateOverlayField` returns `false` and logs a warning). The root row itself stays editable so the user can unlock it without first reverting nested changes. Deleting a LayoutObject purges every overlay entry whose path falls under that subtree, so re-placing a catalog item with the same root name starts from defaults.
+
 ### WebXR (VR/AR)
 VR on Quest, Vision Pro, PCVR. AR with hit-test surface detection and model placement. Uses `setAnimationLoop` for XR frame callback.
+
+### Simulation Control (Play / Pause / Reset)
+
+The TopBar SimController plugin exposes two buttons next to the existing tools:
+
+- **Play / Pause toggle** — toggles the `'user'` pause reason via `viewer.setSimulationPaused('user', …)`. Pausing freezes every `onFixedUpdate` consumer (drives, transport, sources, sinks, LogicSteps). `onRender` keeps running so the scene stays interactive (camera, selection, gizmos).
+- **Reset** — calls `viewer.resetSimulation()`, which clears all MUs and resets LogicSteps to `Idle`. Drives and signals are intentionally **not** reset. This matches "start a new demo run from a clean transport state" semantics.
+
+Keyboard shortcuts (enabled by default, suppressed inside text inputs):
+
+| Key       | Action                |
+|-----------|-----------------------|
+| `Space`   | Toggle Play / Pause   |
+| `Shift+R` | Reset MUs + LogicSteps |
+
+#### Pause is a multi-reason set
+
+Pause is reference-counted by `string` reason. Multiple subsystems can hold it simultaneously, and the simulation only resumes after every holder releases its reason:
+
+| Reason          | Holder                                       |
+|-----------------|----------------------------------------------|
+| `'user'`        | SimController Play/Pause button (+ shortcut) |
+| `'layout-edit'` | Layout-Planner while the planner is active   |
+| `'ar-placement'`| WebXR plugin while placing the model in AR   |
+
+The Pause-Badge in the TopBar shows the active reasons live (`paused: user, layout-edit`) so it's easy to debug why the simulation is frozen.
+
+#### Live mode
+
+In Live mode, the WebSocket / MQTT / REST interface listeners **continue to write** into the `SignalStore` while the simulation is paused. Drives and components do not consume those values until the simulation resumes — the next `onFixedUpdate` tick picks up the **current** signal values, which means drives may visibly snap to a new target ("live snap") rather than gradually interpolating. This is intentional: it prevents the viewer from running on stale data after a long pause.
+
+#### Dev-tools escape
+
+If a plugin crashes mid-execution and leaks a pause reason, `viewer.clearPauseReasons(reason?)` is a manual override. Logs a `[SimControl]` warning. Use sparingly — the plugin's own `dispose()` should normally clean up its own reason.
+
+#### MCP tools
+
+When the MCP bridge is connected, the following tools are exposed:
+
+| Tool                | Purpose                                         |
+|---------------------|-------------------------------------------------|
+| `sim_play_pause`    | Toggle or explicitly set the `'user'` reason   |
+| `sim_reset`         | Clear MUs + LogicSteps (`resetSimulation()`)   |
 
 ## Renderer Support
 
@@ -510,7 +588,7 @@ A documented example is provided in `public/settings.example.json` — copy it t
 URL Params  >  settings.json  >  localStorage  >  Code DEFAULTS
 ```
 
-Each settings store (`visual`, `physics`, `search`, `interface`) follows this 3-layer merge:
+Each settings store (`visual`, `search`, `interface`) follows this 3-layer merge:
 1. **DEFAULTS** — Hardcoded in each store module
 2. **localStorage** — User's persisted preferences (overrides DEFAULTS)
 3. **settings.json** — Deployment config (overrides localStorage per-field via `??`)
@@ -527,9 +605,6 @@ Each settings store (`visual`, `physics`, `search`, `interface`) follows this 3-
     "shadowStrength": 0.5,
     "lightIntensity": 1.0
   },
-  "physics": {
-    "enabled": false
-  },
   "interface": {
     "activeType": "websocket-realtime",
     "autoConnect": true,
@@ -542,7 +617,7 @@ Each settings store (`visual`, `physics`, `search`, `interface`) follows this 3-
 ### Lock Mode
 
 - **`lockSettings: true`** — Hides the Settings gear button entirely. All `save*()` functions become no-ops (lock guard). End users see only the 3D scene and HMI overlay.
-- **`lockedTabs: ["physics", "interfaces"]`** — Hides only specific tabs in the Settings dialog. The gear button remains visible for unlocked tabs.
+- **`lockedTabs: ["interfaces", "devtools"]`** — Hides only specific tabs in the Settings dialog. The gear button remains visible for unlocked tabs.
 - **`hideWelcomeModal: true`** — Suppresses the welcome/about dialog on first visit.
 - **`defaultModel: "models/demo.glb"`** — Pre-selects a model on load (can be a filename or full URL).
 
@@ -616,7 +691,7 @@ if (config.interface?.autoConnect) { /* ... */ }
 
 // Check lock state
 if (isSettingsLocked()) { /* hide settings UI */ }
-if (isTabLocked('physics')) { /* hide physics tab */ }
+if (isTabLocked('interfaces')) { /* hide interfaces tab */ }
 ```
 
 ### How Stores Use Config
@@ -802,7 +877,6 @@ Categories: `loader`, `playback`, `drive`, `transport`, `sensor`, `logic`, `sign
 | Package | Version | Purpose |
 |---------|---------|---------|
 | three | ^0.171.0 | 3D rendering (WebGL + WebGPU + WebXR) |
-| @dimforge/rapier3d-compat | ^0.14.0 | Physics engine (WASM) |
 | react + react-dom | ^19 | HMI overlay |
 | @mui/material | ^7 | UI components |
 | echarts | ^5 | Charts |
@@ -833,7 +907,7 @@ realvirtual WEB supports real-time multiuser sessions where multiple users see e
 
 1. Add the `MultiplayerWEB` component to any GameObject in your Unity scene
 2. Press Play — the WebSocket server starts on Port 7000
-3. Open the WebViewer, click the Multiuser button in the top bar
+3. Open realvirtual WEB, click the Multiuser button in the top bar
 4. Enter the server URL (e.g., `ws://192.168.1.5:7000`) and your name
 5. Click Connect — you will see other connected users as avatars
 
@@ -849,7 +923,7 @@ realvirtual WEB supports real-time multiuser sessions where multiple users see e
 
 ### Web-only Mode (No Unity)
 
-For sessions without a running Unity instance, point the WebViewer at a standalone relay server. The relay source lives in a separate repository; the WebViewer ships with a default hosted relay (`wss://download.realvirtual.io/relay`) configured in [multiuser-settings-store.ts](src/core/hmi/multiuser-settings-store.ts). Switch a session into relay mode via the Multiuser settings tab or by passing `?server=wss://...&joinCode=...` on the URL.
+For sessions without a running Unity instance, point realvirtual WEB at a standalone relay server. The relay source lives in a separate repository; realvirtual WEB ships with a default hosted relay (`wss://download.realvirtual.io/relay`) configured in [multiuser-settings-store.ts](src/core/hmi/multiuser-settings-store.ts). Switch a session into relay mode via the Multiuser settings tab or by passing `?server=wss://...&joinCode=...` on the URL.
 
 ### Microsoft Teams Integration
 
@@ -931,6 +1005,13 @@ contextMenuStore.unregister('my-plugin');
 The context menu opens on right-click (with drag-distance guard) and touch long-press (500ms). It renders via MUI `<Menu>` in `ContextMenuLayer.tsx`.
 
 ## Extending
+
+For wiring drives, sensors, transports, signals and AAS links onto a GLB
+without touching the engine, use **Component Behaviors** —
+see **[doc-behaviors.md](doc-behaviors.md)** (one TypeScript file per GLB
+in `src/behaviors/`, auto-discovered, with a naming convention
+(`Drive-Lin-Y`, `Transport-X`, …) and sidecar JSON as alternative wiring
+paths — no Unity marker required).
 
 See **[doc-extending-webviewer.md](doc-extending-webviewer.md)** for:
 - Plugin development (lifecycle callbacks, UI slots, events)

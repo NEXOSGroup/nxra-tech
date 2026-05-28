@@ -12,8 +12,7 @@
 import { getConsumedFields, getIgnoredFields, isKnownComponentType } from '../engine/rv-extras-validator';
 import { getCapabilities } from '../engine/rv-component-registry';
 import type { SignalStore } from '../engine/rv-signal-store';
-import type { NodeRegistry } from '../engine/rv-node-registry';
-import type { RVDrive } from '../engine/rv-drive';
+import { readSignalValue, formatValue } from './rv-value-resolver';
 
 // ── Hidden component types (not shown in inspector or hierarchy) ──────────
 
@@ -28,6 +27,29 @@ export function isHiddenComponentType(type: string): boolean {
   if (!caps.inspectorVisible) return true;
   // Fall back to unknown-component check
   return !isKnownComponentType(type);
+}
+
+/**
+ * Extract the component type keys from a `userData.realvirtual` object.
+ *
+ * Component types are object-valued keys (non-null, non-array). Scalar values
+ * like the `name` marker are skipped. Hidden types (`_highlightOverlay` etc.)
+ * are dropped by default; pass `{ filterHidden: false }` for raw extraction.
+ */
+export function extractComponentTypes(
+  rv: unknown,
+  options?: { filterHidden?: boolean },
+): string[] {
+  if (!rv || typeof rv !== 'object' || Array.isArray(rv)) return [];
+  const filterHidden = options?.filterHidden ?? true;
+  const types: string[] = [];
+  for (const [key, value] of Object.entries(rv as Record<string, unknown>)) {
+    if (filterHidden && isHiddenComponentType(key)) continue;
+    if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      types.push(key);
+    }
+  }
+  return types;
 }
 
 // ── Enum options ─────────────────────────────────────────────────────────
@@ -50,8 +72,29 @@ export const ENUM_FIELDS: Record<string, string[]> = {
 
 // ── Hidden fields ────────────────────────────────────────────────────────
 
-/** Fields hidden from the inspector (redundant with header or always empty). */
+/** Fields hidden from the inspector across ALL component types (redundant
+ *  with header or always empty). */
 export const HIDDEN_FIELD_NAMES = new Set(['Name']);
+
+/** Per-component-type fields hidden from the inspector. These values still
+ *  live in userData (and are persisted by the overlay), but the Inspector
+ *  doesn't render rows for them — typically because:
+ *    • A universal `ObjectHeaderSection` already exposes them (Locked,
+ *      Visible), or
+ *    • A registered ComponentAction (button) renders the control instead
+ *      (Splat.InvertX/Y/Z → Invert X/Y/Z buttons). */
+export const HIDDEN_FIELDS_PER_TYPE: Record<string, ReadonlySet<string>> = {
+  LayoutObject: new Set(['Locked', 'Visible']),
+  Splat: new Set(['InvertX', 'InvertY', 'InvertZ']),
+};
+
+/** True if the given field should be hidden in the inspector, considering
+ *  both the global and per-type lists. */
+export function isFieldHidden(componentType: string, fieldName: string): boolean {
+  if (HIDDEN_FIELD_NAMES.has(fieldName)) return true;
+  const perType = HIDDEN_FIELDS_PER_TYPE[componentType];
+  return !!perType?.has(fieldName);
+}
 
 // ── Component type suffix stripping ──────────────────────────────────────
 
@@ -182,12 +225,10 @@ export function signalTypeLabel(type: string): string {
 }
 
 export function formatRefSignalValue(shortType: string, signalStore: SignalStore | null, path: string): string {
-  if (!signalStore) return '\u2014';
-  const value = signalStore.getByPath(path);
-  if (value === undefined) return '\u2014';
-  if (shortType.includes('Bool')) return value === true ? '\u25CF' : '\u25CB';
-  if (typeof value === 'number') return shortType.includes('Int') ? Math.trunc(value).toString() : value.toFixed(1);
-  return '\u2014';
+  return formatValue(readSignalValue(signalStore, path), {
+    boolStyle: 'glyph',
+    intLike: shortType.includes('Int'),
+  });
 }
 
 // ── Sensor reference helpers ────────────────────────────────────────────
@@ -198,10 +239,9 @@ export function isSensorRefType(componentType: string): boolean {
 }
 
 export function formatSensorStatus(signalStore: SignalStore | null, path: string): string {
-  if (!signalStore) return '';
-  const value = signalStore.getByPath(path);
+  const value = readSignalValue(signalStore, path);
   if (value === undefined) return '';
-  return value === true ? '\u25CF' : '\u25CB';
+  return formatValue(value, { boolStyle: 'glyph' });
 }
 
 /** Get color for a signal reference chip — gray when off, component color when on. */
@@ -246,70 +286,9 @@ export function getSignalHeaderColor(componentType: string, signalValue: string)
   return componentColor(componentType);
 }
 
-/** Get live signal value for display in component header. */
-export function getSignalDisplayValue(
-  signalStore: SignalStore | null,
-  nodePath: string,
-  componentType: string,
-  data: Record<string, unknown>,
-): string | null {
-  if (!signalStore || !isSignalComponentType(componentType)) return null;
-
-  // Try path-based lookup first, then fall back to name-based
-  let value = signalStore.getByPath(nodePath);
-  if (value === undefined) {
-    const signalName = (data['Name'] as string) || nodePath.split('/').pop() || '';
-    if (signalName) value = signalStore.get(signalName);
-  }
-
-  if (value === undefined) return null;
-  if (componentType.includes('Bool')) {
-    return value === true ? 'true' : 'false';
-  }
-  if (typeof value === 'number') {
-    return componentType.includes('Int') ? Math.trunc(value).toString() : value.toFixed(2);
-  }
-  return String(value);
-}
-
-// ── Drive live value helpers ───────────────────────────────────────────────
-
-/** Get live drive position for display in Drive component header (like signals show their value). */
-export function getDriveDisplayValue(
-  registry: NodeRegistry | null,
-  nodePath: string,
-  componentType: string,
-): string | null {
-  if (!registry || (componentType !== 'Drive' && !componentType.startsWith('Drive_'))) return null;
-  const drive = registry.getByPath<RVDrive>('Drive', nodePath);
-  if (!drive) return null;
-  const pos = drive.currentPosition;
-  const unit = drive.isRotary ? '°' : ' mm';
-  return pos.toFixed(1) + unit;
-}
-
-/** Runtime Drive fields to overlay on static GLB data for live inspector display. */
-export function getLiveDriveFields(
-  registry: NodeRegistry | null,
-  nodePath: string,
-  componentType: string,
-): Record<string, unknown> | null {
-  if (!registry || (componentType !== 'Drive' && !componentType.startsWith('Drive_'))) return null;
-  const drive = registry.getByPath<RVDrive>('Drive', nodePath);
-  if (!drive) return null;
-  return {
-    CurrentPosition: drive.currentPosition,
-    CurrentSpeed: drive.currentSpeed,
-    IsPosition: drive.currentPosition, // WebViewer has no separate IsPosition; currentPosition is the effective value
-    IsSpeed: drive.currentSpeed,
-    IsRunning: drive.isRunning,
-    IsAtTarget: drive.isAtTarget,
-    TargetPosition: drive.targetPosition,
-    TargetSpeed: drive.targetSpeed,
-    JogForward: drive.jogForward,
-    JogBackward: drive.jogBackward,
-  };
-}
+// Header/live-value reads were moved to rv-value-resolver.ts:
+//   getSignalDisplayValue / getDriveDisplayValue → getPrimaryDisplayValue
+//   getLiveDriveFields → Drive.getLiveState() merged via getDisplayState
 
 // ── Reverse reference helpers (who points to this node?) ──────────────────
 

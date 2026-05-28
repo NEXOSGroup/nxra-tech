@@ -6,10 +6,17 @@
  *
  * Verifies: add, remove, select, update transform, multi-tab catalogs, fetch error handling.
  */
-import { describe, test, expect, vi } from 'vitest';
-import { LayoutStore, resolveUrl, normalizeCatalogEntry } from '../../realvirtual-WebViewer-Private~/src/plugins/layout-planner/rv-layout-store';
+import { describe, test, expect, vi, beforeEach } from 'vitest';
+import { LayoutStore, resolveUrl, normalizeCatalogEntry } from '../src/plugins/layout-planner/rv-layout-store';
 
 describe('LayoutStore', () => {
+  beforeEach(() => {
+    // Each LayoutStore reads localStorage in its constructor (active-tab,
+    // grid settings). Without a per-test reset, earlier tests leak active-tab
+    // values into later tests' fresh stores.
+    localStorage.clear();
+  });
+
   test('addComponent adds to placed array', () => {
     const store = new LayoutStore();
     store.addComponent({ id: '1', catalogId: 'belt-1m', glbUrl: 'https://example.com/belt.glb', label: 'Belt', position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] });
@@ -297,5 +304,21 @@ describe('normalizeCatalogEntry', () => {
     expect(entry.id).toBe('belt_500mm');
     expect(entry.name).toBe('Belt 500mm');
     expect(entry.category).toBe('custom');
+  });
+
+  test('preserves collections on a GLB entry (remote catalog authoring)', () => {
+    const entry = normalizeCatalogEntry(
+      { glbUrl: 'belt.glb', collections: ['PalletHandling', 'Line A'] },
+      'https://cdn.example.com/',
+    );
+    expect(entry.collections).toEqual(['PalletHandling', 'Line A']);
+  });
+
+  test('preserves collections on a splat entry', () => {
+    const entry = normalizeCatalogEntry(
+      { splatUrl: 'scan.splat', collections: ['Hall1'] },
+      'https://cdn.example.com/',
+    );
+    expect(entry.collections).toEqual(['Hall1']);
   });
 });

@@ -129,44 +129,6 @@ describe('RaycastManager behavior', () => {
     expect(findNodeType(childMesh)).toBe('Drive');
   });
 
-  it('should emit drive-hover compat event with EXACT existing signature', () => {
-    const viewer = createMockViewer();
-    const receivedEvents: unknown[] = [];
-
-    viewer.on('drive-hover', (data: unknown) => receivedEvents.push(data));
-
-    const mockDrive = { name: 'Drive1', path: '/Root/Drive1' };
-    viewer.emit('drive-hover', {
-      drive: mockDrive,
-      clientX: 450,
-      clientY: 300,
-    });
-
-    expect(receivedEvents.length).toBe(1);
-    const evt = receivedEvents[0] as Record<string, unknown>;
-    expect(evt).toHaveProperty('clientX', 450);
-    expect(evt).toHaveProperty('clientY', 300);
-    expect(evt).toHaveProperty('drive', mockDrive);
-    expect(evt).not.toHaveProperty('pointer');
-  });
-
-  it('should emit drive-focus compat event with node field', () => {
-    const viewer = createMockViewer();
-    const receivedEvents: unknown[] = [];
-
-    viewer.on('drive-focus', (data: unknown) => receivedEvents.push(data));
-
-    const focusNode = createDriveMesh('Drive1');
-    const mockDrive = { name: 'Drive1', path: '/Root/Drive1' };
-
-    viewer.emit('drive-focus', { drive: mockDrive, node: focusNode });
-
-    expect(receivedEvents.length).toBe(1);
-    const evt = receivedEvents[0] as Record<string, unknown>;
-    expect(evt).toHaveProperty('drive', mockDrive);
-    expect(evt).toHaveProperty('node', focusNode);
-  });
-
   it('should not emit when disabled (during orbit)', () => {
     let enabled = true;
     const emitted: unknown[] = [];

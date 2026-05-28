@@ -34,6 +34,26 @@ const MIN_DURATION = 0.05;
 const MAX_DURATION = 60;
 
 /**
+ * Walk the active scene's op log and return the latest `setCamera` preset
+ * (or null if there is none / the scene is null). Pure helper.
+ */
+function extractScenePreset(scene: import('../core/hmi/scene/rv-scene-types').RvScene | null): ModelCameraStart | null {
+  if (!scene) return null;
+  // Scan back-to-front; the latest setCamera op wins.
+  for (let i = scene.edits.ops.length - 1; i >= 0; i--) {
+    const op = scene.edits.ops[i];
+    if (op.kind === 'setCamera') return op.preset;
+    if (op.kind === 'composite') {
+      for (let j = op.ops.length - 1; j >= 0; j--) {
+        const child = op.ops[j];
+        if (child.kind === 'setCamera') return child.preset;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Exported pure function — testable without a viewer instance.
  * Derives a stable per-model key from a URL or File name.
  */
@@ -73,14 +93,42 @@ export function saveCurrentCameraAsStart(viewer: RVViewer): 'ok' | 'no-model' | 
     savedAt: Date.now(),
     source: 'user',
   };
-  return saveStartPos(key, preset) ? 'ok' : 'save-failed';
+  // Capture current preset for undo, then write through executor (via SceneStore op)
+  // so the change enters the unified op log alongside overlay edits and placements.
+  const prev = loadStartPos(key);
+  const ok = saveStartPos(key, preset);
+  if (ok) emitCameraOp(preset, prev);
+  return ok ? 'ok' : 'save-failed';
 }
 
 export function clearCurrentCameraStart(viewer: RVViewer): boolean {
   const key = deriveModelKey(viewer.pendingModelUrl ?? viewer.currentModelUrl);
   if (!key) return false;
+  const prev = loadStartPos(key);
   clearStartPos(key);
+  emitCameraOp(null, prev);
   return true;
+}
+
+/**
+ * Push a `setCamera` op into the SceneStore op log so camera saves
+ * participate in undo/redo. The executor's forward writes to the same
+ * localStorage key (idempotent — value already there from saveStartPos),
+ * so this doesn't double-apply.
+ */
+function emitCameraOp(preset: ModelCameraStart | null, prev: ModelCameraStart | null): void {
+  // Lazy import to avoid pulling SceneStore types into this module's surface.
+  void Promise.all([
+    import('../core/hmi/scene/scene-store-singleton'),
+    import('../core/hmi/scene/rv-scene-edits'),
+  ]).then(([singleton, edits]) => {
+    const sceneStore = singleton.getSceneStore();
+    if (!sceneStore) return;
+    void sceneStore.applyOp({
+      id: edits.freshOpId(), ts: Date.now(), schemaV: 1,
+      kind: 'setCamera', preset, prev,
+    });
+  }).catch(() => { /* SceneStore unavailable; visual state still correct */ });
 }
 
 export function hasCurrentCameraStart(viewer: RVViewer): boolean {
@@ -99,11 +147,17 @@ export class CameraStartPosPlugin implements RVViewerPlugin {
   ];
 
   onModelLoaded(_result: LoadResult, viewer: RVViewer): void {
-    const key = deriveModelKey(viewer.pendingModelUrl ?? viewer.currentModelUrl);
-    if (!key) return;
+    // Priority 0: per-scene camera preset from the unified Scene model.
+    // The active scene's edit log may include `setCamera` ops — the latest
+    // one wins. RVViewer.loadScene() stashes `currentScene` BEFORE invoking
+    // loadModel so this read is reliable when the load came via the Scene panel.
+    let preset: ModelCameraStart | null = extractScenePreset(viewer.currentScene);
 
-    // Priority 1: LocalStorage user override
-    let preset = loadStartPos(key);
+    const key = deriveModelKey(viewer.pendingModelUrl ?? viewer.currentModelUrl);
+    if (!preset && !key) return;
+
+    // Priority 1: LocalStorage user override (per-base default)
+    if (!preset && key) preset = loadStartPos(key);
 
     // Priority 2: GLB rv_extras author default — scan scene top-level for userData.realvirtual.rv_camera_start
     if (!preset) preset = this._extractFromScene(viewer);

@@ -278,9 +278,23 @@ export class TooltipStore {
     for (const [key, entries] of groups) {
       // Sort by priority descending (highest first = primary)
       entries.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+      // Dedupe content sections by data.type — two entries targeting the same
+      // node with the same content type would otherwise render the same
+      // provider twice in one bubble (e.g. PU mode opens a pinned PU tooltip
+      // AND selection-driven controller opens another with the same 'processing-unit'
+      // type). Keeping only the highest-priority entry per type is idempotent
+      // and preserves the multi-section merge for DIFFERENT types (e.g. 'pdf'
+      // stacked under 'processing-unit').
+      const seenTypes = new Set<string>();
+      const deduped: TooltipEntry[] = [];
+      for (const entry of entries) {
+        if (seenTypes.has(entry.data.type)) continue;
+        seenTypes.add(entry.data.type);
+        deduped.push(entry);
+      }
       result.push({
-        primary: entries[0],
-        contentEntries: entries,
+        primary: deduped[0],
+        contentEntries: deduped,
         key,
       });
     }

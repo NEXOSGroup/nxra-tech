@@ -19,7 +19,7 @@
  */
 
 import { Vector3 } from 'three';
-import type { RVViewerPlugin } from '../../core/rv-plugin';
+import { BaseViewerPlugin } from '../../core/rv-base-plugin';
 import type { LoadResult } from '../../core/engine/rv-scene-loader';
 import type { RVViewer } from '../../core/rv-viewer';
 import {
@@ -41,7 +41,7 @@ import type { MaintenanceMode, StepResult, MaintenanceState } from '../../core/t
 
 // ─── Plugin ─────────────────────────────────────────────────────────────
 
-export class MaintenancePlugin implements RVViewerPlugin {
+export class MaintenancePlugin extends BaseViewerPlugin {
   readonly id = 'maintenance';
   readonly order = 200;
 
@@ -64,9 +64,6 @@ export class MaintenancePlugin implements RVViewerPlugin {
   /** Timeout (ms) to wait for 'camera-animation-done' before forcing continue. */
   private _flythroughCameraTimeoutMs = 5000;
 
-  /** Unsubscribe functions for event listeners. */
-  private _unsubs: (() => void)[] = [];
-
   // ─── Lifecycle ──────────────────────────────────────────────────────
 
   onModelLoaded(result: LoadResult, viewer: RVViewer): void {
@@ -79,23 +76,21 @@ export class MaintenancePlugin implements RVViewerPlugin {
     }
 
     // Listen for enter-maintenance event
-    this._unsubs.push(
+    this.sub(
       viewer.on('enter-maintenance' as string, () => {
         this.enterMaintenance();
       })
     );
   }
 
-  onModelCleared(_viewer: RVViewer): void {
+  override onModelCleared(viewer: RVViewer): void {
     this.exitMaintenance();
     this._procedures = [];
-    for (const unsub of this._unsubs) unsub();
-    this._unsubs = [];
+    super.onModelCleared(viewer);
   }
 
-  dispose(): void {
-    for (const unsub of this._unsubs) unsub();
-    this._unsubs = [];
+  override dispose(): void {
+    super.dispose();
     this.viewer = null;
   }
 

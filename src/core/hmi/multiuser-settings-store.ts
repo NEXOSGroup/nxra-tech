@@ -8,6 +8,8 @@
  * the default server URL, display name, role, and optional join code.
  */
 
+import { lsLoad } from './ls-store-utils';
+
 const LS_KEY = 'rv-multiuser-settings';
 
 export interface MultiuserSettings {
@@ -38,15 +40,16 @@ const DEFAULTS: MultiuserSettings = {
 };
 
 export function loadMultiuserSettings(): MultiuserSettings {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    if (!raw) return { ...DEFAULTS };
-    return { ...DEFAULTS, ...JSON.parse(raw) };
-  } catch {
-    return { ...DEFAULTS };
-  }
+  return lsLoad<MultiuserSettings>(LS_KEY, DEFAULTS);
 }
 
 export function saveMultiuserSettings(settings: MultiuserSettings): void {
-  localStorage.setItem(LS_KEY, JSON.stringify(settings));
+  // Intentionally no isSettingsLocked() guard — the prior implementation did
+  // not enforce one, and multiuser settings are user-identity (display name,
+  // role) rather than visual/runtime settings. Keep behavior unchanged.
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(settings));
+  } catch {
+    /* quota exceeded — silently ignore */
+  }
 }

@@ -13,12 +13,14 @@
  */
 
 import { RVViewer } from './core/rv-viewer';
+import type { RVExtrasOverlay } from './core/engine/rv-extras-overlay-store';
 import { debug, logInfo } from './core/engine/rv-debug';
 import { initTestRunner } from './rv-test-runner';
 import { fetchAppConfig, setAppConfig, initAnalytics } from './core/rv-app-config';
 import { loadVisualSettings } from './core/hmi/visual-settings-store';
 import { isMobileDevice } from './hooks/use-mobile-layout';
 import { activateContext, registerUIElement } from './core/hmi/ui-context-store';
+import { isSupported as isFsApiSupported, listSubfolderFiles, readFileAsUrl } from './core/engine/rv-local-filesystem';
 
 // Private content (resolves to stubs when private folder is absent)
 import { initHMI } from '@rv-private/custom/hmi-entry';
@@ -38,17 +40,35 @@ import { CameraEventsPlugin } from './plugins/camera-events-plugin';
 import { DriveOrderPlugin } from './plugins/drive-order-plugin';
 import { CameraStartPosPlugin } from './plugins/camera-startpos-plugin';
 import { KioskPlugin } from './plugins/kiosk-plugin';
-import { WebSensorPlugin } from './plugins/web-sensor-plugin';
-import { RapierPhysicsPlugin } from './core/engine/rapier-physics-plugin';
-import { loadPhysicsSettings } from './core/hmi/physics-settings-store';
+import { AdaptiveNavPlugin } from './plugins/adaptive-nav-plugin';
+import { MeasurementPlugin } from './plugins/measurement-plugin';
+import { OrientationGizmoPlugin } from './plugins/rv-orientation-gizmo-plugin';
 
 // Extras editor plugin (hierarchy browser + property editor)
 import { RvExtrasEditorPlugin } from './core/hmi/rv-extras-editor';
+
+// Layout Planner (public — private extensions can attach via setExtension())
+import { LayoutPlannerPlugin } from './plugins/layout-planner';
+import { SnapPointPlugin } from './plugins/snap-point';
+import { SnapFlipIconOverlay } from './plugins/snap-point/snap-flip-icon-overlay';
+
+// SimController: Play/Pause-Toggle + Reset (TopBar toolbar widget).
+import { SimControllerPlugin } from './plugins/sim-controller';
+
+// Scene window: multi-scene browser + layout registry
+import { initSceneStore } from './core/hmi/scene/scene-store-singleton';
+import { migrateLegacyAutosave } from './core/hmi/scene/layout-registry';
+import { readActiveId } from './core/hmi/scene/rv-scene-storage';
+
+// CONNECT gateway plugin (NavButton + LeftPanel for interface management)
+import { ConnectPlugin } from './plugins/connect-plugin';
 
 // Industrial interface plugins (WebSocket Realtime, ctrlX, etc.)
 import { InterfaceManager } from './interfaces/interface-manager';
 import { WebSocketRealtimeInterface } from './interfaces/websocket-realtime-interface';
 import { CtrlXInterface } from './interfaces/ctrlx-interface';
+import { MqttInterface } from './interfaces/mqtt-interface';
+import { TwinCatHmiInterface } from './interfaces/twincat-hmi-interface';
 
 // Per-model plugin manager (loads/unloads plugins on model switch)
 import { ModelPluginManager } from './core/rv-model-plugin-manager';
@@ -176,33 +196,50 @@ async function init() {
   // Apply persisted DPR cap (runtime-changeable, no reload needed)
   viewer.maxDpr = initialSettings.maxDpr;
 
+  // Apply persisted visual settings NOW — before any model load. This kicks
+  // off the env-map (IBL) generation early so it overlaps with the GLB
+  // download/parse instead of starting AFTER initHMI mounts the HMI and
+  // its useEffect runs (which was the source of the "scene appears unlit,
+  // then lighting kicks in" pop). Trackable via viewer.trackLoadingWork,
+  // so `await viewer.loadModel(...)` waits for the IBL too.
+  // The HMI's useApplyPersistedSettings still runs on mount; it's
+  // idempotent for the same values and serves as a fallback if settings
+  // change between boot and HMI mount.
+  viewer.applyVisualSettings(initialSettings);
+
   // Expose viewer globally for console debugging
   (window as unknown as { viewer: RVViewer }).viewer = viewer;
-
-  // --- Preload Rapier WASM (non-blocking) ---
-  // Start WASM download in background. If it finishes before model load,
-  // physics will be used; otherwise kinematic transport kicks in and
-  // physics activates on the next model load.
-  const rapierPlugin = new RapierPhysicsPlugin(loadPhysicsSettings);
-  const rapierReady = rapierPlugin.preload();
 
   // --- Register Industrial Interfaces ---
   const ifaceManager = new InterfaceManager();
   ifaceManager.register(new WebSocketRealtimeInterface());
   ifaceManager.register(new CtrlXInterface());
+  ifaceManager.register(new MqttInterface());
+  ifaceManager.register(new TwinCatHmiInterface());
 
   // --- Register Core Plugins ---
   viewer
     .use(ifaceManager)
-    .use(rapierPlugin)
     .use(new DriveOrderPlugin())
     .use(new SensorMonitorPlugin())
     .use(new TransportStatsPlugin())
     .use(new CameraEventsPlugin())
+    .use(new AdaptiveNavPlugin())
     .use(new CameraStartPosPlugin())
     .use(new KioskPlugin())
-    .use(new WebSensorPlugin())
-    .use(new RvExtrasEditorPlugin());
+    .use(new MeasurementPlugin())
+    .use(new RvExtrasEditorPlugin())
+    .use(new ConnectPlugin())
+    .use(new OrientationGizmoPlugin())
+    .use(new LayoutPlannerPlugin())
+    .use(new SnapPointPlugin())
+    .use(new SnapFlipIconOverlay())
+    .use(new SimControllerPlugin());
+
+  // --- Lazy Plugins (code-split, loaded on demand) ---
+  viewer.registerLazy('gaussian-splat', () =>
+    import('./plugins/gaussian-splat-plugin').then(m => ({ default: m.GaussianSplatPlugin }))
+  );
 
   // --- Per-model plugin manager (loads model-specific plugins on model switch) ---
   viewer.modelPluginManager = new ModelPluginManager();
@@ -215,6 +252,12 @@ async function init() {
 
   // --- Register Private Plugins (no-op in public build) ---
   registerPrivatePlugins(viewer);
+
+  // --- Auto-discover behaviors (src/behaviors/*.ts) ---
+  // Each behavior file declares which GLB filenames it applies to via
+  // `models[]` and gets a fresh bind context on every matching load.
+  const { registerAllBehaviors } = await import('./core/behaviors');
+  registerAllBehaviors(viewer.behaviors);
 
   // --- Model discovery ---
   const modelFiles = import.meta.glob('/public/models/*.glb', { query: '?url', import: 'default', eager: true }) as Record<string, string>;
@@ -251,11 +294,33 @@ async function init() {
     }
   } catch { /* no manifest — use build-time discovery only */ }
 
+  // Discover local working folder models (File System Access API, Chrome/Edge only)
+  if (isFsApiSupported()) {
+    try {
+      const localFiles = await listSubfolderFiles('models', ['.glb']);
+      for (const f of localFiles) {
+        const blobUrl = await readFileAsUrl(f.handle);
+        entries.push({ filename: f.name, url: blobUrl });
+      }
+    } catch { /* permission denied or handle expired — skip silently */ }
+  }
+
   // Expose discovered models to the HMI model selector
   viewer.availableModels = entries.map((e) => ({ url: e.url, label: e.filename.replace(/\.glb$/i, '') }));
 
+  // ── Scene window: register, migrate any legacy autosave, build store ──
+  // Migration runs once: if `rv-layout-autosave` exists from a previous session,
+  // import it as an "Untitled Layout" entry in the new registry so users don't
+  // lose their work. Idempotent on subsequent boots.
+  migrateLegacyAutosave();
+  const sceneStore = initSceneStore(viewer);
+
   // --- Load model helper ---
-  async function loadModel(url: string) {
+  // `options.overlay` carries the materialised rv-extras overrides from
+  // loadScene(); it MUST be forwarded to viewer.loadModel so overrides are
+  // applied to the GLB during traversal. Dropping it here was why saved drafts
+  // reloaded with the original GLB values instead of the edited ones.
+  async function loadModel(url: string, options?: { overlay?: RVExtrasOverlay }) {
     const modelName = (url.split('/').pop() ?? url).split('?')[0].replace(/\.glb$/i, '');
     showLoadingOverlay(modelName);
     localStorage.setItem(LS_KEY_MODEL, url);
@@ -289,10 +354,19 @@ async function init() {
       // Store original URL before loadModel (loadModel will set _currentModelUrl to blob URL)
       viewer.pendingModelUrl = url;
 
-      const result = await viewer.loadModel(modelUrl);
+      const result = await viewer.loadModel(modelUrl, options);
 
       // Restore original URL (not blob:) so model selector can match it
       viewer.currentModelUrl = url;
+
+      // Mark GLB scene active in the scene store (for the Scene window).
+      // We re-derive the label so saved-from-localStorage entries stay
+      // consistent with the discovered manifest.
+      const matched = entries.find(e => e.url === url);
+      const label = matched ? matched.filename.replace(/\.glb$/i, '') : modelName;
+      // markGlbActive synthesizes a fresh draft RvScene on the new base —
+      // viewer.currentScene is updated via that call.
+      sceneStore.markGlbActive(url, label);
 
       // Clean up blob URL after a delay — GLTFLoader may have pending async
       // operations (DRACO decoder, texture loading) that still reference the
@@ -325,6 +399,47 @@ async function init() {
     document.title = `${firebaseDemoName} - realvirtual WEB`;
     loadModel(firebaseGlbUrl);
   } else {
+    // ── URL routing for the unified Scene model ───────────────────────
+    // ?scene=<id>             → open a saved scene by id (highest priority)
+    // ?scene=builtin:<file>   → open a built-in by filename match
+    // ?scene=empty            → fresh empty scene
+    // ?model=<url>            → legacy alias (handled below)
+    let sceneRouted = false;
+    // ?mode=planner boots a fresh empty scene (unless an explicit ?scene/?model
+    // is given) so a published link drops the user straight into layout authoring.
+    const plannerMode = params.get('mode') === 'planner';
+    const urlScene = params.get('scene') ?? (plannerMode && !params.get('model') ? 'empty' : null);
+    if (urlScene) {
+      try {
+        if (urlScene === 'empty') {
+          // Resume the autosaved per-base draft if there is one (mirror of
+          // openBuiltin's resume semantics). `newEmpty()` would discard it —
+          // that's reserved for the explicit "New empty scene" UI gesture.
+          await sceneStore.openEmpty();
+          hideLoadingOverlay();
+          sceneRouted = true;
+        } else if (urlScene.startsWith('builtin:')) {
+          const wanted = decodeURIComponent(urlScene.slice('builtin:'.length));
+          const match = entries.find(e => e.filename === wanted || e.url === wanted || e.url.endsWith(`/${wanted}`));
+          if (match) {
+            const label = match.filename.replace(/\.glb$/i, '');
+            await sceneStore.openBuiltin(match.url, label);
+            hideLoadingOverlay();
+            sceneRouted = true;
+          }
+          // No match — fall through to default model resolution below.
+        } else {
+          // Treat as a saved scene id.
+          await sceneStore.openScene(urlScene);
+          hideLoadingOverlay();
+          sceneRouted = true;
+        }
+      } catch (e) {
+        console.warn(`[main] Failed to open ?scene=${urlScene}:`, e);
+        // Fall through to default model resolution.
+      }
+    }
+
     // Model priority: URL param > last opened (localStorage, if still available) > settings.json defaultModel > first model.
     // The user's last choice wins over the deployer's default — `defaultModel` only kicks in on first visit
     // (empty localStorage) or when the saved model no longer exists in the manifest (e.g. after a deploy removed it).
@@ -364,21 +479,59 @@ async function init() {
       ?? resolvedConfigModel
       ?? null;
 
-    if (modelToLoad) {
-      loadModel(modelToLoad);
+    // Defense-in-depth: if no `?scene=` param and a saved scene was active
+    // last session (rv-scenes/active), resume it. This covers the path
+    // where the user opened a saved scene from the panel — that flow now
+    // also writes `?scene=`, but reload-after-save without URL refresh,
+    // bookmarks predating the URL-write fix, or future code paths that
+    // forget to update the URL still recover here.
+    if (!sceneRouted) {
+      try {
+        const activeId = readActiveId();
+        if (activeId) {
+          await sceneStore.openScene(activeId);
+          hideLoadingOverlay();
+          sceneRouted = true;
+        }
+      } catch (e) {
+        console.warn('[main] Failed to resume active saved scene:', e);
+      }
+    }
+
+    if (sceneRouted) {
+      // ?scene=… or active id already loaded — skip legacy model resolution.
     } else {
-      // Default to first available model
-      const defaultEntry = entries[0];
-      if (defaultEntry) {
-        loadModel(defaultEntry.url);
+      // Default-model boot. Route through sceneStore.openBuiltin(...) so the
+      // per-base draft (rv-scenes/draft/<base>) is consulted on every reload —
+      // not just for explicit `?scene=builtin:` URLs. This restores
+      // property-inspector edits (setField ops) which the legacy loadModel()
+      // path discards via markGlbActive's empty-baseline workspace.
+      const finalUrl = modelToLoad ?? entries[0]?.url ?? null;
+      if (finalUrl) {
+        const matched = entries.find(e => e.url === finalUrl);
+        const label = matched
+          ? matched.filename.replace(/\.glb$/i, '')
+          : (finalUrl.split('/').pop() ?? finalUrl).split('?')[0].replace(/\.glb$/i, '');
+        try {
+          await sceneStore.openBuiltin(finalUrl, label);
+          hideLoadingOverlay();
+        } catch (e) {
+          // Defence-in-depth: corrupted draft or transient error → fall back
+          // to the legacy boot so the page still loads.
+          console.warn('[main] sceneStore.openBuiltin failed, falling back to loadModel:', e);
+          loadModel(finalUrl);
+        }
       } else {
         hideLoadingOverlay();
       }
     }
   }
 
-  // --- Wait for Rapier WASM (non-critical, already has internal fallback) ---
-  await rapierReady;
+  // Deep-link: ?mode=planner opens the layout planner immediately — on the empty
+  // scene routed above, or on whatever model/scene was explicitly requested.
+  if (params.get('mode') === 'planner') {
+    viewer.getPlugin<LayoutPlannerPlugin>('layout-planner')?.openPlanner();
+  }
 
   // --- Initialize HMI React Overlay ---
   initHMI(viewer);

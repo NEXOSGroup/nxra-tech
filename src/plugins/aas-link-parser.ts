@@ -30,6 +30,12 @@ export interface AasDocument {
   zipPath: string;   // path inside ZIP, leading "/" stripped
 }
 
+/** A qualifier attached to the AssetAdministrationShell (semantically: validity/origin annotations). */
+export interface AasQualifier {
+  type: string;
+  value: string;
+}
+
 /** Parsed data from an AASX file. */
 export interface AasParsedData {
   aasId: string;
@@ -37,12 +43,18 @@ export interface AasParsedData {
   nameplate: AasProperty[];
   technicalData: AasProperty[];
   documents: AasDocument[];
+  /** Qualifiers attached directly to the AssetAdministrationShell. May be omitted by mocks/tests. */
+  qualifiers?: AasQualifier[];
 }
 
 /** Index entry mapping AAS ID to filename. */
 export interface AasIndexEntry {
   file: string;
   idShort: string;
+  /** Marks the AASX as a community/demo asset that has not been validated by the supplier. */
+  demoOnly?: boolean;
+  /** Optional override for the warning banner text. Defaults to a generic message when demoOnly is true. */
+  demoNote?: string;
 }
 
 // ─── Index ──────────────────────────────────────────────────────────────
@@ -104,6 +116,15 @@ export async function loadAasxById(aasId: string, basePath?: string): Promise<Aa
   const entry = index[aasId];
   if (!entry) throw new Error(`AAS ID not found in index: ${aasId}`);
   return loadAasx(entry.file, basePath);
+}
+
+/**
+ * Look up the index entry for an AAS ID. Returns undefined if the index has not
+ * been loaded yet or the ID is unknown. Useful for UI to read flags such as demoOnly.
+ */
+export async function getIndexEntry(aasId: string, basePath?: string): Promise<AasIndexEntry | undefined> {
+  const index = await loadIndex(basePath);
+  return index[aasId];
 }
 
 /**
@@ -176,6 +197,10 @@ export function parseAasXml(xml: string): AasParsedData {
     ? getFirstTextByLocalName(aasShell, 'idShort') || ''
     : '';
 
+  // Extract qualifiers attached directly to the AssetAdministrationShell.
+  // Only top-level qualifiers (not nested inside submodels) are collected here.
+  const qualifiers = aasShell ? extractShellQualifiers(aasShell) : [];
+
   // Find submodels
   const submodels = findAllByLocalName(doc, 'submodel');
   let nameplate: AasProperty[] = [];
@@ -192,7 +217,29 @@ export function parseAasXml(xml: string): AasParsedData {
 
   const documents = parseDocuments(doc);
 
-  return { aasId, idShort, nameplate, technicalData, documents };
+  return { aasId, idShort, nameplate, technicalData, documents, qualifiers };
+}
+
+/**
+ * Extract qualifiers attached directly to the AssetAdministrationShell element
+ * (not those nested inside submodels). Empty type/value entries are skipped.
+ */
+function extractShellQualifiers(shell: Element): AasQualifier[] {
+  const results: AasQualifier[] = [];
+  // Direct children only — avoid picking up qualifiers from nested submodels
+  for (const child of Array.from(shell.children)) {
+    if (child.localName !== 'qualifier' && child.localName !== 'qualifiers') continue;
+    // V2 wraps multiple qualifiers under <qualifiers>; V3 lists <qualifier> directly.
+    const qElements = child.localName === 'qualifiers'
+      ? Array.from(child.children).filter(c => c.localName === 'qualifier')
+      : [child];
+    for (const q of qElements) {
+      const type = getFirstTextByLocalName(q, 'type') || '';
+      const value = getFirstTextByLocalName(q, 'value') || '';
+      if (type) results.push({ type, value });
+    }
+  }
+  return results;
 }
 
 /**

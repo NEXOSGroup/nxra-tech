@@ -3,6 +3,7 @@
 
 import { Object3D, Mesh, Material, Matrix4, BufferGeometry } from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { traverseMeshes } from './rv-traverse-utils';
 
 export interface StaticMergeResult {
   /** Number of original static meshes that were merged */
@@ -30,10 +31,7 @@ export function mergeStaticGeometries(
   const materialGroups = new Map<Material, Mesh[]>();
   let originalCount = 0;
 
-  root.traverse((node) => {
-    if (!(node as Mesh).isMesh) return;
-    const mesh = node as Mesh;
-
+  traverseMeshes(root, (mesh) => {
     // Skip dynamic meshes (under drive, except transport surfaces)
     if (mesh.matrixAutoUpdate !== false) return;
 

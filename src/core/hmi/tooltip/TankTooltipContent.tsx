@@ -2,10 +2,12 @@
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
 /**
- * TankTooltipContent — Renders tank info (fill level, capacity, temperature, pressure)
- * inside the generic TooltipLayer.
+ * TankTooltipContent — Renders tank info (fill level, capacity, temperature, pressure,
+ * density, pH, mass, mixer/heater status) inside the generic TooltipLayer.
  *
- * Includes a mini fill-level bar with ISA-101-compliant color coding.
+ * Includes a mini fill-level bar with ISA-101-compliant color coding and
+ * uses the same red/yellow/green convention for temperature/pressure when
+ * alarm thresholds are authored on the component.
  * Self-registers in the TooltipContentRegistry at module load.
  */
 
@@ -23,25 +25,35 @@ export interface TankTooltipData extends TooltipData {
   nodePath: string;
 }
 
-/** Row helper: label on left, value on right in monospace. */
-function Row({ label, value }: { label: string; value: string }) {
+/** Row helper: label on left, value on right in monospace (optionally colored). */
+function Row({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
     <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}>
       <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.5)', fontSize: 11 }}>
         {label}
       </Typography>
-      <Typography variant="caption" sx={{ color: '#fff', fontSize: 11, fontFamily: 'monospace' }}>
+      <Typography variant="caption" sx={{ color: color ?? '#fff', fontSize: 11, fontFamily: 'monospace' }}>
         {value}
       </Typography>
     </Box>
   );
 }
 
-/** ISA-101 fill-level color: green=normal, yellow=warning, red=alarm. */
+/** ISA-101 fill-level color: green=normal, yellow=warning, red=alarm (HH/LL). */
 function getLevelColor(fraction: number): string {
   if (fraction < 0.1 || fraction > 0.95) return '#D0021B'; // alarm red
   if (fraction < 0.2 || fraction > 0.9) return '#F5A623';  // warning yellow
   return '#27AE60'; // normal green
+}
+
+/** Returns alarm color vs. thresholds. `low`/`high` of 0 means "no limit authored".
+ *  Uses a 10% warning band around the limit (typical ISA-101 practice). */
+function getLimitColor(value: number, low: number, high: number): string | undefined {
+  if (high > 0 && value >= high) return '#D0021B';
+  if (high > 0 && value >= high * 0.9) return '#F5A623';
+  if (low > 0 && value <= low) return '#D0021B';
+  if (low > 0 && value <= low * 1.1) return '#F5A623';
+  return undefined; // normal → use default white
 }
 
 /** Mini fill-level bar component. */
@@ -75,6 +87,33 @@ function FillBar({ fraction }: { fraction: number }) {
   );
 }
 
+/** Small on/off status chip (for Mixer, Heater). */
+function StatusChip({ label, on }: { label: string; on: boolean }) {
+  return (
+    <Box sx={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 0.5,
+      bgcolor: on ? 'rgba(39,174,96,0.2)' : 'rgba(255,255,255,0.06)',
+      border: `1px solid ${on ? '#27AE60' : 'rgba(255,255,255,0.15)'}`,
+      borderRadius: 0.75,
+      px: 0.75,
+      py: 0.125,
+    }}>
+      <Box sx={{
+        width: 6, height: 6, borderRadius: '50%',
+        bgcolor: on ? '#27AE60' : 'rgba(255,255,255,0.3)',
+      }} />
+      <Typography variant="caption" sx={{
+        color: on ? '#27AE60' : 'rgba(255,255,255,0.5)',
+        fontSize: 10, fontWeight: 600,
+      }}>
+        {label}
+      </Typography>
+    </Box>
+  );
+}
+
 /** Tank tooltip content provider component. */
 export function TankTooltipContent({ data, viewer }: TooltipContentProps<TankTooltipData>) {
   const [tankData, setTankData] = useState<{
@@ -83,6 +122,14 @@ export function TankTooltipContent({ data, viewer }: TooltipContentProps<TankToo
     amount: number;
     pressure: number;
     temperature: number;
+    density: number;
+    ph: number;
+    agitatorOn: boolean;
+    heatingOn: boolean;
+    tempHighLimit: number;
+    tempLowLimit: number;
+    pressureHighLimit: number;
+    massKg: number;
   } | null>(null);
 
   useEffect(() => {
@@ -98,6 +145,14 @@ export function TankTooltipContent({ data, viewer }: TooltipContentProps<TankToo
         amount: rv.amount ?? 0,
         pressure: rv.pressure ?? 0,
         temperature: rv.temperature ?? 0,
+        density: rv.density ?? 0,
+        ph: rv.ph ?? 0,
+        agitatorOn: !!rv.agitatorOn,
+        heatingOn: !!rv.heatingOn,
+        tempHighLimit: rv.tempHighLimit ?? 0,
+        tempLowLimit: rv.tempLowLimit ?? 0,
+        pressureHighLimit: rv.pressureHighLimit ?? 0,
+        massKg: rv.massKg ?? 0,
       });
     };
 
@@ -109,6 +164,9 @@ export function TankTooltipContent({ data, viewer }: TooltipContentProps<TankToo
   if (!tankData) return null;
 
   const fraction = tankData.capacity > 0 ? tankData.amount / tankData.capacity : 0;
+  const tempColor = getLimitColor(tankData.temperature, tankData.tempLowLimit, tankData.tempHighLimit);
+  const pressureColor = getLimitColor(tankData.pressure, 0, tankData.pressureHighLimit);
+  const hasMixerOrHeater = tankData.agitatorOn || tankData.heatingOn;
 
   return (
     <>
@@ -124,11 +182,26 @@ export function TankTooltipContent({ data, viewer }: TooltipContentProps<TankToo
       <FillBar fraction={fraction} />
       <Row label="Level" value={`${tankData.amount.toFixed(0)} / ${tankData.capacity.toFixed(0)} l`} />
       <Row label="Medium" value={tankData.resourceName} />
+      {tankData.density > 0 && (
+        <Row label="Density" value={`${tankData.density.toFixed(0)} kg/m³`} />
+      )}
+      {tankData.massKg > 0 && (
+        <Row label="Mass" value={`${tankData.massKg.toFixed(0)} kg`} />
+      )}
       {tankData.temperature !== 0 && (
-        <Row label="Temp" value={`${tankData.temperature.toFixed(1)} °C`} />
+        <Row label="Temp" value={`${tankData.temperature.toFixed(1)} °C`} color={tempColor} />
       )}
       {tankData.pressure !== 0 && (
-        <Row label="Pressure" value={`${tankData.pressure.toFixed(2)} bar`} />
+        <Row label="Pressure" value={`${tankData.pressure.toFixed(2)} bar`} color={pressureColor} />
+      )}
+      {tankData.ph > 0 && (
+        <Row label="pH" value={tankData.ph.toFixed(2)} />
+      )}
+      {hasMixerOrHeater && (
+        <Box sx={{ display: 'flex', gap: 0.5, mt: 0.5, flexWrap: 'wrap' }}>
+          {tankData.agitatorOn && <StatusChip label="Mixer" on={true} />}
+          {tankData.heatingOn && <StatusChip label="Heater" on={true} />}
+        </Box>
       )}
     </>
   );

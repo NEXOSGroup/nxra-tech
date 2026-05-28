@@ -12,10 +12,13 @@
  */
 
 import { useState, useRef, useEffect, useCallback, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { Box, IconButton, Typography, Paper } from '@mui/material';
 import { Close, UnfoldMore, UnfoldLess, DragIndicator } from '@mui/icons-material';
 import { BOTTOM_BAR_HEIGHT } from './layout-constants';
 import { useMobileLayout } from '../../hooks/use-mobile-layout';
+import { getRecentAnchorPoint, placeAdjacentToAnchor, getCSSViewportSize, clientToCSS } from './panel-anchor-store';
+import { getFloatingPanelRoot } from './HMIShell';
 
 // ─── Constants ──────────────────────────────────────────────────────────
 
@@ -23,6 +26,30 @@ const MIN_W_DESKTOP = 400;
 const MIN_W_MOBILE = 280;
 const MIN_H = 200;
 const BOTTOM_MARGIN = BOTTOM_BAR_HEIGHT + 12;
+const LS_PREFIX = 'rv-panel-geo:';
+const DBLCLICK_MS = 350;
+
+// ─── Geometry persistence ──────────────────────────────────────────────
+
+interface PanelGeometry {
+  x: number; y: number;
+  w: number; h: number;
+}
+
+function loadPanelGeometry(panelId: string): PanelGeometry | null {
+  try {
+    const raw = localStorage.getItem(LS_PREFIX + panelId);
+    if (!raw) return null;
+    const g = JSON.parse(raw) as PanelGeometry;
+    if (typeof g.x === 'number' && typeof g.y === 'number' &&
+        typeof g.w === 'number' && typeof g.h === 'number') return g;
+  } catch { /* corrupt entry */ }
+  return null;
+}
+
+function savePanelGeometry(panelId: string, geo: PanelGeometry): void {
+  try { localStorage.setItem(LS_PREFIX + panelId, JSON.stringify(geo)); } catch { /* quota */ }
+}
 
 /** Tags that should NOT trigger drag when clicked. */
 const INTERACTIVE_TAGS = new Set(['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'SVG', 'PATH']);
@@ -62,13 +89,23 @@ export function useDrag(
     const onDown = (e: PointerEvent) => {
       if (isInteractive(e.target as HTMLElement)) return;
       dragging.current = true;
-      offset.current = { x: e.clientX - posRef.current.x, y: e.clientY - posRef.current.y };
+      // Convert pointer coords (unzoomed viewport space) into the panel's
+      // CSS-px coord system — pos.x/y is what's written to style.left/top
+      // and lives inside the CSS-zoomed HMIShell. Mixing the two without
+      // converting makes drag run zoom×-too-fast.
+      offset.current = {
+        x: clientToCSS(e.clientX) - posRef.current.x,
+        y: clientToCSS(e.clientY) - posRef.current.y,
+      };
       el.setPointerCapture(e.pointerId);
       e.preventDefault();
     };
     const onMove = (e: PointerEvent) => {
       if (!dragging.current) return;
-      setPos({ x: e.clientX - offset.current.x, y: e.clientY - offset.current.y });
+      setPos({
+        x: clientToCSS(e.clientX) - offset.current.x,
+        y: clientToCSS(e.clientY) - offset.current.y,
+      });
     };
     const onUp = () => {
       dragging.current = false;
@@ -108,15 +145,22 @@ export function useResize(
 
     const onDown = (e: PointerEvent) => {
       resizing.current = true;
-      start.current = { mx: e.clientX, my: e.clientY, w: sizeRef.current.w, h: sizeRef.current.h };
+      // Same CSS-zoom conversion as useDrag — resize state (w, h) is in
+      // CSS-px so the deltas computed from clientX/Y must be too.
+      start.current = {
+        mx: clientToCSS(e.clientX),
+        my: clientToCSS(e.clientY),
+        w: sizeRef.current.w,
+        h: sizeRef.current.h,
+      };
       el.setPointerCapture(e.pointerId);
       e.preventDefault();
       e.stopPropagation();
     };
     const onMove = (e: PointerEvent) => {
       if (!resizing.current) return;
-      const dw = e.clientX - start.current.mx;
-      const dh = e.clientY - start.current.my;
+      const dw = clientToCSS(e.clientX) - start.current.mx;
+      const dh = clientToCSS(e.clientY) - start.current.my;
       setSize({
         w: Math.max(minW, start.current.w + dw),
         h: Math.max(minH, start.current.h + dh),
@@ -138,33 +182,6 @@ export function useResize(
   }, [ref, setSize, minW, minH, active]);
 }
 
-// ─── Panel layout persistence ──────────────────────────────────────────
-
-interface PanelLayout {
-  x: number; y: number; w: number; h: number;
-}
-
-function loadPanelLayout(id: string): PanelLayout | null {
-  try {
-    const raw = localStorage.getItem(`rv-panel-${id}`);
-    if (!raw) return null;
-    const p = JSON.parse(raw) as PanelLayout;
-    if (typeof p.x !== 'number' || typeof p.y !== 'number' ||
-        typeof p.w !== 'number' || typeof p.h !== 'number') return null;
-    // Clamp to current viewport so panel is never off-screen
-    return {
-      x: Math.max(0, Math.min(p.x, window.innerWidth - 80)),
-      y: Math.max(0, Math.min(p.y, window.innerHeight - 60)),
-      w: p.w, h: p.h,
-    };
-  } catch { return null; }
-}
-
-function savePanelLayout(id: string, layout: PanelLayout): void {
-  try { localStorage.setItem(`rv-panel-${id}`, JSON.stringify(layout)); }
-  catch { /* quota */ }
-}
-
 // ─── ChartPanel Component ───────────────────────────────────────────────
 
 export interface ChartPanelProps {
@@ -177,7 +194,7 @@ export interface ChartPanelProps {
   defaultHeight?: number;
   defaultPosition?: { x: number; y: number };
   zIndex?: number;
-  /** Unique ID to persist panel position/size across sessions. */
+  /** Stable key for localStorage geometry persistence. Defaults to title. */
   panelId?: string;
   /** Toolbar content rendered between title and expand/close buttons */
   toolbar?: ReactNode;
@@ -200,73 +217,109 @@ export function ChartPanel({
 }: ChartPanelProps) {
   const isMobile = useMobileLayout();
   const minW = isMobile ? MIN_W_MOBILE : MIN_W_DESKTOP;
-  const expandedH = Math.round(window.innerHeight * 0.55);
+  const stableId = panelId ?? title;
+  // All dimension/position state lives in CSS-px (the coord system of
+  // style.left/top inside the zoomed HMIShell). Use getCSSViewportSize()
+  // wherever the calc would otherwise read window.innerWidth/Height.
+  const cssVP0 = getCSSViewportSize();
+  const expandedH = Math.round(cssVP0.h * 0.55);
 
-  const mobileWidth = Math.min(defaultWidth, window.innerWidth - 16);
+  const mobileWidth = Math.min(defaultWidth, cssVP0.w - 16);
+  const initialW = isMobile ? mobileWidth : defaultWidth;
 
+  // Initial values are only relevant for the very first render; the
+  // open-effect below re-anchors position whenever the panel re-opens, so
+  // there's no need to derive these from a click that may have already
+  // fled the freshness window.
   const [expanded, setExpanded] = useState(false);
-  const [pos, setPos] = useState(() => {
-    const saved = panelId ? loadPanelLayout(panelId) : null;
-    return saved
-      ? { x: saved.x, y: saved.y }
-      : defaultPosition ?? {
-          x: isMobile ? 8 : 64,
-          y: window.innerHeight - defaultHeight - BOTTOM_MARGIN,
-        };
+  const [pos, setPos] = useState(() => defaultPosition ?? {
+    x: isMobile ? 8 : 64,
+    y: cssVP0.h - defaultHeight - BOTTOM_MARGIN,
   });
-  const [size, setSize] = useState(() => {
-    const saved = panelId ? loadPanelLayout(panelId) : null;
-    return saved
-      ? { w: saved.w, h: saved.h }
-      : { w: isMobile ? mobileWidth : defaultWidth, h: defaultHeight };
-  });
+  const [size, setSize] = useState(() => ({ w: initialW, h: defaultHeight }));
 
   const dragRef = useRef<HTMLDivElement>(null);
   const resizeRef = useRef<HTMLDivElement>(null);
 
-  // Wrap setPos/setSize to auto-persist when panelId is set
+  // Refs that mirror current state — used by the resize listener (which
+  // captures stale closures) and to remember pre-expand geometry without
+  // touching localStorage.
   const posRef = useRef(pos);
   const sizeRef = useRef(size);
   posRef.current = pos;
   sizeRef.current = size;
 
-  const setPosAndSave = useCallback((p: { x: number; y: number }) => {
-    setPos(p);
-    if (panelId) savePanelLayout(panelId, { ...p, ...sizeRef.current });
-  }, [panelId]);
+  // Pre-expand snapshot so the collapse path can restore exactly where
+  // the user left the panel. Lives in refs (session-only) — there is
+  // intentionally NO persistence, the panel re-anchors fresh each open.
+  const preExpandPos = useRef<{ x: number; y: number } | null>(null);
+  const preExpandSize = useRef<{ w: number; h: number } | null>(null);
 
-  const setSizeAndSave = useCallback((s: { w: number; h: number }) => {
-    setSize(s);
-    if (panelId) savePanelLayout(panelId, { ...posRef.current, ...s });
-  }, [panelId]);
-
-  useDrag(dragRef, pos, setPosAndSave, open);
-  useResize(resizeRef, size, setSizeAndSave, minW, MIN_H, open);
+  useDrag(dragRef, pos, setPos, open);
+  useResize(resizeRef, size, setSize, minW, MIN_H, open);
 
   /** Clamp (x, y) so the panel is fully inside the viewport. Leaves room
    *  for the left-sidebar ButtonPanel so the panel never covers its own
-   *  trigger button. */
+   *  trigger button. Operates in CSS-px (zoomed-container coords) — same
+   *  coord system as panel state. */
   const clampToViewport = useCallback((x: number, y: number, w: number, h: number) => {
+    const vp = getCSSViewportSize();
     const minX = isMobile ? 4 : 72; // 64px button column + 8 gutter
     const minY = 8;
-    const maxX = Math.max(minX, window.innerWidth - w - 8);
-    const maxY = Math.max(minY, window.innerHeight - h - BOTTOM_MARGIN);
+    const maxX = Math.max(minX, vp.w - w - 8);
+    const maxY = Math.max(minY, vp.h - h - BOTTOM_MARGIN);
     return {
       x: Math.max(minX, Math.min(x, maxX)),
       y: Math.max(minY, Math.min(y, maxY)),
     };
   }, [isMobile]);
 
-  // When the panel opens, guarantee it lands inside the current viewport.
-  // Covers three scenarios: (a) default position was computed off-screen at
-  // mount time, (b) saved layout is stale from a bigger browser window,
-  // (c) the browser was resized while the panel was closed.
+  // ── On open: restore saved geometry or anchor near the user's click ──
+  // If a saved geometry exists in localStorage, restore it. Otherwise
+  // anchor next to the trigger (button, KPI card, context menu item).
+  // Falls back to the consumer's defaultPosition prop, then bottom-left.
   useEffect(() => {
-    if (!open) return;
-    const clamped = clampToViewport(pos.x, pos.y, size.w, size.h);
-    if (clamped.x !== pos.x || clamped.y !== pos.y) {
-      setPosAndSave(clamped);
+    if (!open) {
+      // Persist geometry on close (before resetting expand state).
+      if (!isMobile && posRef.current && sizeRef.current) {
+        savePanelGeometry(stableId, {
+          x: posRef.current.x, y: posRef.current.y,
+          w: sizeRef.current.w, h: sizeRef.current.h,
+        });
+      }
+      setExpanded(false);
+      preExpandPos.current = null;
+      preExpandSize.current = null;
+      return;
     }
+
+    const vp = getCSSViewportSize();
+
+    // Try restoring saved geometry first
+    const saved = !isMobile ? loadPanelGeometry(stableId) : null;
+    if (saved) {
+      const w = Math.max(minW, Math.min(saved.w, vp.w - 16));
+      const h = Math.max(MIN_H, Math.min(saved.h, vp.h - BOTTOM_MARGIN - 8));
+      setSize({ w, h });
+      setPos(clampToViewport(saved.x, saved.y, w, h));
+      return;
+    }
+
+    const w = isMobile ? Math.min(defaultWidth, vp.w - 16) : defaultWidth;
+    const h = defaultHeight;
+    setSize({ w, h });
+
+    const anchor = getRecentAnchorPoint();
+    let nextPos: { x: number; y: number };
+    if (anchor) {
+      nextPos = placeAdjacentToAnchor(anchor, w, h, vp.w);
+    } else {
+      nextPos = defaultPosition ?? {
+        x: isMobile ? 8 : 64,
+        y: vp.h - h - BOTTOM_MARGIN,
+      };
+    }
+    setPos(clampToViewport(nextPos.x, nextPos.y, w, h));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
@@ -276,7 +329,7 @@ export function ChartPanel({
     const onResize = () => {
       const clamped = clampToViewport(posRef.current.x, posRef.current.y, sizeRef.current.w, sizeRef.current.h);
       if (clamped.x !== posRef.current.x || clamped.y !== posRef.current.y) {
-        setPosAndSave(clamped);
+        setPos(clamped);
       }
     };
     window.addEventListener('resize', onResize);
@@ -284,31 +337,37 @@ export function ChartPanel({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  // Snap to bottom-full-width when expanding; restore saved layout on collapse
+  // Maximize when expanding (full viewport minus margins); restore the
+  // pre-expand position on collapse from session refs.
   useEffect(() => {
     if (expanded) {
+      preExpandPos.current = { ...posRef.current };
+      preExpandSize.current = { ...sizeRef.current };
+      const vp = getCSSViewportSize();
       const expandX = isMobile ? 0 : 64;
-      const expandW = isMobile ? window.innerWidth : window.innerWidth - 80;
-      setPos({ x: expandX, y: window.innerHeight - expandedH - BOTTOM_MARGIN });
-      setSize({ w: expandW, h: expandedH });
-    } else {
-      const saved = panelId ? loadPanelLayout(panelId) : null;
-      if (saved) {
-        setPos({ x: saved.x, y: saved.y });
-        setSize({ w: saved.w, h: saved.h });
-      } else {
-        const resetW = isMobile ? mobileWidth : defaultWidth;
-        setSize({ w: resetW, h: defaultHeight });
-        setPos(
-          defaultPosition ?? {
-            x: isMobile ? 8 : 64,
-            y: window.innerHeight - defaultHeight - BOTTOM_MARGIN,
-          },
-        );
-      }
+      const expandY = 8;
+      const expandW = isMobile ? vp.w : vp.w - expandX - 8;
+      const expandH = vp.h - expandY - BOTTOM_MARGIN;
+      setPos({ x: expandX, y: expandY });
+      setSize({ w: expandW, h: expandH });
+    } else if (preExpandPos.current && preExpandSize.current) {
+      setPos(preExpandPos.current);
+      setSize(preExpandSize.current);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expanded]);
+
+  // ── Double-click title bar to maximize/restore ──
+  const lastClickTime = useRef(0);
+  const handleTitleBarDoubleClick = useCallback(() => {
+    const now = Date.now();
+    if (now - lastClickTime.current < DBLCLICK_MS) {
+      setExpanded(e => !e);
+      lastClickTime.current = 0; // reset so triple-click doesn't re-fire
+    } else {
+      lastClickTime.current = now;
+    }
+  }, []);
 
   // ESC key to close
   useEffect(() => {
@@ -322,11 +381,15 @@ export function ChartPanel({
 
   if (!open) return null;
 
-  // Clamp position so the panel title bar stays within the viewport
-  const clampedX = Math.max(0, Math.min(pos.x, window.innerWidth - 120));
-  const clampedY = Math.max(0, Math.min(pos.y, window.innerHeight - 40));
+  // Width-aware render-time clamp — backstop in case state ever lags
+  // behind a viewport resize. Open-effect and resize-listener already
+  // clamp via clampToViewport; this just guarantees the title bar stays
+  // visible if both somehow miss a frame. CSS-px coords (zoom-aware).
+  const _vpRender = getCSSViewportSize();
+  const clampedX = Math.max(0, Math.min(pos.x, _vpRender.w - size.w - 8));
+  const clampedY = Math.max(0, Math.min(pos.y, _vpRender.h - 40));
 
-  return (
+  const panel = (
     <Paper
       elevation={8}
       data-ui-panel
@@ -350,6 +413,7 @@ export function ChartPanel({
       <Box
         ref={dragRef}
         data-drag-handle="true"
+        onPointerUp={handleTitleBarDoubleClick}
         sx={{
           display: 'flex',
           alignItems: 'center',
@@ -361,6 +425,7 @@ export function ChartPanel({
           minHeight: 30,
           cursor: 'grab',
           userSelect: 'none',
+          touchAction: 'none',
           '&:active': { cursor: 'grabbing' },
         }}
       >
@@ -407,9 +472,10 @@ export function ChartPanel({
           position: 'absolute',
           right: 0,
           bottom: 0,
-          width: 16,
-          height: 16,
+          width: 24,
+          height: 24,
           cursor: 'nwse-resize',
+          touchAction: 'none',
           '&::after': {
             content: '""',
             position: 'absolute',
@@ -425,4 +491,14 @@ export function ChartPanel({
       />
     </Paper>
   );
+
+  // Portal into HMIShell's floating-panel root so the panel's containing
+  // block is HMIShell (not whichever Paper happens to host the consumer).
+  // Theme-level `backdrop-filter: blur(...)` on every MuiPaper would
+  // otherwise create a containing block for our `position: fixed` and
+  // shift the panel by the host Paper's offset — making the top half of
+  // the screen unreachable when dragging up. Falls back to inline render
+  // if the portal root isn't mounted yet (server / first render race).
+  const portalRoot = getFloatingPanelRoot();
+  return portalRoot ? createPortal(panel, portalRoot) : panel;
 }

@@ -6,7 +6,7 @@
  */
 import { describe, test, expect } from 'vitest';
 import { Group, Mesh, BoxGeometry, MeshBasicMaterial } from 'three';
-import { alignToFloor } from '../../realvirtual-WebViewer-Private~/src/plugins/layout-planner';
+import { alignToFloor } from '../src/plugins/layout-planner';
 
 // Helper: create a Group with a child Mesh whose bounding box matches the given extents.
 // BoxGeometry is centered at origin, so we offset the mesh position to achieve desired min/max.

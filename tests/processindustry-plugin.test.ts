@@ -496,7 +496,7 @@ describe('ProcessIndustryPlugin', () => {
       expect(pipeMesh.material).toBe(originalMat); // restored from cache
     });
 
-    it('setColoringEnabled(true) also swaps tank vessel meshes; (false) restores originals', () => {
+    it('setColoringEnabled does NOT swap tank vessel meshes (only the fill overlay gets retinted)', () => {
       const scene = new Scene();
       const tankNode = new Object3D(); tankNode.name = 'TankA';
       const tankOriginalMat = new MeshBasicMaterial();
@@ -510,35 +510,12 @@ describe('ProcessIndustryPlugin', () => {
       expect(tankMesh.material).toBe(tankOriginalMat);
 
       plugin.setColoringEnabled(true);
-      expect(tankMesh.material).not.toBe(tankOriginalMat); // tank now fluid-colored
+      // Vessel material is intentionally preserved — the authored GLB look is
+      // kept; only the TankFillManager fill overlay is retinted to the medium.
+      expect(tankMesh.material).toBe(tankOriginalMat);
 
       plugin.setColoringEnabled(false);
-      expect(tankMesh.material).toBe(tankOriginalMat); // restored
-    });
-
-    it('setColoringEnabled skips tank-fill overlay meshes (userData._tankFillViz)', () => {
-      const scene = new Scene();
-      const tankNode = new Object3D(); tankNode.name = 'TankA';
-      const tankOriginalMat = new MeshBasicMaterial();
-      const tankMesh = new Mesh(new BoxGeometry(2, 3, 2), tankOriginalMat);
-      tankNode.add(tankMesh);
-
-      // Simulate a TankFillManager overlay mesh as a sibling inside the tank node.
-      const fillOverlayMat = new MeshBasicMaterial();
-      const fillOverlay = new Mesh(new BoxGeometry(1, 1, 1), fillOverlayMat);
-      fillOverlay.userData._tankFillViz = true;
-      tankNode.add(fillOverlay);
-
-      scene.add(tankNode);
-      new RVTank(tankNode, { resourceName: 'Xylene', capacity: 1000, amount: 500 });
-
-      const viewer = { scene } as unknown as RVViewer;
-      plugin.onModelLoaded({} as LoadResult, viewer);
-      plugin.setColoringEnabled(true);
-
-      // Vessel swapped; fill-overlay untouched.
-      expect(tankMesh.material).not.toBe(tankOriginalMat);
-      expect(fillOverlay.material).toBe(fillOverlayMat);
+      expect(tankMesh.material).toBe(tankOriginalMat);
     });
 
     it('setColoringEnabled is idempotent — repeat calls do not corrupt material cache', () => {

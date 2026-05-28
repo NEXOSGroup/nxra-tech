@@ -352,7 +352,6 @@ export function GroupsOverlay() {
       subtitle={subtitle}
       defaultWidth={DEFAULT_W}
       defaultHeight={DEFAULT_H}
-      panelId="groups"
       defaultPosition={{
         x: window.innerWidth - DEFAULT_W - 16,
         y: window.innerHeight - DEFAULT_H - BOTTOM_MARGIN,

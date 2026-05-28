@@ -43,6 +43,11 @@ function storageKey(glbName: string): string {
 /**
  * Load an overlay from localStorage for the given GLB name.
  * Returns null if no overlay is stored or if parsing fails.
+ *
+ * @deprecated The unified Scene model stores overlays inside `RvScene.overlay`
+ * (see `src/core/hmi/scene/rv-scene-types.ts`). This per-GLB keyspace is
+ * retained only as a boot-path fallback for direct `?model=` loads that did
+ * not go through SceneStore. New code should not write here.
  */
 export function loadOverlay(glbName: string): RVExtrasOverlay | null {
   try {
@@ -58,6 +63,8 @@ export function loadOverlay(glbName: string): RVExtrasOverlay | null {
 
 /**
  * Save an overlay to localStorage for the given GLB name.
+ *
+ * @deprecated See `loadOverlay`. Overlays now live on `RvScene.overlay`.
  */
 export function saveOverlay(glbName: string, overlay: RVExtrasOverlay): void {
   localStorage.setItem(storageKey(glbName), JSON.stringify(overlay));
@@ -65,6 +72,8 @@ export function saveOverlay(glbName: string, overlay: RVExtrasOverlay): void {
 
 /**
  * Clear (remove) the overlay for the given GLB name from localStorage.
+ *
+ * @deprecated See `loadOverlay`.
  */
 export function clearOverlay(glbName: string): void {
   localStorage.removeItem(storageKey(glbName));

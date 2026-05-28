@@ -28,7 +28,7 @@ describe('GizmoOverlayManager — text shape', () => {
     mgr.create(n, { shape: 'text', color: 0xffffff, opacity: 1, text: 'B' });
     // Each text gizmo gets its own CanvasTexture → not shared via cache
     // Material cache should remain empty for text-shape only usage
-    expect((mgr as any)._materialCache.size).toBe(0);
+    expect((mgr as any)._cache.size).toBe(0);
   });
 
   it('update({ text }) re-renders canvas texture AND disposes old one (no VRAM leak)', () => {

@@ -46,8 +46,27 @@ const CONSUMED: Record<string, string[]> = {
   Drive_Cylinder: [],     // all fields in RVDriveCylinder.schema
   Drive_ErraticPosition: [], // all fields in RVErraticDriver.schema
 
-  // LayoutObject — layout planner marker component
-  LayoutObject: ['Label', 'CatalogId', 'Locked'],
+  // LayoutObject — layout planner marker component. `Visible` is editable
+  // from the Inspector and mirrors node.visible (handled in
+  // PropertyInspector.handleFieldEdit).
+  LayoutObject: ['Label', 'CatalogId', 'Locked', 'Visible'],
+
+  // Splat — Gaussian-Splat-specific tools, co-mounted with LayoutObject on
+  // splat placements (see scene-mutations.addSplatPlacedToScene). The
+  // Invert booleans persist via the standard rv-extras overlay; the
+  // visual effect is applied through `gaussian-splat-plugin.setSplatScale`
+  // on edit (PropertyInspector handleFieldEdit) and on restore
+  // (layout-planner _applySplatTransformFromUserData).
+  Splat: [
+    'InvertX', 'InvertY', 'InvertZ',
+    // Axis-aligned crop box in the splat's local frame — Splats outside
+    // [min,max] are culled in the vertex shader. Used e.g. to hide the
+    // ceiling of a captured room (lower CropMaxY) or floor noise (raise
+    // CropMinY). Defaults to ±1000 (effectively "no clip").
+    'CropMinX', 'CropMaxX',
+    'CropMinY', 'CropMaxY',
+    'CropMinZ', 'CropMaxZ',
+  ],
 
   // AASLink — Asset Administration Shell link (parsed by aas-link-plugin)
   AASLink: ['AASId', 'Description', 'ServerUrl'],
@@ -117,11 +136,35 @@ const CONSUMED: Record<string, string[]> = {
   // Group — parsed by loadGLB group parsing
   Group: ['GroupName', 'GroupNamePrefix'],
 
-  // Pipeline components — parsed by loadGLB pipeline parsing
-  Pipe: ['resourceName', 'flowRate', 'source', 'destination', 'uvDirection'],
-  ResourceTank: ['resourceName', 'capacity', 'amount', 'pressure', 'temperature'],
-  Pump: ['flowRate', 'pipe'],
-  ProcessingUnit: ['connections'],
+  // Pipeline components — parsed by loadGLB pipeline parsing (schemas in rv-pipe.ts / rv-tank.ts / rv-pump.ts / rv-processing-unit.ts)
+  Pipe: [
+    'resourceName', 'flowRate', 'source', 'destination', 'uvDirection', 'circuitId',
+    // Industry-typical instrumentation
+    'pressure', 'temperatureC', 'velocityMs', 'dnSize',
+  ],
+  ResourceTank: [
+    'resourceName', 'capacity', 'amount', 'pressure', 'temperature',
+    // Industry-typical instrumentation
+    'density', 'ph', 'agitatorOn', 'heatingOn',
+    'tempHighLimit', 'tempLowLimit', 'pressureHighLimit',
+  ],
+  Pump: [
+    'flowRate', 'pipe', 'circuitId', 'resourceName',
+    // Industry-typical instrumentation
+    'state', 'suctionPressure', 'dischargePressure',
+    'speedRpm', 'speedPercent', 'powerKw', 'currentA',
+    'bearingTempC', 'motorTempC', 'vibrationMmS',
+    'npshAvailable', 'npshRequired', 'runHours',
+  ],
+  ProcessingUnit: [
+    'connections',
+    // OEE & production telemetry
+    'state', 'availability', 'performance', 'quality',
+    'cycleTimeS', 'cycleTargetS', 'throughputPerHour',
+    'goodCount', 'scrapCount',
+    'mtbfHours', 'mttrMinutes', 'runHours', 'downHours',
+    'lastFault',
+  ],
 };
 
 /**

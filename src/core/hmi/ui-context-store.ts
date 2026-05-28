@@ -118,20 +118,30 @@ export function registerUIElement(id: string, rule: UIVisibilityRule): void {
 export function isUIElementVisible(id: string, contexts: ReadonlySet<string>): boolean {
   const rule = _registeredRules.get(id);
   if (!rule) return true; // no rule = always visible
+  return evaluateVisibilityRule(rule, contexts);
+}
 
-  // shownOnlyIn: requires ALL listed contexts to be active
+/**
+ * Pure evaluator for an arbitrary `UIVisibilityRule` against the active
+ * contexts — same precedence as `isUIElementVisible` but operates on a rule
+ * object directly, no registration / id required.
+ *
+ * Use this in places that hold rules inline (e.g. UISlotEntry.visibilityRule)
+ * and want to gate rendering without going through the registry.
+ */
+export function evaluateVisibilityRule(
+  rule: UIVisibilityRule,
+  contexts: ReadonlySet<string>,
+): boolean {
   if (rule.shownOnlyIn && rule.shownOnlyIn.length > 0) {
     const allPresent = rule.shownOnlyIn.every((c) => contexts.has(c));
     if (!allPresent) return false;
   }
-
-  // hiddenIn: hidden when ANY listed context is active
   if (rule.hiddenIn && rule.hiddenIn.length > 0) {
     for (const c of rule.hiddenIn) {
       if (contexts.has(c)) return false;
     }
   }
-
   return true;
 }
 

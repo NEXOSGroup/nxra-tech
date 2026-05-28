@@ -14,7 +14,9 @@
 
 import { debug, logInfo, debugWarn } from './engine/rv-debug';
 import type { RVViewer } from './rv-viewer';
-import { applyEnvironmentPreset, hasUserEnvironmentOverride, type EnvironmentPresetName } from './hmi/environment-presets';
+import { applyEnvironmentPreset, type EnvironmentPresetName } from './hmi/environment-presets';
+import { isContextActive, _subscribe as subscribeUiContext } from './hmi/ui-context-store';
+import { peekPersistedActivePanels } from './hmi/left-panel-manager';
 
 // ─── Types ─────────────────────────────────────────────────────────────
 
@@ -69,6 +71,24 @@ export class ModelPluginManager {
   private moduleCache = new Map<string, ModelPluginModule>();
   /** Cache project folder names for private project plugins. */
   private _projectFolderCache = new Map<string, string>();
+
+  // ─── Planner-aware registration state ────────────────────────────────
+  // Model plugins are suppressed while the layout planner is active so the
+  // user gets a clean planning workspace. Registration deferred until they
+  // exit planner mode; unregistered again on re-entry. The state machine:
+  //   plannerActive  ⇒  no model plugins registered (regardless of model)
+  //   plannerInactive ⇒ activeModule's plugins registered (if a module exists)
+
+  /** True when activeModule's registerModelPlugins has been called and
+   *  unregisterModelPlugins has not yet run. */
+  private _registered = false;
+  /** Most recent viewer ref — needed by the UI-context subscription so it
+   *  can register/unregister between model loads. */
+  private _lastViewer: RVViewer | null = null;
+  /** Current planner-active state, tracked to detect transitions. */
+  private _plannerActive = false;
+  /** Unsub for the UI-context store subscription. */
+  private _ctxUnsub: (() => void) | null = null;
 
   /**
    * Extract the model base name (without .glb) from a URL.
@@ -150,25 +170,47 @@ export class ModelPluginManager {
   /**
    * Called from RVViewer.loadModel() before the onModelLoaded plugin loop.
    * Unloads the previous model's plugins and loads the new model's plugins.
+   *
+   * If planner mode is active, plugin REGISTRATION is deferred — the module
+   * is still resolved & cached as `activeModule`, but its
+   * `registerModelPlugins` is not called until the user exits planner mode.
+   * (See `_handleContextChange` for the deferred-register path.)
    */
   async onModelLoading(modelUrl: string, viewer: RVViewer): Promise<void> {
     // Prefer pendingModelUrl (original URL set before loadModel) over the passed URL which may be a blob:
     const resolveUrl = viewer.pendingModelUrl || modelUrl;
     const modelName = this.resolveModelName(resolveUrl);
 
+    // Cache viewer + subscribe to planner-context changes (idempotent).
+    this._lastViewer = viewer;
+    // Predict planner state. The live UI context lags behind on the very
+    // first boot — the planner's onModelLoaded sets it AFTER this method
+    // runs (it's the planner that reads its persisted open state). So we
+    // also peek the persisted left-panel state directly to decide whether
+    // to skip plugin registration up-front, avoiding a register→unregister
+    // flash of the demo HMI on reload-while-planner-was-open.
+    this._plannerActive =
+      isContextActive('planner') ||
+      peekPersistedActivePanels().has('layout-planner');
+    this._ensureContextSubscription();
+
     // Same model — nothing to do
     if (modelName === this.activeModelName) return;
 
-    // Unload previous model plugins
+    // Unload previous model plugins (only if currently registered — when
+    // we switch models inside planner mode they were never registered).
     if (this.activeModule) {
-      debug('plugins', `Unloading model plugins for '${this.activeModelName}'`);
-      try {
-        this.activeModule.unregisterModelPlugins(viewer);
-      } catch (e) {
-        console.error(`[ModelPluginManager] Error unloading plugins for '${this.activeModelName}':`, e);
+      if (this._registered) {
+        debug('plugins', `Unloading model plugins for '${this.activeModelName}'`);
+        try {
+          this.activeModule.unregisterModelPlugins(viewer);
+        } catch (e) {
+          console.error(`[ModelPluginManager] Error unloading plugins for '${this.activeModelName}':`, e);
+        }
       }
       this.activeModule = null;
       this.activeModelName = null;
+      this._registered = false;
       viewer.projectAssetsPath = null; // Reset so next model gets fresh resolution
     }
 
@@ -176,7 +218,6 @@ export class ModelPluginManager {
     const findResult = await this.findModuleWithPath(modelName);
     if (findResult) {
       const { mod, projectFolder } = findResult;
-      debug('plugins', `Loading model plugins for '${modelName}'${projectFolder ? ` (project: ${projectFolder})` : ''}`);
       try {
         // Set project assets path so plugins can resolve assets via viewer.projectAssetsPath.
         // In dev mode: Vite serves at /private-assets/<folder>/. In production: settings.json has it.
@@ -187,24 +228,78 @@ export class ModelPluginManager {
             viewer.projectAssetsPath = `/private-assets/${projectFolder}/`;
           }
         }
-        mod.registerModelPlugins(viewer);
-        // Only apply the model's default environment preset if the user hasn't
-        // customized environment settings — otherwise respect their saved values.
-        if (!hasUserEnvironmentOverride()) {
-          applyEnvironmentPreset(viewer, mod.defaultEnvironmentPreset ?? 'Bright');
-        }
+        // Always apply the model's default environment preset on model switch
+        // so each model reliably loads with its intended look. Any user tweaks
+        // to the Environment tab persist within a session until the next model
+        // switch — at which point the incoming model's preset takes over
+        // (applyEnvironmentPreset clears the user-modified flag).
+        // Lighting changes regardless of planner state — it's a scene visual,
+        // not a plugin UI.
+        applyEnvironmentPreset(viewer, mod.defaultEnvironmentPreset ?? 'Bright');
+
         this.activeModule = mod;
         this.activeModelName = modelName;
-        logInfo(`Model plugins loaded for '${modelName}'`);
+
+        if (this._plannerActive) {
+          debug('plugins', `Skipped model plugins for '${modelName}' (planner active — will register on exit)`);
+        } else {
+          debug('plugins', `Loading model plugins for '${modelName}'${projectFolder ? ` (project: ${projectFolder})` : ''}`);
+          mod.registerModelPlugins(viewer);
+          this._registered = true;
+          logInfo(`Model plugins loaded for '${modelName}'`);
+        }
       } catch (e) {
         console.error(`[ModelPluginManager] Error loading plugins for '${modelName}':`, e);
       }
     } else {
       debug('plugins', `No model-specific plugins found for '${modelName}'`);
-      // Apply default environment preset for models without a plugin module,
-      // but only if the user hasn't customized their environment settings.
-      if (!hasUserEnvironmentOverride()) {
-        applyEnvironmentPreset(viewer, 'Bright');
+      // Apply the generic 'Bright' fallback so every model switch leaves the
+      // environment in a predictable state.
+      applyEnvironmentPreset(viewer, 'Bright');
+    }
+  }
+
+  /**
+   * Subscribe to UI-context changes once. The handler reacts to planner
+   * toggles by registering/unregistering the active module's plugins so
+   * the workspace state stays consistent with the rule:
+   *   plannerActive ⇒ no model plugins; plannerInactive ⇒ active module's
+   *   plugins registered.
+   */
+  private _ensureContextSubscription(): void {
+    if (this._ctxUnsub) return;
+    this._ctxUnsub = subscribeUiContext(() => this._handleContextChange());
+  }
+
+  private _handleContextChange(): void {
+    const inPlanner = isContextActive('planner');
+    if (inPlanner === this._plannerActive) return; // not a planner transition
+    this._plannerActive = inPlanner;
+
+    const viewer = this._lastViewer;
+    const mod = this.activeModule;
+    if (!viewer || !mod) return;
+
+    if (inPlanner && this._registered) {
+      // Planner just activated — pull model plugins out of the workspace.
+      debug('plugins', `Planner active — unregistering model plugins for '${this.activeModelName}'`);
+      try {
+        mod.unregisterModelPlugins(viewer);
+      } catch (e) {
+        console.error(`[ModelPluginManager] Error unloading plugins for '${this.activeModelName}':`, e);
+      }
+      this._registered = false;
+    } else if (!inPlanner && !this._registered) {
+      // Planner just deactivated — register the deferred plugins. Each
+      // plugin's onModelLoaded fires retroactively via viewer.use() (see
+      // RVViewer.use → retroactive call when _lastLoadResult is set).
+      debug('plugins', `Planner inactive — registering model plugins for '${this.activeModelName}'`);
+      try {
+        mod.registerModelPlugins(viewer);
+        this._registered = true;
+        logInfo(`Model plugins loaded for '${this.activeModelName}' (deferred from planner mode)`);
+      } catch (e) {
+        console.error(`[ModelPluginManager] Error loading plugins for '${this.activeModelName}':`, e);
       }
     }
   }

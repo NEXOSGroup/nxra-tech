@@ -53,6 +53,7 @@ import { NavButton } from '../core/hmi/NavButton';
 import { LeftPanel } from '../core/hmi/LeftPanel';
 import { ORDER_PANEL_WIDTH } from '../core/hmi/layout-constants';
 import { RV_SCROLL_CLASS } from '../core/hmi/shared-sx';
+import { createStore } from '../core/hmi/create-store';
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -64,30 +65,27 @@ const UNDO_TIMEOUT_MS = 3000;
 type Listener = () => void;
 
 let _items: OrderItem[] = [];
-const _listeners = new Set<Listener>();
-let _snapshot: OrderSnapshot = { items: [], totalPositions: 0, totalQuantity: 0 };
+const _store = createStore<OrderSnapshot>({ items: [], totalPositions: 0, totalQuantity: 0 });
 
 /** Pending delete items: aasId -> { item, timerId } */
 const _pendingDeletes = new Map<string, { item: OrderItem; timerId: ReturnType<typeof setTimeout> }>();
 
 function _emitSnapshot(): void {
-  _snapshot = {
+  _store.set({
     items: [..._items],
     totalPositions: _items.length,
     totalQuantity: _items.reduce((sum, it) => sum + it.quantity, 0),
-  };
-  for (const l of _listeners) l();
+  });
 }
 
 /** React hook support: subscribe to order store changes. */
 export function subscribeOrderStore(listener: Listener): () => void {
-  _listeners.add(listener);
-  return () => { _listeners.delete(listener); };
+  return _store.subscribe(listener);
 }
 
 /** React hook support: get current snapshot (referentially stable until mutation). */
 export function getOrderSnapshot(): OrderSnapshot {
-  return _snapshot;
+  return _store.getSnapshot();
 }
 
 // ── sessionStorage helpers (try/catch for Safari Private Mode) ────────
@@ -966,7 +964,5 @@ export function _resetOrderStore(): void {
   }
   _pendingDeletes.clear();
   _items = [];
-  _snapshot = { items: [], totalPositions: 0, totalQuantity: 0 };
-  // Notify so any subscribed components update
-  for (const l of _listeners) l();
+  _store.set({ items: [], totalPositions: 0, totalQuantity: 0 });
 }

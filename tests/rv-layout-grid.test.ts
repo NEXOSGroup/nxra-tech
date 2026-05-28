@@ -8,7 +8,7 @@
  * Math.round(-1.5) = -1, Math.round(-0.5) = 0, Math.round(0.5) = 1
  */
 import { describe, test, expect } from 'vitest';
-import { snapToGrid } from '../../realvirtual-WebViewer-Private~/src/plugins/layout-planner';
+import { snapToGrid } from '../src/plugins/layout-planner';
 
 describe('Grid Snapping', () => {
   test('snapToGrid snaps X and Z to grid size', () => {

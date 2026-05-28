@@ -25,6 +25,7 @@ import { useMultiuser } from '../../hooks/use-multiuser';
 import { loadMultiuserSettings, saveMultiuserSettings } from './multiuser-settings-store';
 import type { MultiuserPluginAPI } from '../types/plugin-types';
 import type { PlayerInfo } from '../engine/rv-avatar-manager';
+import { ISA_GREEN, ISA_RED } from './isa-colors';
 
 // ── Styling constants ─────────────────────────────────────────────────────
 
@@ -201,7 +202,7 @@ export function MultiuserPanel({ onClose }: MultiuserPanelProps) {
       {/* Header */}
       <Box sx={{ display: 'flex', alignItems: 'center', mb: 0.75 }}>
         {isConnected
-          ? <Wifi sx={{ fontSize: 14, color: '#66bb6a', mr: 0.5 }} />
+          ? <Wifi sx={{ fontSize: 14, color: ISA_GREEN, mr: 0.5 }} />
           : <WifiOff sx={{ fontSize: 14, color: 'rgba(255,255,255,0.35)', mr: 0.5 }} />}
         <Typography sx={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.9)', flexGrow: 1 }}>
           Multiuser
@@ -252,7 +253,7 @@ export function MultiuserPanel({ onClose }: MultiuserPanelProps) {
           {mu.statusMessage && (
             <Typography sx={{
               fontSize: 10, mt: 0.25, textAlign: 'center',
-              color: mu.status === 'error' ? '#ef5350' : 'rgba(255,255,255,0.45)',
+              color: mu.status === 'error' ? ISA_RED : 'rgba(255,255,255,0.45)',
             }}>
               {mu.statusMessage}
             </Typography>
@@ -353,7 +354,7 @@ export function MultiuserPanel({ onClose }: MultiuserPanelProps) {
               fontSize: 11, textTransform: 'none',
               borderColor: 'rgba(255,255,255,0.15)',
               color: 'rgba(255,255,255,0.65)',
-              '&:hover': { borderColor: '#ef5350', color: '#ef5350', bgcolor: 'rgba(239,83,80,0.06)' },
+              '&:hover': { borderColor: ISA_RED, color: ISA_RED, bgcolor: 'rgba(239,83,80,0.06)' },
             }}
           >
             Disconnect

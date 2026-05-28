@@ -28,6 +28,17 @@ import { EnergyChart } from './EnergyChart';
 import { SensorChartOverlay } from './SensorChartOverlay';
 import { DriveChartOverlay } from './DriveChartOverlay';
 import { DocViewerOverlay } from '../../core/hmi/DocViewerOverlay';
+import { openPdfViewer } from '../../core/hmi/pdf-viewer-store';
+
+const BOSCH_AAS_ID = 'https://aas.boschrexroth.com/ctrlxdrive/R911410072-MS2N-Demo-0001';
+const BOSCH_MS2N_PDF_ZIP_PATH = 'aasx/Documentation/R911347581_MS2N_Synchronous_Servomotors_Operating_Instructions_0002.pdf';
+// Page 22 in the MS2N Operating Instructions covers "Thermal motor protection" (chapter 5.1.3).
+const BOSCH_MS2N_F8060_MANUAL_PAGE = 22;
+
+/** True when the Bosch ctrlX demo GLB is currently loaded. */
+function isBoschModel(viewer: { currentModelUrl: string | null }): boolean {
+  return !!viewer.currentModelUrl && /DemoRealvirtualWebBosch/.test(viewer.currentModelUrl);
+}
 
 // Hooks
 import { useDriveChartOpen } from '../../hooks/use-drive-chart';
@@ -164,7 +175,10 @@ function MaintenanceDueMessage({ viewer }: UISlotProps) {
   );
 }
 
-function DriveInfoMessage(_props: UISlotProps) {
+function DriveInfoMessage({ viewer }: UISlotProps) {
+  if (isBoschModel(viewer)) {
+    return <BoschMotorOvertempMessage viewer={viewer} />;
+  }
   return (
     <TileCard
       title="Drive 1 — Entry Conveyor"
@@ -173,6 +187,82 @@ function DriveInfoMessage(_props: UISlotProps) {
       icon="speed"
       timestamp="Live"
       componentPath="DemoCell/Conveyors/ConveyorEntry1/Motor"
+    />
+  );
+}
+
+/**
+ * Bosch ctrlX DRIVE F8060 motor overtemperature error.
+ * Replaces the Festo "Drive Info" tile when the Bosch demo GLB is loaded.
+ *
+ * Click the card → focus the motor in 3D and pulse a red alarm outline
+ * for a few seconds (visual cue matching the error severity). The outline
+ * style reverts to the default green selection style afterwards so it
+ * doesn't bleed into the next regular selection.
+ *
+ * "see manual p.22" opens the MS2N Operating Instructions PDF embedded
+ * inside the Bosch AASX (zero duplication — single source of truth).
+ */
+const BOSCH_MOTOR_PATH = 'DemoCell/Conveyors/ConveyorEntry1/Motor';
+const ALARM_PULSE_DURATION_MS = 3500;
+
+function BoschMotorOvertempMessage({ viewer }: UISlotProps) {
+  const openManual = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openPdfViewer(
+      'MS2N Synchronous Servomotors — Operating Instructions',
+      { type: 'blob', aasId: BOSCH_AAS_ID, zipPath: BOSCH_MS2N_PDF_ZIP_PATH },
+      { initialPage: BOSCH_MS2N_F8060_MANUAL_PAGE },
+    );
+  };
+
+  const handleAlarmClick = () => {
+    const motorNode = viewer.registry?.getNode(BOSCH_MOTOR_PATH);
+    if (!motorNode) return;
+    const outline = viewer.outlineManager;
+    const prevStyle = outline.getStyle();
+    outline.setStyle({
+      visibleEdgeColor: 0xff3030,
+      hiddenEdgeColor: 0x8a1a1a,
+      edgeStrength: 20,
+      edgeThickness: 10,
+      edgeGlow: 1.5,
+      pulsePeriod: 0.6,
+    });
+    // Outline the motor directly on the selection pass — bypasses the
+    // selectionManager so the AAS tooltip is not pinned and filterDrives
+    // does not open the search box. Pure visual alarm cue.
+    outline.setOutlined([motorNode]);
+    viewer.focusByPath(BOSCH_MOTOR_PATH);
+    // Revert outline + clear after the alarm window so subsequent regular
+    // selections render with the normal green selection style.
+    window.setTimeout(() => {
+      outline.setStyle({ ...prevStyle });
+      outline.clear();
+    }, ALARM_PULSE_DURATION_MS);
+  };
+
+  return (
+    <TileCard
+      title="F8060 — Motor overtemperature"
+      subtitle={
+        <>
+          MS2N servomotor (Drive 1) —{' '}
+          <a
+            href="#"
+            onClick={openManual}
+            style={{ color: '#4fc3f7', textDecoration: 'underline', cursor: 'pointer' }}
+          >
+            see manual p.22
+          </a>
+        </>
+      }
+      severity="error"
+      icon="warning"
+      timestamp="14:23"
+      componentPath={BOSCH_MOTOR_PATH}
+      onAction={handleAlarmClick}
     />
   );
 }

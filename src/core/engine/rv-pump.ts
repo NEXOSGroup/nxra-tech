@@ -5,6 +5,9 @@
  * RVPump — Process-industry pump component.
  *
  * Drives flow through a connected pipe. `flowRate > 0` means running; 0 means stopped.
+ * Carries optional industry-typical instrumentation (suction/discharge pressure,
+ * differential head, VFD speed, motor power & current, bearing/motor temperature,
+ * vibration ISO 10816, NPSH margin, run hours, fault state).
  * The class owns its tooltip content via `getTooltipData()` and keeps
  * `node.userData._rvPump` in sync for tooltip consumers.
  */
@@ -21,6 +24,9 @@ interface ComponentRefRaw {
   type?: string;
 }
 
+/** Pump operating state — drives the status dot color in the tooltip. */
+export type PumpState = 'ok' | 'warning' | 'fault';
+
 export class RVPump {
   static readonly type = 'Pump';
   static readonly tooltipType = 'pump';
@@ -29,12 +35,49 @@ export class RVPump {
   static readonly schema: ComponentSchema = {
     flowRate: { type: 'number', default: 0 },
     pipe: { type: 'componentRef' },
+    /** Authoring-time grouping: pumps with the same non-negative `circuitId`
+     *  share a fluid circuit with pipes/tanks of the same id, even when the
+     *  pipe-reference traversal can't connect them. `-1` = unassigned. */
+    circuitId: { type: 'number', default: -1 },
+    /** Medium currently flowing through the pump. Assigned by ProcessIndustryPlugin
+     *  during `reassignFluids()` based on the pump's subgraph. Empty when not part
+     *  of a known fluid network. */
+    resourceName: { type: 'string', default: '' },
+    // Industry-typical instrumentation (all optional — 0 / 'ok' = "not shown" or "nominal")
+    state: { type: 'string', default: 'ok' },          // 'ok' | 'warning' | 'fault'
+    suctionPressure: { type: 'number', default: 0 },   // bar gauge
+    dischargePressure: { type: 'number', default: 0 }, // bar gauge
+    speedRpm: { type: 'number', default: 0 },          // motor RPM
+    speedPercent: { type: 'number', default: 0 },      // VFD command 0..100 %
+    powerKw: { type: 'number', default: 0 },           // shaft power kW
+    currentA: { type: 'number', default: 0 },          // motor current A
+    bearingTempC: { type: 'number', default: 0 },      // °C
+    motorTempC: { type: 'number', default: 0 },        // °C
+    vibrationMmS: { type: 'number', default: 0 },      // mm/s RMS (ISO 10816)
+    npshAvailable: { type: 'number', default: 0 },     // m
+    npshRequired: { type: 'number', default: 0 },      // m
+    runHours: { type: 'number', default: 0 },          // total operating hours
   };
 
   readonly node: Object3D;
 
   flowRate = 0;
   pipePath: string | null = null;
+  circuitId = -1;
+  resourceName = '';
+  state: PumpState = 'ok';
+  suctionPressure = 0;
+  dischargePressure = 0;
+  speedRpm = 0;
+  speedPercent = 0;
+  powerKw = 0;
+  currentA = 0;
+  bearingTempC = 0;
+  motorTempC = 0;
+  vibrationMmS = 0;
+  npshAvailable = 0;
+  npshRequired = 0;
+  runHours = 0;
 
   constructor(node: Object3D, extras: Record<string, unknown>) {
     this.node = node;
@@ -42,6 +85,10 @@ export class RVPump {
     applySchema(this as unknown as Record<string, unknown>, RVPump.schema, extras);
     const ref = (this as unknown as { pipe?: ComponentRefRaw | null }).pipe;
     this.pipePath = ref?.path ?? null;
+    // Defensive: schema can hold any string; clamp to known states.
+    if (this.state !== 'ok' && this.state !== 'warning' && this.state !== 'fault') {
+      this.state = 'ok';
+    }
 
     setComponentInstance(node, this);
     node.userData._rvType = 'Pump';
@@ -60,8 +107,34 @@ export class RVPump {
     this.syncUserData();
   }
 
+  /** Plugin API: set operational state (ok / warning / fault). */
+  setState(state: PumpState): void {
+    this.state = state;
+    this.syncUserData();
+  }
+
+  /** Plugin API: set the medium currently flowing through this pump. Used by
+   *  ProcessIndustryPlugin to keep all members of a fluid circuit (tanks +
+   *  pipes + pumps) in sync, including for color-mode tinting. */
+  setResource(name: string): void {
+    this.resourceName = name;
+    this.syncUserData();
+  }
+
   get isRunning(): boolean {
     return this.flowRate > 0;
+  }
+
+  /** Differential head across the pump (discharge − suction). */
+  get differentialPressure(): number {
+    return this.dischargePressure - this.suctionPressure;
+  }
+
+  /** NPSH margin. Positive = safe; <= 0 indicates cavitation risk. Returns null
+   *  when neither value has been provided so the tooltip can hide the row. */
+  get npshMargin(): number | null {
+    if (this.npshAvailable === 0 && this.npshRequired === 0) return null;
+    return this.npshAvailable - this.npshRequired;
   }
 
   getTooltipData(): { type: 'pump'; nodePath: string } {
@@ -72,6 +145,23 @@ export class RVPump {
     this.node.userData._rvPump = {
       flowRate: this.flowRate,
       pipePath: this.pipePath,
+      circuitId: this.circuitId,
+      resourceName: this.resourceName,
+      state: this.state,
+      suctionPressure: this.suctionPressure,
+      dischargePressure: this.dischargePressure,
+      differentialPressure: this.differentialPressure,
+      speedRpm: this.speedRpm,
+      speedPercent: this.speedPercent,
+      powerKw: this.powerKw,
+      currentA: this.currentA,
+      bearingTempC: this.bearingTempC,
+      motorTempC: this.motorTempC,
+      vibrationMmS: this.vibrationMmS,
+      npshAvailable: this.npshAvailable,
+      npshRequired: this.npshRequired,
+      npshMargin: this.npshMargin,
+      runHours: this.runHours,
     };
   }
 }
@@ -79,6 +169,7 @@ export class RVPump {
 registerTooltipComponent(RVPump, {
   hoverable: true,
   badgeColor: '#7e57c2',
+  filterLabel: 'Pumps',
   hoverEnabledByDefault: true,
   hoverPriority: 10,
   pinPriority: 5,

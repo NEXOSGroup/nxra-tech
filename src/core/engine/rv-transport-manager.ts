@@ -30,6 +30,25 @@ export class RVTransportManager {
   /** Whether surface AABBs have been computed at least once (they are static). */
   private _surfaceAabbInitialized = false;
 
+  /** When false, sources do NOT spawn new MUs (the rest of the simulation —
+   *  transport, sensors, sinks — keeps running). The Layout-Planner sets this
+   *  false while active so editing/dragging sources doesn't scatter spawned
+   *  instances; the always-visible source ghost represents the source instead. */
+  spawnEnabled = true;
+
+  /**
+   * Enable/disable source spawning. When disabling, each source immediately
+   * shows its held "showcase" preview instance (the paused sim loop won't build
+   * it). When re-enabling, the held previews are released by the next source
+   * update (the first real spawn).
+   */
+  setSpawnEnabled(enabled: boolean): void {
+    this.spawnEnabled = enabled;
+    if (!enabled) {
+      for (const source of this.sources) source.showPreview();
+    }
+  }
+
   /** Total MUs spawned since start */
   totalSpawned = 0;
   /** Total MUs consumed by sinks since start */
@@ -48,9 +67,12 @@ export class RVTransportManager {
    * 7. Remove marked MUs (reverse iteration, swap-and-pop)
    */
   update(dt: number): void {
-    // 1. Sources: spawn new MUs
+    // 1. Sources: spawn new MUs. When spawning is disabled (e.g. the
+    //    Layout-Planner is active) the source instead shows a held "showcase"
+    //    instance at its origin and does not spawn; the frame spawning
+    //    re-enables, the held instance is released as the first real MU.
     for (const source of this.sources) {
-      const mu = source.update(dt);
+      const mu = source.update(dt, this.spawnEnabled);
       if (mu) {
         this.mus.push(mu);
         this.totalSpawned++;
@@ -206,6 +228,13 @@ export class RVTransportManager {
     for (const sensor of this.sensors) {
       sensor.occupied = false;
       sensor.occupiedMU = null;
+    }
+    // Dispose each source — frees its pause-ghost (plan-180), floor marker
+    // (plan-181: ring/label geometry, material, CanvasTexture) and any other
+    // per-source GPU resources. Without this, every `clearModel()` leaks
+    // those resources for every source in the previous scene.
+    for (const source of this.sources) {
+      source.dispose?.();
     }
     // Dispose instance pools
     for (const source of this.sources) {

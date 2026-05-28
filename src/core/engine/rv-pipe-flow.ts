@@ -21,6 +21,8 @@ import {
   type Material,
   type WebGLProgramParametersWithUniforms,
 } from 'three';
+import { ISOLATE_FOCUS_LAYER } from './rv-group-registry';
+import { traverseMeshes } from './rv-traverse-utils';
 
 // ─── Config ─────────────────────────────────────────────────────────────
 
@@ -53,10 +55,8 @@ function findPipeMesh(pipeNode: Object3D): Mesh | null {
   const tmpBox = new Box3();
   const tmpSize = new Vector3();
 
-  pipeNode.traverse((child) => {
-    if (!(child as Mesh).isMesh) return;
-    if (child.userData._pipeFlowViz) return;
-    const mesh = child as Mesh;
+  traverseMeshes(pipeNode, (mesh) => {
+    if (mesh.userData._pipeFlowViz) return;
     if (!mesh.geometry?.attributes?.position) return;
 
     tmpBox.setFromObject(mesh);
@@ -244,6 +244,10 @@ varying vec2 vPipeUv;`,
     overlay.position.copy(pipeMesh.position);
     overlay.quaternion.copy(pipeMesh.quaternion);
     overlay.scale.copy(pipeMesh.scale);
+    // Make the scrolling flow rings visible in pass 3 of isolate mode (focus
+    // pass) — without this they only carry layer 0 and disappear under the
+    // dim overlay when the pumping plant is isolated.
+    overlay.layers.enable(ISOLATE_FOCUS_LAYER);
     parent.add(overlay);
 
     overlay.visible = false;

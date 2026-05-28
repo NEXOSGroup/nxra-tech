@@ -1,6 +1,6 @@
-# WebViewer Industrial Interfaces
+# realvirtual WEB Industrial Interfaces
 
-Connect the WebViewer to real PLCs and controllers via WebSocket or MQTT — independent of Unity. The interface system provides bidirectional signal exchange synchronized with the drive physics loop at 60 Hz.
+Connect realvirtual WEB to real PLCs and controllers via WebSocket or MQTT — independent of Unity. The interface system provides bidirectional signal exchange synchronized with the drive physics loop at 60 Hz.
 
 ## Supported Protocols
 
@@ -92,7 +92,7 @@ Reconnect only activates when `autoConnect` is enabled in settings.
 
 The core design principle: **never write directly to SignalStore from async callbacks**. Instead, buffer incoming values and flush them synchronously with the fixed-timestep simulation loop.
 
-### Incoming Signals (PLC → WebViewer)
+### Incoming Signals (PLC → realvirtual WEB)
 
 ```
 PLC / Controller
@@ -118,7 +118,7 @@ SignalStore
 Drive physics, transport, LogicSteps run with updated signal values
 ```
 
-### Outgoing Signals (WebViewer → PLC)
+### Outgoing Signals (realvirtual WEB → PLC)
 
 ```
 HMI button press / LogicStep / Drive feedback
@@ -209,7 +209,7 @@ Client                              Server (Unity)
   │         }                            │
   │       }                              │
   │                                      │
-  │──── { type: "data",                  │  (outgoing from WebViewer)
+  │──── { type: "data",                  │  (outgoing from realvirtual WEB)
   │       version: 2,                    │
   │       signals: {                     │
   │         "StartButton": true          │
@@ -230,8 +230,8 @@ Signal type strings from C# map to:
 | `PLCInputInt` | `int` | `input` | Counter value |
 | `PLCOutputInt` | `int` | `output` | Program number |
 
-- **Input** = PLC writes, WebViewer reads (the PLC provides this value)
-- **Output** = WebViewer writes, PLC reads (the WebViewer provides this value)
+- **Input** = PLC writes, realvirtual WEB reads (the PLC provides this value)
+- **Output** = realvirtual WEB writes, PLC reads (realvirtual WEB provides this value)
 
 ## Integration with Drives
 
@@ -336,7 +336,11 @@ interface InterfaceSettings {
 
 ## Implementing a New Interface
 
-Extend `BaseIndustrialInterface` and implement four abstract methods:
+Extend `BaseIndustrialInterface` and implement four abstract methods.
+`BaseIndustrialInterface` extends `BaseViewerPlugin`, so you have access
+to `this.context.signals` as an alternative to `this.viewer.signalStore` — both
+reference the same `SignalStore` after model load. Prefer `this.context.signals`
+as it makes the null-before-load contract explicit.
 
 ```typescript
 import { BaseIndustrialInterface, type SignalDescriptor } from './base-industrial-interface';
@@ -407,6 +411,6 @@ The Unity server:
 1. Listens for WebSocket connections
 2. Responds to `import_request` with all registered PLC signals
 3. Sends delta `data` messages when signal values change
-4. Receives `data` messages from the WebViewer and applies them to PLC signals
+4. Receives `data` messages from realvirtual WEB and applies them to PLC signals
 
 No special configuration is needed per signal — the interface discovers and exchanges all defined signals automatically.

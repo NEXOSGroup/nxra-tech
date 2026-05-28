@@ -34,6 +34,7 @@ import {
 } from './rv-component-registry';
 import { HIGHLIGHT_OVERLAY_LAYER } from './rv-group-registry';
 import type { GizmoHandle } from './rv-gizmo-manager';
+import { traverseMeshes } from './rv-traverse-utils';
 
 const AMBER = 0xffa726;
 const LABEL_TEXT = 'SAFETY DOOR — OPEN';
@@ -132,12 +133,20 @@ export class RVSafetyDoor implements RVComponent {
 
   private buildOutline(): LineSegments | null {
     let firstMesh: Mesh | null = null;
-    this.node.traverse((c) => {
-      if (!firstMesh && (c as Mesh).isMesh) firstMesh = c as Mesh;
+    traverseMeshes(this.node, (m) => {
+      if (!firstMesh) firstMesh = m;
     });
     if (!firstMesh) return null;
     const edges = new EdgesGeometry((firstMesh as Mesh).geometry, 30);
-    const mat = new LineBasicMaterial({ color: AMBER, depthTest: false });
+    // depthWrite:false too — without it the LineBasicMaterial default writes
+    // depth and produces GTAO/N8AO halos along the outline (the AO pass
+    // samples the depth buffer left by pass 1).
+    const mat = new LineBasicMaterial({
+      color: AMBER,
+      depthTest: false,
+      depthWrite: false,
+      transparent: true,
+    });
     const line = new LineSegments(edges, mat);
     line.renderOrder = 999;
     line.layers.set(HIGHLIGHT_OVERLAY_LAYER);

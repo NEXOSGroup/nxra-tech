@@ -20,9 +20,9 @@
  *   })
  */
 
-import { useState, useCallback, useEffect, type KeyboardEvent } from 'react';
-import { Box, Typography, TextField, Button, Paper } from '@mui/material';
-import { Lock } from '@mui/icons-material';
+import { useState, useCallback, useEffect, useMemo, type KeyboardEvent } from 'react';
+import { Box, Typography, TextField, Button, Paper, Menu, MenuItem } from '@mui/material';
+import { Lock, SwapHoriz } from '@mui/icons-material';
 import type { RVViewerPlugin } from '../core/rv-plugin';
 import type { RVViewer } from '../core/rv-viewer';
 import type { UISlotEntry, UISlotProps } from '../core/rv-ui-plugin';
@@ -42,6 +42,14 @@ export interface LoginGateConfig {
   sessionKey?: string;
   /** Footer text. Default 'powered by realvirtual WEB'. */
   footer?: string;
+  /**
+   * Show a "Load a different model" link below Sign In. Default: true.
+   * The link opens a menu of available models from `viewer.availableModels`;
+   * picking one navigates to `?model=<url>` (overrides both saved-last-model
+   * and settings.json `defaultModel`). Set `false` to hide on locked-down
+   * deployments where switching scenes is not desired.
+   */
+  showModelPicker?: boolean;
 }
 
 // ─── Shared state between plugin class and React component ──────────────
@@ -54,7 +62,7 @@ function isAuthed(key: string): boolean {
   return localStorage.getItem(key) === '1';
 }
 
-function LoginGateOverlay(_props: UISlotProps) {
+function LoginGateOverlay({ viewer }: UISlotProps) {
   const cfg = _config;
   if (!cfg) return null;
 
@@ -65,8 +73,20 @@ function LoginGateOverlay(_props: UISlotProps) {
   const [user, setUser] = useState('');
   const [pass, setPass] = useState('');
   const [error, setError] = useState(false);
+  const [pickerAnchor, setPickerAnchor] = useState<HTMLElement | null>(null);
 
   useEffect(() => { if (isAuthed(key)) setAuthed(true); }, [key]);
+
+  // Filter the viewer's known models. We exclude the current one (no point
+  // "switching" to the same scene) — the project default that triggered this
+  // gate is the most likely current model. `availableModels` is populated
+  // during main.ts model discovery before plugins register, so it should
+  // already be ready by the time this overlay renders.
+  const otherModels = useMemo(() => {
+    const all = viewer?.availableModels ?? [];
+    const current = viewer?.currentModelUrl ?? viewer?.pendingModelUrl ?? null;
+    return current ? all.filter((m) => m.url !== current) : [...all];
+  }, [viewer]);
 
   const handleLogin = useCallback(() => {
     try {
@@ -88,6 +108,16 @@ function LoginGateOverlay(_props: UISlotProps) {
   const handleKey = useCallback((e: KeyboardEvent) => {
     if (e.key === 'Enter') handleLogin();
   }, [handleLogin]);
+
+  const handlePickModel = useCallback((url: string) => {
+    setPickerAnchor(null);
+    // Navigate with ?model=<url>. URL param wins over both the saved-last-model
+    // and settings.json defaultModel, so the gate's project doesn't reload.
+    const target = new URL(window.location.href);
+    target.search = '';
+    target.searchParams.set('model', url);
+    window.location.href = target.toString();
+  }, []);
 
   if (authed) return null;
 
@@ -162,6 +192,46 @@ function LoginGateOverlay(_props: UISlotProps) {
         >
           Sign In
         </Button>
+
+        {(cfg.showModelPicker ?? true) && otherModels.length > 0 && (
+          <>
+            <Button
+              size="small"
+              startIcon={<SwapHoriz sx={{ fontSize: 16 }} />}
+              onClick={(e) => setPickerAnchor(e.currentTarget)}
+              sx={{
+                mt: -0.5, textTransform: 'none', fontSize: 11,
+                color: 'rgba(255,255,255,0.55)',
+                '&:hover': { color: accent, bgcolor: 'transparent' },
+              }}
+            >
+              Load a different model
+            </Button>
+            <Menu
+              anchorEl={pickerAnchor}
+              open={!!pickerAnchor}
+              onClose={() => setPickerAnchor(null)}
+              MenuListProps={{ dense: true }}
+              PaperProps={{
+                sx: {
+                  bgcolor: 'rgba(30,30,30,0.97)',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  maxHeight: 320,
+                },
+              }}
+            >
+              {otherModels.map((m) => (
+                <MenuItem
+                  key={m.url}
+                  onClick={() => handlePickModel(m.url)}
+                  sx={{ fontSize: 12, color: 'rgba(255,255,255,0.85)' }}
+                >
+                  {m.label}
+                </MenuItem>
+              ))}
+            </Menu>
+          </>
+        )}
 
         <Typography sx={{ fontSize: 9, color: 'rgba(255,255,255,0.2)', mt: 1 }}>
           {cfg.footer ?? 'powered by realvirtual WEB'}

@@ -74,7 +74,7 @@ describe('TransportStatsPlugin', () => {
     expect(plugin.timeBuffer.count).toBe(0);
   });
 
-  it('should emit mu-spawned when totalSpawned changes', () => {
+  it('should emit component-event (mu/spawned) when totalSpawned changes', () => {
     const tm = { totalSpawned: 0, totalConsumed: 0 };
     const viewer = createMockViewer(tm);
     plugin.onModelLoaded(createMockLoadResult(), viewer as any);
@@ -87,12 +87,16 @@ describe('TransportStatsPlugin', () => {
     tm.totalSpawned = 3;
     plugin.onFixedUpdatePost(0.1);
 
-    const spawnEvents = viewer.events.filter((e) => e.name === 'mu-spawned');
+    const spawnEvents = viewer.events.filter(
+      (e) => e.name === 'component-event'
+        && (e.data as { componentType: string; kind: string }).componentType === 'mu'
+        && (e.data as { componentType: string; kind: string }).kind === 'spawned',
+    );
     expect(spawnEvents.length).toBe(1);
-    expect(spawnEvents[0].data).toEqual({ totalSpawned: 3 });
+    expect((spawnEvents[0].data as { payload: unknown }).payload).toEqual({ totalSpawned: 3 });
   });
 
-  it('should emit mu-consumed when totalConsumed changes', () => {
+  it('should emit component-event (mu/consumed) when totalConsumed changes', () => {
     const tm = { totalSpawned: 0, totalConsumed: 0 };
     const viewer = createMockViewer(tm);
     plugin.onModelLoaded(createMockLoadResult(), viewer as any);
@@ -101,9 +105,13 @@ describe('TransportStatsPlugin', () => {
     tm.totalConsumed = 2;
     plugin.onFixedUpdatePost(0.1);
 
-    const consumeEvents = viewer.events.filter((e) => e.name === 'mu-consumed');
+    const consumeEvents = viewer.events.filter(
+      (e) => e.name === 'component-event'
+        && (e.data as { componentType: string; kind: string }).componentType === 'mu'
+        && (e.data as { componentType: string; kind: string }).kind === 'consumed',
+    );
     expect(consumeEvents.length).toBe(1);
-    expect(consumeEvents[0].data).toEqual({ totalConsumed: 2 });
+    expect((consumeEvents[0].data as { payload: unknown }).payload).toEqual({ totalConsumed: 2 });
   });
 
   it('should not emit duplicate events when counters stay the same', () => {

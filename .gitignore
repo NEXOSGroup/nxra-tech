@@ -6,3 +6,9 @@ dist-private/
 test-results/
 *.local
 *.tsbuildinfo
+
+# Local test working folder (large GLB/splat assets, not for the repo)
+LocalFolderTest/
+
+# Oversized AASX asset (exceeds GitHub 100 MB limit)
+public/aasx/26_SEW_KA47-DRN90M4.aasx

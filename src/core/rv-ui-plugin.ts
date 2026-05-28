@@ -23,6 +23,7 @@ export type UISlot =
   | 'messages'         // Right: Notification/status tiles vertical
   | 'views'            // Bottom right: Expandable panels (charts, tables)
   | 'settings-tab'     // Settings dialog: Tab registration
+  | 'toolbar-button-leading' // TopBar: Buttons rendered before Hierarchy (primary sim controls)
   | 'toolbar-button'   // TopBar: Additional toolbar buttons (next to hierarchy/settings)
   | 'overlay';         // Full-screen overlay panels (left panels, modals, etc.)
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
-import { useState, useSyncExternalStore } from 'react';
+import { useMemo, useState, useSyncExternalStore } from 'react';
 import { Box, Paper, Typography } from '@mui/material';
 import { Circle } from '@mui/icons-material';
 import { useViewer } from '../../hooks/use-viewer';
@@ -13,6 +13,7 @@ import { useMobileLayout } from '../../hooks/use-mobile-layout';
 import { WelcomeModal } from './WelcomeModal';
 import { useCustomBranding } from './branding-store';
 import { useKioskHasTour, startKioskFromWelcome } from '../../plugins/kiosk-plugin';
+import { useActiveContexts, evaluateVisibilityRule } from './ui-context-store';
 
 /* Logo URL: use BASE_URL so it resolves correctly under sub-folder deploys (e.g. Bunny CDN /demo/) */
 const logoUrl = `${import.meta.env.BASE_URL}logo.png`;
@@ -25,17 +26,8 @@ function BrandingContent({ isMobile }: { isMobile: boolean }) {
   const custom = useCustomBranding();
 
   if (!custom) {
-    // Default: realvirtual logo + name
-    return (
-      <>
-        <img src={logoUrl} alt="realvirtual" style={{ height: 18, width: 18 }} />
-        {!isMobile && (
-          <Typography sx={{ fontSize: 12, fontWeight: 500, letterSpacing: 0.5, color: 'text.primary' }}>
-            realvirtual
-          </Typography>
-        )}
-      </>
-    );
+    // Default: realvirtual logo only (no text label)
+    return <img src={logoUrl} alt="realvirtual" style={{ height: 18, width: 18 }} />;
   }
 
   // Custom branding: [Custom Logo] | [powered by rv-logo realvirtual]
@@ -59,66 +51,51 @@ function BrandingContent({ isMobile }: { isMobile: boolean }) {
   );
 }
 
-// ── Logo Badge (always visible, independent of ButtonPanel) ─────────────
+// ── Logo Badge (inline — embedded in the top-left TopBar Paper) ─────────
 
-/** Logo + connection status badge — always visible at top-left. */
+/** Logo + connection status badge — rendered as the leftmost element of the
+ *  TopBar's button group (no longer a separate fixed-position panel). */
 const WELCOME_DISMISSED_KEY = 'rv-welcome-dismissed';
 
 export function LogoBadge() {
   const [aboutOpen, setAboutOpen] = useState(() => !localStorage.getItem(WELCOME_DISMISSED_KEY));
   const isMobile = useMobileLayout();
   const mcp = useMcpBridge();
-  const customBranding = useCustomBranding();
-  const badgeBg = customBranding?.badgeBackground;
-  const fullWidth = customBranding?.badgeFullWidth;
 
-  // Hide the logo badge entirely on mobile — it collides with the top-right button panel
-  // on narrow viewports and wastes scarce screen real estate.
+  // Hide entirely on mobile — top-left toolbar is already cramped.
   if (isMobile) return null;
 
   return (
     <>
       <Box
-        data-ui-panel
         sx={{
-          position: 'fixed',
-          left: 8,
-          top: 8,
-          zIndex: 1210,
           display: 'flex',
           alignItems: 'center',
-          justifyContent: fullWidth ? 'center' : undefined,
-          gap: 1,
-          px: 1.25,
+          gap: 0.75,
+          px: 0.75,
           py: 0.5,
-          borderRadius: 2,
-          pointerEvents: 'auto',
+          mr: 0.25,
+          borderRight: '1px solid rgba(255,255,255,0.08)',
           cursor: 'pointer',
-          backgroundColor: badgeBg ?? 'rgba(18, 18, 18, 0.65)',
-          backdropFilter: 'blur(16px)',
-          boxShadow: 4,
-          ...(fullWidth && { width: 280, boxSizing: 'border-box' }),
-          '&:hover': { backgroundColor: badgeBg ?? 'rgba(255,255,255,0.06)' },
+          borderRadius: 1,
+          '&:hover': { backgroundColor: 'rgba(255,255,255,0.04)' },
         }}
         onClick={() => setAboutOpen(true)}
+        title="About"
       >
         <BrandingContent isMobile={isMobile} />
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
           <Circle sx={{ fontSize: 6, color: '#66bb6a' }} />
-          {!isMobile && (
-            <Typography sx={{ fontSize: 10, fontWeight: 500, color: 'rgba(102,187,106,0.85)', letterSpacing: 0.3 }}>
-              online
-            </Typography>
-          )}
+          <Typography sx={{ fontSize: 10, fontWeight: 500, color: 'rgba(102,187,106,0.85)', letterSpacing: 0.3 }}>
+            online
+          </Typography>
         </Box>
         {mcp.connected && (
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, ml: 1 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
             <Circle sx={{ fontSize: 6, color: '#66bb6a' }} />
-            {!isMobile && (
-              <Typography sx={{ fontSize: 10, fontWeight: 500, color: 'rgba(102,187,106,0.85)', letterSpacing: 0.3 }}>
-                ai
-              </Typography>
-            )}
+            <Typography sx={{ fontSize: 10, fontWeight: 500, color: 'rgba(102,187,106,0.85)', letterSpacing: 0.3 }}>
+              ai
+            </Typography>
           </Box>
         )}
       </Box>
@@ -148,7 +125,33 @@ function WelcomeModalHost({ open, onClose }: { open: boolean; onClose: () => voi
 /** Slot-driven button group sidebar. */
 export function ButtonPanel() {
   const viewer = useViewer();
-  const entries = useSlot('button-group');
+  const allEntries = useSlot('button-group');
+
+  // Active UI contexts (planner, fpv, xr, …). Drives entry visibility
+  // filtering below.
+  const contexts = useActiveContexts();
+
+  /**
+   * Filter slot entries to those that should currently render.
+   *
+   * Rules:
+   *  - Entry has explicit `visibilityRule` → evaluate it directly
+   *    (`shownOnlyIn` + `hiddenIn` precedence as elsewhere in the codebase).
+   *  - No rule → visible by default, EXCEPT when `'planner'` is active. In
+   *    planner mode the toolbar shows only planner-specific buttons (those
+   *    that opt in via `visibilityRule: { shownOnlyIn: ['planner'] }`); all
+   *    other model/scene plugins (Drives, Sensors, Alarms, …) get hidden so
+   *    the user has a focused, distraction-free layout-editing workspace.
+   */
+  const entries = useMemo(() => {
+    const inPlanner = contexts.has('planner');
+    return allEntries.filter((entry) => {
+      if (entry.visibilityRule) {
+        return evaluateVisibilityRule(entry.visibilityRule, contexts);
+      }
+      return !inPlanner;
+    });
+  }, [allEntries, contexts]);
 
   // Check if hierarchy panel is open (and its width) to shift the button group right
   const { state: editorState } = useEditorPlugin();
@@ -204,6 +207,15 @@ export function ButtonPanel() {
           p: 0.5,
           borderRadius: isMobile ? '12px 12px 0 0' : 2,
           pointerEvents: 'auto',
+          ...(isMobile && {
+            maxWidth: '100vw',
+            overflowX: 'auto',
+            WebkitOverflowScrolling: 'touch',
+            scrollbarWidth: 'none',
+            '&::-webkit-scrollbar': { display: 'none' },
+            // Prevent any child button from shrinking
+            '& > *': { flexShrink: 0 },
+          }),
         }}
       >
         {entries.map((entry, i) => {

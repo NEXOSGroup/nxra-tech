@@ -2,7 +2,8 @@
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
 /**
- * SensorMonitorPlugin — Emits 'sensor-changed' events via sensor.onChanged callbacks.
+ * SensorMonitorPlugin — Emits `component-event` (componentType: 'sensor', kind: 'changed')
+ * via sensor.onChanged callbacks.
  *
  * Event-based (NOT polling): only fires when a sensor actually changes state.
  * Maintains a ring-buffer event history for debugging / UI display.
@@ -44,7 +45,12 @@ export class SensorMonitorPlugin implements RVViewerPlugin {
         const path = (s.node.userData?.rv as Record<string, unknown> | undefined)?.['path'] as string
           ?? s.node.name;
         this.eventHistory.push({ sensorPath: path, occupied, time: this.elapsed });
-        this.viewer?.emit('sensor-changed', { sensorPath: path, occupied });
+        this.viewer?.emit('component-event', {
+          componentType: 'sensor',
+          kind: 'changed',
+          path,
+          payload: { occupied },
+        });
       };
       this.cleanups.push(() => { sensor.onChanged = originalOnChanged; });
     }

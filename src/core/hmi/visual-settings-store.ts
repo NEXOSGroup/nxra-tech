@@ -4,9 +4,15 @@
 /** Persists visual settings and camera bookmarks to localStorage. */
 
 import { useSyncExternalStore } from 'react';
-import { getAppConfig, isSettingsLocked } from '../rv-app-config';
+import { getAppConfig } from '../rv-app-config';
+import { lsSave } from './ls-store-utils';
 
 const STORAGE_KEY = 'rv-visual-settings';
+/** Standalone scalar key for the "show source markers" toggle (plan-181).
+ *  Kept separate from the main `rv-visual-settings` blob so it can be flipped
+ *  in isolation (and so existing visual-settings consumers don't see schema
+ *  churn). Listed in `ALL_RV_STORAGE_KEYS` for cleanup-sweep coverage. */
+const SOURCE_MARKERS_KEY = 'rv-source-markers-visible';
 
 export type LightingMode = 'simple' | 'default';
 export const LIGHTING_MODES: readonly LightingMode[] = ['simple', 'default'] as const;
@@ -18,6 +24,13 @@ export type ShadowQuality = 'low' | 'medium' | 'high';
 export const SHADOW_QUALITY_OPTIONS: readonly ShadowQuality[] = ['low', 'medium', 'high'] as const;
 
 export type ProjectionType = 'perspective' | 'orthographic';
+
+/** Ambient-occlusion backend selection.
+ *  - `'off'`  : AO disabled entirely.
+ *  - `'gtao'` : three.js built-in GTAOPass (current default, smaller bundle).
+ *  - `'n8ao'` : N8AO pass (higher visual quality, lazy-loaded on first use). */
+export type AOMode = 'off' | 'gtao' | 'n8ao';
+export const AO_MODES: readonly AOMode[] = ['off', 'gtao', 'n8ao'] as const;
 
 export interface LightingModeSettings {
   lightIntensity: number;
@@ -60,11 +73,13 @@ export interface VisualSettings {
   fpvSensitivity: number;
   /** FPV eye height above ground in meters. */
   fpvEyeHeight: number;
-  /** Whether Screen Space Ambient Occlusion (GTAO) is enabled. WebGL only. */
-  ssaoEnabled: boolean;
-  /** SSAO blend intensity (0 = invisible, 1 = full). */
+  /** Ambient-occlusion backend: 'off' | 'gtao' | 'n8ao'. WebGL only; on WebGPU
+   *  this is effectively ignored (AO is a no-op). Supersedes the legacy
+   *  `ssaoEnabled` boolean — the boolean is derived from this for back-compat. */
+  aoMode: AOMode;
+  /** AO blend intensity (0 = invisible, 1 = full). Shared between backends. */
   ssaoIntensity: number;
-  /** SSAO sampling radius in world units. */
+  /** AO sampling radius in world units. Shared between backends. */
   ssaoRadius: number;
   /** Whether bloom (glow on bright areas) is enabled. WebGL only. */
   bloomEnabled: boolean;
@@ -78,6 +93,9 @@ export interface VisualSettings {
   groundEnabled: boolean;
   /** Floor brightness multiplier (0 = black, 1 = default, 2 = double). */
   groundBrightness: number;
+  /** Floor base color as #rrggbb hex. Combined with `groundBrightness` to drive
+   *  the actual ground material tint (color × brightness, component-wise). */
+  groundColor: string;
   /** Scene background brightness multiplier (0 = black, 1 = default gray, 2 = white). */
   backgroundBrightness: number;
   /** Floor checker pattern contrast multiplier (0 = flat midgray, 1 = default, 2 = doubled). */
@@ -92,6 +110,8 @@ export interface VisualSettings {
   orbitZoomSpeed: number;
   /** OrbitControls damping factor — inertia feel (0.01–0.5, default 0.08). */
   orbitDampingFactor: number;
+  /** Distance-adaptive navigation: scales zoom/pan speed proportionally to camera–target distance (opt-in). */
+  distanceAdaptiveNav?: boolean;
 }
 
 /** Single source of truth for OrbitControls navigation-sensitivity ranges (UI sliders + clamping). */
@@ -140,7 +160,7 @@ const DEFAULTS: VisualSettings = {
   fpvSprintSpeed: 5.0,
   fpvSensitivity: 0.002,
   fpvEyeHeight: 1.7,
-  ssaoEnabled: true,
+  aoMode: 'gtao',
   ssaoIntensity: 0.35,
   ssaoRadius: 0.03,
   bloomEnabled: true,
@@ -149,6 +169,7 @@ const DEFAULTS: VisualSettings = {
   bloomRadius: 0.4,
   groundEnabled: true,
   groundBrightness: 1.0,
+  groundColor: '#ffffff',
   backgroundBrightness: 1.0,
   checkerContrast: 1.0,
   uiZoom: 1.0,
@@ -156,6 +177,7 @@ const DEFAULTS: VisualSettings = {
   orbitPanSpeed: 1.0,
   orbitZoomSpeed: 1.0,
   orbitDampingFactor: 0.08,
+  distanceAdaptiveNav: false,
 };
 
 function migrateToneMapping(raw: unknown, mode: LightingMode): ToneMappingType {
@@ -210,7 +232,7 @@ export function loadVisualSettings(): VisualSettings {
     fpvSprintSpeed: fromStorage.fpvSprintSpeed,
     fpvSensitivity: fromStorage.fpvSensitivity,
     fpvEyeHeight: fromStorage.fpvEyeHeight,
-    ssaoEnabled: fromStorage.ssaoEnabled,
+    aoMode: fromStorage.aoMode,
     ssaoIntensity: fromStorage.ssaoIntensity,
     ssaoRadius: fromStorage.ssaoRadius,
     bloomEnabled: fromStorage.bloomEnabled,
@@ -219,6 +241,7 @@ export function loadVisualSettings(): VisualSettings {
     bloomRadius: fromStorage.bloomRadius,
     groundEnabled: fromStorage.groundEnabled,
     groundBrightness: fromStorage.groundBrightness,
+    groundColor: fromStorage.groundColor,
     backgroundBrightness: fromStorage.backgroundBrightness,
     checkerContrast: fromStorage.checkerContrast,
     uiZoom: fromStorage.uiZoom,
@@ -242,6 +265,7 @@ export function loadVisualSettings(): VisualSettings {
       NAVIGATION_RANGES.dampingFactor,
       fromStorage.orbitDampingFactor,
     ),
+    distanceAdaptiveNav: fromStorage.distanceAdaptiveNav,
   };
 }
 
@@ -279,8 +303,18 @@ function loadFromLocalStorage(): VisualSettings {
     const fpvEyeHeightRaw = (parsed as Record<string, unknown>).fpvEyeHeight;
     const fpvEyeHeight = (typeof fpvEyeHeightRaw === 'number' && fpvEyeHeightRaw >= 0.5 && fpvEyeHeightRaw <= 5)
       ? fpvEyeHeightRaw : DEFAULTS.fpvEyeHeight;
+    // aoMode migration: prefer explicit `aoMode`; fall back to legacy
+    // boolean `ssaoEnabled` (true → 'gtao', false → 'off'); finally DEFAULTS.
+    const aoModeRaw = (parsed as Record<string, unknown>).aoMode;
     const ssaoEnabledRaw = (parsed as Record<string, unknown>).ssaoEnabled;
-    const ssaoEnabled = typeof ssaoEnabledRaw === 'boolean' ? ssaoEnabledRaw : DEFAULTS.ssaoEnabled;
+    let aoMode: AOMode;
+    if (typeof aoModeRaw === 'string' && (AO_MODES as readonly string[]).includes(aoModeRaw)) {
+      aoMode = aoModeRaw as AOMode;
+    } else if (typeof ssaoEnabledRaw === 'boolean') {
+      aoMode = ssaoEnabledRaw ? 'gtao' : 'off';
+    } else {
+      aoMode = DEFAULTS.aoMode;
+    }
     const ssaoIntensityRaw = (parsed as Record<string, unknown>).ssaoIntensity;
     const ssaoIntensity = (typeof ssaoIntensityRaw === 'number' && ssaoIntensityRaw >= 0 && ssaoIntensityRaw <= 2)
       ? ssaoIntensityRaw : DEFAULTS.ssaoIntensity;
@@ -303,6 +337,9 @@ function loadFromLocalStorage(): VisualSettings {
     const groundBrightnessRaw = (parsed as Record<string, unknown>).groundBrightness;
     const groundBrightness = (typeof groundBrightnessRaw === 'number' && groundBrightnessRaw >= 0 && groundBrightnessRaw <= 2)
       ? groundBrightnessRaw : DEFAULTS.groundBrightness;
+    const groundColorRaw = (parsed as Record<string, unknown>).groundColor;
+    const groundColor = (typeof groundColorRaw === 'string' && /^#[0-9a-fA-F]{6}$/.test(groundColorRaw))
+      ? groundColorRaw : DEFAULTS.groundColor;
     const backgroundBrightnessRaw = (parsed as Record<string, unknown>).backgroundBrightness;
     const backgroundBrightness = (typeof backgroundBrightnessRaw === 'number' && backgroundBrightnessRaw >= 0 && backgroundBrightnessRaw <= 2)
       ? backgroundBrightnessRaw : DEFAULTS.backgroundBrightness;
@@ -346,7 +383,7 @@ function loadFromLocalStorage(): VisualSettings {
       fpvSprintSpeed,
       fpvSensitivity,
       fpvEyeHeight,
-      ssaoEnabled,
+      aoMode,
       ssaoIntensity,
       ssaoRadius,
       bloomEnabled,
@@ -355,6 +392,7 @@ function loadFromLocalStorage(): VisualSettings {
       bloomRadius,
       groundEnabled,
       groundBrightness,
+      groundColor,
       backgroundBrightness,
       checkerContrast,
       uiZoom,
@@ -362,6 +400,9 @@ function loadFromLocalStorage(): VisualSettings {
       orbitPanSpeed,
       orbitZoomSpeed,
       orbitDampingFactor,
+      distanceAdaptiveNav: typeof (parsed as Record<string, unknown>).distanceAdaptiveNav === 'boolean'
+        ? (parsed as Record<string, unknown>).distanceAdaptiveNav as boolean
+        : DEFAULTS.distanceAdaptiveNav,
     };
   } catch {
     return { ...DEFAULTS, modeSettings: { simple: { ...MODE_DEFAULTS.simple }, default: { ...MODE_DEFAULTS.default } }, cameras: [...DEFAULTS.cameras] };
@@ -369,10 +410,7 @@ function loadFromLocalStorage(): VisualSettings {
 }
 
 export function saveVisualSettings(settings: VisualSettings): void {
-  if (isSettingsLocked()) return;
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
-  } catch { /* quota exceeded — silently ignore */ }
+  lsSave(STORAGE_KEY, settings);
 }
 
 // ─── Reactive UI Zoom Store ────────────────────────────────────────────
@@ -403,5 +441,156 @@ export function useUIZoom(): number {
   return useSyncExternalStore(
     (cb) => { _zoomListeners.add(cb); return () => { _zoomListeners.delete(cb); }; },
     () => _uiZoom,
+  );
+}
+
+// ─── Reactive Source-Markers-Visible Store (plan-181) ─────────────────
+// Pure scalar boolean persisted to its own localStorage slot so other
+// `VisualSettings` consumers don't have to know about it. Default: true.
+
+const DEFAULT_SOURCE_MARKERS_VISIBLE = true;
+
+function loadSourceMarkersVisible(): boolean {
+  try {
+    const raw = localStorage.getItem(SOURCE_MARKERS_KEY);
+    if (raw === null) return DEFAULT_SOURCE_MARKERS_VISIBLE;
+    return raw === 'true';
+  } catch {
+    return DEFAULT_SOURCE_MARKERS_VISIBLE;
+  }
+}
+
+let _sourceMarkersVisible: boolean = loadSourceMarkersVisible();
+const _sourceMarkersListeners = new Set<() => void>();
+
+function notifySourceMarkers(): void { for (const l of _sourceMarkersListeners) l(); }
+
+/** Read the current source-markers-visible toggle (non-reactive). */
+export function getSourceMarkersVisible(): boolean { return _sourceMarkersVisible; }
+
+/**
+ * Update the source-markers-visible flag, persist to localStorage, and
+ * notify subscribers. Plugins (e.g. `RVViewer.setSourceMarkersVisible`)
+ * subscribe via {@link subscribeSourceMarkersVisible} to apply the change
+ * to every source's `_markerNode.visible`.
+ */
+export function setSourceMarkersVisible(visible: boolean): void {
+  if (_sourceMarkersVisible === visible) return;
+  _sourceMarkersVisible = visible;
+  try {
+    localStorage.setItem(SOURCE_MARKERS_KEY, visible ? 'true' : 'false');
+  } catch {
+    /* quota exceeded or storage disabled — ignore */
+  }
+  notifySourceMarkers();
+}
+
+/** Subscribe to source-markers-visible changes. Returns unsubscribe handle. */
+export function subscribeSourceMarkersVisible(cb: () => void): () => void {
+  _sourceMarkersListeners.add(cb);
+  return () => { _sourceMarkersListeners.delete(cb); };
+}
+
+/** React hook: returns the current source-markers-visible flag (reactive). */
+export function useSourceMarkersVisible(): boolean {
+  return useSyncExternalStore(
+    (cb) => { _sourceMarkersListeners.add(cb); return () => { _sourceMarkersListeners.delete(cb); }; },
+    () => _sourceMarkersVisible,
+  );
+}
+
+// ─── Reactive Toolbar-Show-Labels Store ───────────────────────────────
+// Controls whether the top-left toolbar's window-opening buttons (Hierarchy,
+// Models, Annotations, Multiuser, VR/AR, Settings) render a text label next
+// to their icon. Always collapsed on mobile regardless of this setting.
+
+const TOOLBAR_LABELS_KEY = 'rv-toolbar-show-labels';
+const DEFAULT_TOOLBAR_SHOW_LABELS = false;
+
+function loadToolbarShowLabels(): boolean {
+  try {
+    const raw = localStorage.getItem(TOOLBAR_LABELS_KEY);
+    if (raw === null) return DEFAULT_TOOLBAR_SHOW_LABELS;
+    return raw === 'true';
+  } catch {
+    return DEFAULT_TOOLBAR_SHOW_LABELS;
+  }
+}
+
+let _toolbarShowLabels: boolean = loadToolbarShowLabels();
+const _toolbarLabelsListeners = new Set<() => void>();
+
+function notifyToolbarLabels(): void { for (const l of _toolbarLabelsListeners) l(); }
+
+export function getToolbarShowLabels(): boolean { return _toolbarShowLabels; }
+
+export function setToolbarShowLabels(show: boolean): void {
+  if (_toolbarShowLabels === show) return;
+  _toolbarShowLabels = show;
+  try {
+    localStorage.setItem(TOOLBAR_LABELS_KEY, show ? 'true' : 'false');
+  } catch {
+    /* quota exceeded or storage disabled — ignore */
+  }
+  notifyToolbarLabels();
+}
+
+export function useToolbarShowLabels(): boolean {
+  return useSyncExternalStore(
+    (cb) => { _toolbarLabelsListeners.add(cb); return () => { _toolbarLabelsListeners.delete(cb); }; },
+    () => _toolbarShowLabels,
+  );
+}
+
+// ─── Reactive Snap-Flip-Icons Store (plan-190) ────────────────────────
+// Controls whether the layout planner shows a clickable "flip orientation"
+// icon over a hovered/selected placed component that has a second compatible
+// snap. Default: true. Kept as its own scalar key so existing visual-settings
+// consumers stay schema-stable.
+
+const SNAP_FLIP_ICONS_KEY = 'rv-snap-flip-icons-visible';
+const DEFAULT_SNAP_FLIP_ICONS_VISIBLE = true;
+
+function loadSnapFlipIconsVisible(): boolean {
+  try {
+    const raw = localStorage.getItem(SNAP_FLIP_ICONS_KEY);
+    if (raw === null) return DEFAULT_SNAP_FLIP_ICONS_VISIBLE;
+    return raw === 'true';
+  } catch {
+    return DEFAULT_SNAP_FLIP_ICONS_VISIBLE;
+  }
+}
+
+let _snapFlipIconsVisible: boolean = loadSnapFlipIconsVisible();
+const _snapFlipIconsListeners = new Set<() => void>();
+
+function notifySnapFlipIcons(): void { for (const l of _snapFlipIconsListeners) l(); }
+
+/** Read the current snap-flip-icons-visible toggle (non-reactive). */
+export function getSnapFlipIconsVisible(): boolean { return _snapFlipIconsVisible; }
+
+/** Set the snap-flip-icons-visible flag and persist to localStorage. */
+export function setSnapFlipIconsVisible(visible: boolean): void {
+  if (_snapFlipIconsVisible === visible) return;
+  _snapFlipIconsVisible = visible;
+  try {
+    localStorage.setItem(SNAP_FLIP_ICONS_KEY, visible ? 'true' : 'false');
+  } catch {
+    /* quota exceeded or storage disabled — ignore */
+  }
+  notifySnapFlipIcons();
+}
+
+/** Subscribe to snap-flip-icons-visible changes. Returns unsubscribe handle. */
+export function subscribeSnapFlipIconsVisible(cb: () => void): () => void {
+  _snapFlipIconsListeners.add(cb);
+  return () => { _snapFlipIconsListeners.delete(cb); };
+}
+
+/** React hook: returns the current snap-flip-icons-visible flag (reactive). */
+export function useSnapFlipIconsVisible(): boolean {
+  return useSyncExternalStore(
+    (cb) => { _snapFlipIconsListeners.add(cb); return () => { _snapFlipIconsListeners.delete(cb); }; },
+    () => _snapFlipIconsVisible,
   );
 }

@@ -3,7 +3,7 @@
 
 /**
  * GroupsTab — Settings tab for configuring group visibility defaults
- * and overlay exclusions. Follows PhysicsTab pattern.
+ * and overlay exclusions.
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';

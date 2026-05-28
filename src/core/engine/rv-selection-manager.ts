@@ -12,7 +12,7 @@
  * selection channel — independent from the hover channel.
  */
 
-import type { RVViewer } from '../rv-viewer';
+import type { ViewerHost } from './rv-viewer-host';
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -32,7 +32,7 @@ const EMPTY_SNAPSHOT: SelectionSnapshot = Object.freeze({
 
 export class SelectionManager {
   private _selected: string[] = [];
-  private _viewer: RVViewer | null = null;
+  private _viewer: ViewerHost | null = null;
   private _listeners = new Set<() => void>();
   private _snapshot: SelectionSnapshot = EMPTY_SNAPSHOT;
   private _escapeHandler: ((e: KeyboardEvent) => void) | null = null;
@@ -147,7 +147,7 @@ export class SelectionManager {
   // ─── Lifecycle ────────────────────────────────────────────────────
 
   /** Bind to viewer: Escape key listener, etc. */
-  init(viewer: RVViewer): void {
+  init(viewer: ViewerHost): void {
     this._viewer = viewer;
     this._escapeHandler = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;

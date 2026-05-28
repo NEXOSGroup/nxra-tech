@@ -26,6 +26,7 @@ realvirtual WEB replaces traditional desktop HMI and SCADA visualization with a 
 - **Transport Simulation** — Full in-browser simulation engine at 60 Hz fixed timestep: conveyor surfaces, sources, sinks, sensors with AABB collision, grippers, and material flow.
 - **LogicStep Sequencing** — Serial/parallel containers, signal conditions, delays, drive commands — ported from realvirtual.io Professional based on Unity.
 - **WebXR (VR/AR)** — Immersive visualization on Meta Quest, Apple Vision Pro, and AR on Android/iOS with surface detection.
+- **Layout Planning** *(Beta)* — Assemble factory layouts directly in the browser: drag reusable parts from a library onto a grid, connect them with typed snap points, and position them with transform gizmos. Ships with a standard parts library and can load any GLB catalog straight from a GitHub repository.
 - **Multiuser Sessions** *(Beta)* — Real-time collaboration with avatars, shared camera views, role management, and late-join state sync.
 - **Plugin Architecture** — Extend with custom plugins for project-specific HMI, KPI dashboards, maintenance workflows, and industrial interfaces.
 - **Microsoft Teams Integration** *(Beta)* — Embed interactive 3D digital twins directly in Teams meetings and channels.
@@ -71,14 +72,17 @@ Drop `.glb` files exported from [realvirtual.io](https://realvirtual.io) into `p
 ```bash
 npm run build        # Production build -> dist/
 npm run preview      # Preview production build
-npm test             # Run all tests (headless Chromium via Playwright)
+npm test             # Run browser tests (headless Chromium via Playwright)
+npm run test:node    # Run Node.js tests (fs, glob, ESLint instance)
+npm run test:all     # Run both Node + browser tests
+npm run lint         # ESLint (flat-config, boundaries rule)
 ```
 
 ## Operating Modes
 
 | Mode | Description |
 |------|-------------|
-| **Standalone** | Pure browser simulation — no Unity, no PLC. Fixed-timestep physics loop runs the full digital twin offline. |
+| **Standalone** | Pure browser simulation — no Unity, no PLC. Fixed-timestep simulation loop runs the full digital twin offline. |
 | **Live** | Connected via WebSocket — a bridge application translates non-WebSocket-capable industrial protocols (OPC UA, S7, ADS, etc.) to the browser. *(Upcoming)* |
 | **Direct** | Direct REST/MQTT connection to PLC without Unity in the loop. |
 
@@ -94,7 +98,6 @@ npm test             # Run all tests (headless Chromium via Playwright)
 | Component | Technology |
 |-----------|-----------|
 | 3D Rendering | [Three.js](https://threejs.org/) (WebGL + WebGPU *(Beta)* + WebXR) |
-| Physics | [Rapier.js](https://rapier.rs/) (WASM) *(Beta)* |
 | UI Framework | React 19 + MUI 7 |
 | Charts | Apache ECharts 5 |
 | Build Tool | Vite 6 |
@@ -123,7 +126,7 @@ For full digital twin functionality, the GLB file becomes the single source of t
 ```
 src/
   core/
-    engine/          # Simulation engine (drives, sensors, transport, physics)
+    engine/          # Simulation engine (drives, sensors, transport)
     hmi/             # React HMI components (panels, tooltips, settings)
   hooks/             # React hooks
   interfaces/        # Industrial protocol adapters (WebSocket, MQTT, ctrlX)
@@ -143,7 +146,7 @@ Plugins can contribute UI components to predefined **slots** in the HMI layout �
 
 ![Hierarchy Browser — scene tree with component type filters and search](docs/images/screenshot-hierarchy.png)
 
-![Settings Panel — tabbed configuration for model, visual, physics, interfaces, and AI](docs/images/screenshot-settings.png)
+![Settings Panel — tabbed configuration for model, visual, interfaces, and AI](docs/images/screenshot-settings.png)
 
 The plugin system makes it easy to add custom functionality. Create a plugin class and register it with `viewer.use()`:
 
@@ -190,6 +193,7 @@ For the full plugin API — UI slots, event bus, hooks, context menus, and toolt
 |----------|----------|
 | [Unity Export Guide](https://doc.realvirtual.io/extensions/realvirtual-web) | GLB export from Unity, publish workflow, WebViewer Tools (Pro) |
 | [Architecture](doc-webviewer.md) | Full architecture, component reference, configuration |
+| [Layout Planner](doc-layout-planner.md) | Library objects, catalogs, GitHub libraries, snap points, pivots, deep-links |
 | [Plugin Development](doc-extending-webviewer.md) | Plugin system, custom components, UI slots, hooks |
 | [Multiuser System](doc-multiuser-system.md) | Sessions, shared views, avatars *(Beta)* |
 | [Debugging Guide](doc-web-debugging.md) | Debugging tools and workflow |

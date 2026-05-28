@@ -26,8 +26,9 @@ export function CameraBar() {
   const [savedIdx, setSavedIdx] = useState<number | null>(null);
 
   const save = useCallback((idx: number) => {
-    const p = viewer.camera.position;
-    const t = viewer.controls.target;
+    const state = viewer.getCameraState();
+    const p = state.position;
+    const t = state.target;
     const bm: CameraBookmark = { px: p.x, py: p.y, pz: p.z, tx: t.x, ty: t.y, tz: t.z };
     const next = [...cameras];
     next[idx] = bm;

@@ -16,7 +16,7 @@
  *   'machine-control-changed' — { state, mode, components, errorComponentIdx }
  */
 
-import type { RVViewerPlugin } from '../../core/rv-plugin';
+import { BaseViewerPlugin } from '../../core/rv-base-plugin';
 import type { LoadResult } from '../../core/engine/rv-scene-loader';
 import type { RVViewer } from '../../core/rv-viewer';
 
@@ -26,7 +26,7 @@ import type { MachineState, MachineMode, MachineComponent, MachineControlState }
 
 // ─── Plugin ─────────────────────────────────────────────────────────────
 
-export class MachineControlPlugin implements RVViewerPlugin {
+export class MachineControlPlugin extends BaseViewerPlugin {
   readonly id = 'machine-control';
   readonly order = 210;
 
@@ -35,7 +35,6 @@ export class MachineControlPlugin implements RVViewerPlugin {
   private _mode: MachineMode = 'AUTO';
   private _components: MachineComponent[] = [];
   private _errorComponentIdx = -1;
-  private _unsubs: (() => void)[] = [];
   private _transitionCancelled = false;
   private _transitionTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -49,19 +48,17 @@ export class MachineControlPlugin implements RVViewerPlugin {
     this._emitChanged();
   }
 
-  onModelCleared(_viewer: RVViewer): void {
+  override onModelCleared(viewer: RVViewer): void {
     this._cancelTransition();
-    for (const unsub of this._unsubs) unsub();
-    this._unsubs = [];
+    super.onModelCleared(viewer);
     this._resetState();
     this._components = [];
     this._emitChanged();
   }
 
-  dispose(): void {
+  override dispose(): void {
     this._cancelTransition();
-    for (const unsub of this._unsubs) unsub();
-    this._unsubs = [];
+    super.dispose();
     this._viewer = null;
   }
 

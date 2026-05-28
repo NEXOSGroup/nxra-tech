@@ -8,8 +8,7 @@
  * updated on every 'mcp-bridge-changed' event.
  */
 
-import { useState, useEffect } from 'react';
-import { useViewer } from './use-viewer';
+import { useViewerEvent } from './use-viewer-event';
 import type { McpBridgeSnapshot } from '../plugins/mcp-bridge-plugin';
 
 /** Default state when MCP plugin is not loaded or model not yet available. */
@@ -25,15 +24,5 @@ const INITIAL: McpBridgeSnapshot = {
 
 /** Subscribe to mcp-bridge-changed events. Returns current snapshot. */
 export function useMcpBridge(): McpBridgeSnapshot {
-  const viewer = useViewer();
-  const [state, setState] = useState<McpBridgeSnapshot>(INITIAL);
-
-  useEffect(() => {
-    const off = viewer.on('mcp-bridge-changed' as string, (data: unknown) => {
-      setState(data as McpBridgeSnapshot);
-    });
-    return off;
-  }, [viewer]);
-
-  return state;
+  return useViewerEvent('mcp-bridge-changed', INITIAL, (data) => data);
 }

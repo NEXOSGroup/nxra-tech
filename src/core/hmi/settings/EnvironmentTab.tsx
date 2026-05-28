@@ -14,6 +14,7 @@ export function EnvironmentTab() {
   const [bgBright, setBgBright] = useState<number>(settingsRef.current.backgroundBrightness);
   const [groundOn, setGroundOn] = useState<boolean>(settingsRef.current.groundEnabled);
   const [groundBright, setGroundBright] = useState<number>(settingsRef.current.groundBrightness);
+  const [groundColor, setGroundColor] = useState<string>(settingsRef.current.groundColor);
   const [contrast, setContrast] = useState<number>(settingsRef.current.checkerContrast);
 
   const persist = (patch: Partial<VisualSettings>) => {
@@ -25,20 +26,25 @@ export function EnvironmentTab() {
     const name = e.target.value as EnvironmentPresetName;
     const preset = ENVIRONMENT_PRESETS[name];
     if (!preset) return;
+    const floorColor = preset.floorColor ?? '#ffffff';
     viewer.backgroundBrightness = preset.background;
+    // Set color before brightness so the combine recomputes once with both inputs.
+    viewer.groundColor = floorColor;
     viewer.groundBrightness = preset.floor;
     viewer.checkerContrast = preset.contrast;
     setBgBright(preset.background);
     setGroundBright(preset.floor);
+    setGroundColor(floorColor);
     setContrast(preset.contrast);
     persist({
       backgroundBrightness: preset.background,
       groundBrightness: preset.floor,
+      groundColor: floorColor,
       checkerContrast: preset.contrast,
     });
   };
 
-  const currentPreset = matchEnvironmentPreset(bgBright, groundBright, contrast);
+  const currentPreset = matchEnvironmentPreset(bgBright, groundBright, contrast, groundColor);
 
   const updateBgBright = (_: unknown, v: number | number[]) => {
     const val = v as number;
@@ -60,6 +66,14 @@ export function EnvironmentTab() {
     viewer.groundBrightness = val;
     setGroundBright(val);
     persist({ groundBrightness: val });
+    markEnvironmentUserModified();
+  };
+
+  const updateGroundColor = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    viewer.groundColor = val;
+    setGroundColor(val);
+    persist({ groundColor: val });
     markEnvironmentUserModified();
   };
 
@@ -125,6 +139,31 @@ export function EnvironmentTab() {
                 <Slider size="small" min={0} max={2} step={0.05} value={groundBright} onChange={updateGroundBright} sx={{ flex: 1 }} />
                 <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace', minWidth: 32, textAlign: 'right' }}>
                   {groundBright.toFixed(2)}
+                </Typography>
+              </Box>
+            </Box>
+            <Box sx={{ mt: 1 }}>
+              <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
+                Floor Color
+              </Typography>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 0.5 }}>
+                <Box
+                  component="input"
+                  type="color"
+                  value={groundColor}
+                  onChange={updateGroundColor}
+                  sx={{
+                    flex: 1,
+                    height: 28,
+                    p: 0,
+                    border: '1px solid rgba(255,255,255,0.15)',
+                    borderRadius: 0.5,
+                    bgcolor: 'transparent',
+                    cursor: 'pointer',
+                  }}
+                />
+                <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace', minWidth: 64, textAlign: 'right' }}>
+                  {groundColor.toUpperCase()}
                 </Typography>
               </Box>
             </Box>

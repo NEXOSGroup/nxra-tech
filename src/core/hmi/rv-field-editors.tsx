@@ -8,7 +8,7 @@
  * ObjectEditor, SubFieldRow, FieldEditor, and the flattenObjectFields utility.
  */
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import {
   Box,
   Typography,
@@ -17,6 +17,8 @@ import {
   Select,
   MenuItem,
 } from '@mui/material';
+import { SwapHoriz } from '@mui/icons-material';
+import { DragNumberField } from './DragNumberField';
 import { type FieldType, ENUM_FIELDS } from './rv-inspector-helpers';
 
 // ── Direction fallback (used when ENUM_FIELDS lookup returns undefined) ───
@@ -39,51 +41,61 @@ export interface FieldEditorProps {
 
 // ── NumberEditor ──────────────────────────────────────────────────────────
 
+// Match a "complete" numeric literal — no trailing dot, no lone minus, no
+// empty string. Used to gate live commits during typing so that mid-edit
+// drafts like "1." or "-" don't snap the value to a premature parse result.
+const COMPLETE_NUMBER_RE = /^-?\d+(\.\d+)?$/;
+
 export function NumberEditor({ value, onChange }: { value: number; onChange: (v: number) => void }) {
-  const [localValue, setLocalValue] = useState(String(value));
+  const [draft, setDraft] = useState(String(value));
 
-  // Sync local value when external value changes
-  const displayValue = String(value);
-  if (localValue !== displayValue && !document.activeElement?.closest('[data-number-field]')) {
-    // Only sync when not focused — prevents cursor jump during typing
-  }
+  // Re-sync draft when the external value changes from outside (gizmo drag,
+  // reset, live signal, polling tick). We compare numerically against the
+  // parsed draft so the user's in-progress typing is not clobbered.
+  useEffect(() => {
+    const parsed = parseFloat(draft);
+    if (!Number.isFinite(parsed) || parsed !== value) {
+      setDraft(String(value));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
 
-  const handleBlur = () => {
-    const parsed = parseFloat(localValue);
-    if (!isNaN(parsed) && parsed !== value) {
+  // Live commit on typing: fire onChange whenever the draft is a complete,
+  // finite number that differs from the current external value. Drag scrubs
+  // already commit live via onDragChange; this brings the keyboard path to
+  // parity. Trailing-dot / lone-minus drafts are skipped so typing "1.5"
+  // doesn't briefly snap to 1.
+  useEffect(() => {
+    if (!COMPLETE_NUMBER_RE.test(draft)) return;
+    const parsed = parseFloat(draft);
+    if (Number.isFinite(parsed) && parsed !== value) {
+      onChange(parsed);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft]);
+
+  const commit = useCallback(() => {
+    const parsed = parseFloat(draft);
+    if (Number.isFinite(parsed) && parsed !== value) {
       onChange(parsed);
     } else {
-      setLocalValue(String(value));
+      setDraft(String(value));
     }
-  };
+  }, [draft, value, onChange]);
 
   return (
-    <TextField
-      data-number-field
-      size="small"
-      type="number"
-      value={localValue}
-      onChange={(e) => setLocalValue(e.target.value)}
-      onBlur={handleBlur}
-      onKeyDown={(e) => { if (e.key === 'Enter') handleBlur(); }}
-      slotProps={{
-        input: { sx: { fontSize: 11, fontFamily: 'monospace', height: 24 } },
-        htmlInput: { step: 'any' },
-      }}
-      sx={{
-        width: '100%',
-        '& .MuiOutlinedInput-root': {
-          bgcolor: 'rgba(255,255,255,0.04)',
-          '& fieldset': { borderColor: 'rgba(255,255,255,0.08)' },
-          '&:hover fieldset': { borderColor: 'rgba(255,255,255,0.15)' },
-          '&.Mui-focused fieldset': { borderColor: 'primary.main' },
-        },
-        // Hide number spinners
-        '& input[type=number]::-webkit-outer-spin-button, & input[type=number]::-webkit-inner-spin-button': {
-          WebkitAppearance: 'none', margin: 0,
-        },
-        '& input[type=number]': { MozAppearance: 'textfield' },
-      }}
+    <DragNumberField
+      compact
+      icon={<SwapHoriz sx={{ fontSize: 14 }} />}
+      value={draft}
+      onValueChange={setDraft}
+      onCommit={commit}
+      onDragChange={(n) => { if (n !== value) onChange(n); }}
+      min={-Number.MAX_SAFE_INTEGER}
+      max={Number.MAX_SAFE_INTEGER}
+      step={1}
+      fractionDigits={3}
+      sx={{ width: '100%' }}
     />
   );
 }
@@ -230,6 +242,17 @@ function DragLabel({
 
 export function Vector3Editor({ value, onChange }: { value: { x: number; y: number; z: number }; onChange: (v: { x: number; y: number; z: number }) => void }) {
   const [local, setLocal] = useState({ x: String(value.x), y: String(value.y), z: String(value.z) });
+
+  // Re-sync local strings whenever the external `value` changes — covers
+  // Reset-to-zero, gizmo drag, undo/redo, and any other path that mutates
+  // the underlying node from outside the input. We compare primitives in
+  // deps so the effect skips frames where `value` reference changes but
+  // numbers stay identical (the parent's polling tick triggers a fresh
+  // object each 200ms). Mid-typing this effect doesn't fire because the
+  // numeric `value` only updates on blur/drag.
+  useEffect(() => {
+    setLocal({ x: String(value.x), y: String(value.y), z: String(value.z) });
+  }, [value.x, value.y, value.z]);
 
   const handleBlur = (axis: 'x' | 'y' | 'z') => {
     const parsed = parseFloat(local[axis]);

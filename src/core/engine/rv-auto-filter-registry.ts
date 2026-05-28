@@ -143,6 +143,47 @@ export class AutoFilterRegistry {
     // — see RaycastManager.setIsolationGate().
   }
 
+  /**
+   * Isolate the UNION of several filter types at once. Unknown types in the
+   * list are skipped; if none resolve, the call is a no-op (no isolate state
+   * is started so any previous isolate is preserved).
+   *
+   * The active name is a synthetic `__multi:A+B+C` token so callers can detect
+   * this mode — individual filter buttons in the GroupsOverlay will show as
+   * "not currently isolated", which is intentional: multi-isolate is not a
+   * filter-button concept and shouldn't be confused with per-type isolate.
+   */
+  isolateMultiple(types: readonly string[], opts?: IsolateOptions): void {
+    const targets: AutoFilterGroup[] = [];
+    for (const t of types) {
+      const filter = this._filters.get(t);
+      if (filter) targets.push(filter);
+    }
+    if (targets.length === 0) return;
+
+    if (this._isolateActiveName) {
+      this._clearIsolateState();
+    }
+
+    for (const target of targets) {
+      for (const node of target.nodes) {
+        this._priorVisibility.push({ node, visible: node.visible });
+        node.visible = true;
+        tagIsolateSubtree(node);
+        this._isolatedNodes.push(node);
+      }
+    }
+
+    this._isolateActiveName = '__multi:' + targets.map(t => t.type).join('+');
+    this._dimOpacity = opts?.dimOpacity ?? null;
+    this._dimDesaturate = opts?.dimDesaturate ?? false;
+  }
+
+  /** True iff a multi-type isolate is currently active. */
+  get isMultiIsolateActive(): boolean {
+    return this._isolateActiveName !== null && this._isolateActiveName.startsWith('__multi:');
+  }
+
   /** Per-isolate dim opacity override (null = use renderer default 0.9). */
   get dimOpacity(): number | null { return this._dimOpacity; }
 

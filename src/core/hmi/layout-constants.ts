@@ -12,8 +12,8 @@ export const LEFT_PANEL_TOP = 56;
 /** Left margin of left-side panels on desktop. */
 export const LEFT_PANEL_LEFT = 8;
 
-/** Bottom margin of left-side panels on desktop. */
-export const LEFT_PANEL_BOTTOM = 8;
+/** Bottom margin of left-side panels on desktop. Matches LEFT_PANEL_TOP for visual symmetry and clears the BottomBar (52 px). */
+export const LEFT_PANEL_BOTTOM = 56;
 
 /** Z-index for left-side panels (desktop). */
 export const LEFT_PANEL_ZINDEX = 1200;
@@ -38,5 +38,12 @@ export const MACHINE_PANEL_WIDTH = 370;
 /** Width of the Layout Planner library panel. */
 export const LAYOUT_PANEL_WIDTH = 340;
 
+/** Width of the Scene panel (scene browser + layout management). */
+export const SCENE_PANEL_WIDTH = 340;
+
 /** Width of the Order Manager panel. */
 export const ORDER_PANEL_WIDTH = 320;
+
+/** Width of the CONNECT panel. */
+export const CONNECT_PANEL_WIDTH = 360;
+

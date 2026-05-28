@@ -1,0 +1,182 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
+
+import { describe, it, expect } from 'vitest';
+import { Object3D } from 'three';
+import {
+  parseDriveName,
+  parseTransportName,
+  isStructuralTag,
+  scanLibraryComponent,
+  hasLibraryMarker,
+} from '../src/core/library-component-loader';
+import { applyKinematicsSpec, ensureExtras } from '../src/core/behavior-runtime';
+// Side-effect import: registers the Drive schema so synthesised drives can be
+// seeded with the full editable default field set (matches runtime, where the
+// drive module is always loaded before a GLB is processed).
+import '../src/core/engine/rv-drive';
+
+describe('parseDriveName', () => {
+  it('Drive-Lin-Y → LinearY', () => { expect(parseDriveName('Drive-Lin-Y')).toBe('LinearY'); });
+  it('Drive-Rot-Z → RotationZ', () => { expect(parseDriveName('Drive-Rot-Z')).toBe('RotationZ'); });
+  it('rejects malformed', () => {
+    expect(parseDriveName('Drive-XX-Y')).toBeNull();
+    expect(parseDriveName('Drive-Lin-W')).toBeNull();
+    expect(parseDriveName('DriveLinY')).toBeNull();
+  });
+});
+
+describe('parseTransportName', () => {
+  it('Transport-X → +X', () => { expect(parseTransportName('Transport-X')).toBe('+X'); });
+  it('Transport-Z → +Z', () => { expect(parseTransportName('Transport-Z')).toBe('+Z'); });
+  it('rejects malformed', () => {
+    expect(parseTransportName('TransportX')).toBeNull();
+    expect(parseTransportName('Transport-W')).toBeNull();
+  });
+});
+
+describe('isStructuralTag', () => {
+  it('DriveMesh + Base are tags', () => {
+    expect(isStructuralTag('DriveMesh')).toBe(true);
+    expect(isStructuralTag('Base')).toBe(true);
+    expect(isStructuralTag('Something')).toBe(false);
+  });
+});
+
+function makeChainTransferTree() {
+  // Mimics a typical Unity library asset hierarchy.
+  const root = new Object3D(); root.name = 'ChainTransfer';
+  const base = new Object3D(); base.name = 'Base';
+  const driveLinY = new Object3D(); driveLinY.name = 'Drive-Lin-Y';
+  const driveMesh = new Object3D(); driveMesh.name = 'DriveMesh';
+  const transportX = new Object3D(); transportX.name = 'Transport-X';
+  root.add(base);
+  root.add(driveLinY);
+  driveLinY.add(driveMesh);
+  driveLinY.add(transportX);
+  return { root, base, driveLinY, driveMesh, transportX };
+}
+
+describe('scanLibraryComponent — ChainTransfer mock tree', () => {
+  it('emits a drive entry for Drive-Lin-Y', () => {
+    const { root, driveLinY } = makeChainTransferTree();
+    const spec = scanLibraryComponent(root);
+    // Two drives: the named Drive-Lin-Y plus the synthesised LinearX drive
+    // co-located with Transport-X (Transport surfaces always get an
+    // attached drive — see scanLibraryComponent docstring).
+    expect(spec.drives).toHaveLength(2);
+    const named = spec.drives!.find(d => d.target === driveLinY);
+    expect(named?.direction).toBe('LinearY');
+  });
+
+  it('emits a transport AND auto-synthesises a co-located drive for it', () => {
+    const { root, transportX } = makeChainTransferTree();
+    const spec = scanLibraryComponent(root);
+    expect(spec.transports).toHaveLength(1);
+    expect(spec.transports![0].target).toBe(transportX);
+    expect(spec.transports![0].direction).toBe('+X');
+    // The transport doesn't keep an explicit `drive` ref — runtime
+    // findInParent('Drive') resolves the co-located synth.
+    expect(spec.transports![0].drive).toBeUndefined();
+
+    // Verify the synthesised drive sits on the SAME node as the transport.
+    const synthDrive = spec.drives!.find(d => d.target === transportX);
+    expect(synthDrive).toBeDefined();
+    expect(synthDrive?.direction).toBe('LinearX');
+  });
+
+  it('ignores DriveMesh + Base nodes', () => {
+    const { root } = makeChainTransferTree();
+    const spec = scanLibraryComponent(root);
+    expect(spec.drives).toHaveLength(2);          // Drive-Lin-Y + synth on Transport-X
+    expect(spec.transports).toHaveLength(1);
+  });
+
+  it('produces correct rv_extras when applied', () => {
+    const { root, driveLinY, transportX } = makeChainTransferTree();
+    const spec = scanLibraryComponent(root);
+    applyKinematicsSpec(root, spec);
+    expect((driveLinY.userData.realvirtual as { Drive: { Direction: string } }).Drive.Direction).toBe('LinearY');
+    const transportExtras = transportX.userData.realvirtual as {
+      Drive?: { Direction: string };
+      TransportSurface: { TransportDirection: { x: number; y: number; z: number } };
+    };
+    // Co-located synthesised drive (LinearX) — what powers this transport.
+    expect(transportExtras.Drive?.Direction).toBe('LinearX');
+    // TransportDirection uses the schema-correct field name + Vector3 shape.
+    // The +X axis (glTF) is pre-negated to compensate for the schema's
+    // `unityCoords: true` X-flip on the way in.
+    expect(transportExtras.TransportSurface.TransportDirection).toEqual({ x: -1, y: 0, z: 0 });
+  });
+});
+
+describe('scanLibraryComponent — synthesised drive exposes the full editable schema', () => {
+  it('seeds editable Drive defaults so a Drive-* node has the same inspector fields as an authored drive', () => {
+    const { root, driveLinY } = makeChainTransferTree();
+    const spec = scanLibraryComponent(root);
+    applyKinematicsSpec(root, spec);
+    const d = (driveLinY.userData.realvirtual as { Drive: Record<string, unknown> }).Drive;
+    // Direction comes from the name; every other editable field is seeded from
+    // the Drive schema defaults so the inspector renders the complete set.
+    expect(d.Direction).toBe('LinearY');
+    expect(d.TargetSpeed).toBe(100);
+    expect(d.Acceleration).toBe(100);
+    expect(d.UseAcceleration).toBe(false);
+    expect(d.UseLimits).toBe(false);
+    expect(d.LowerLimit).toBe(-180);
+    expect(d.UpperLimit).toBe(180);
+    expect(d.ReverseDirection).toBe(false);
+    expect(d.Offset).toBe(0);
+    expect(d.StartPosition).toBe(0);
+  });
+});
+
+describe('scanLibraryComponent — preserves manual rv_extras (deep-merge)', () => {
+  it('keeps existing TargetSpeed on Drive node', () => {
+    const { root, driveLinY } = makeChainTransferTree();
+    ensureExtras(driveLinY).Drive = { Direction: 'LinearY', TargetSpeed: 1234 };
+    const spec = scanLibraryComponent(root);
+    applyKinematicsSpec(root, spec);
+    const d = (driveLinY.userData.realvirtual as { Drive: Record<string, unknown> }).Drive;
+    expect(d.TargetSpeed).toBe(1234); // preserved
+    expect(d.Direction).toBe('LinearY');
+  });
+});
+
+describe('scanLibraryComponent — no marker required', () => {
+  it('scans a plain tree without WebLibraryComponent marker', () => {
+    // Tree has zero markers — scan still finds Drive-Lin-Y and Transport-X.
+    // Drives = the named Drive-Lin-Y + the synth on Transport-X = 2.
+    const { root } = makeChainTransferTree();
+    expect(hasLibraryMarker(root)).toBe(false);
+    const spec = scanLibraryComponent(root);
+    expect(spec.drives).toHaveLength(2);
+    expect(spec.transports).toHaveLength(1);
+  });
+
+  it('ignores nodes that do not match the convention', () => {
+    const root = new Object3D(); root.name = 'CustomerMachine';
+    const a = new Object3D(); a.name = 'Housing';
+    const b = new Object3D(); b.name = 'Bracket-XYZ';     // not a Drive- pattern
+    const c = new Object3D(); c.name = 'Transport_Belt';   // underscore, not hyphen
+    root.add(a, b, c);
+    const spec = scanLibraryComponent(root);
+    expect(spec.drives).toHaveLength(0);
+    expect(spec.transports).toHaveLength(0);
+  });
+});
+
+describe('hasLibraryMarker', () => {
+  it('returns true for WebLibraryComponent marker', () => {
+    const n = new Object3D();
+    ensureExtras(n).WebLibraryComponent = { TypeId: 'ChainTransfer', Version: '1.0' };
+    expect(hasLibraryMarker(n)).toBe(true);
+  });
+
+  it('returns false without marker', () => {
+    const n = new Object3D();
+    expect(hasLibraryMarker(n)).toBe(false);
+    ensureExtras(n).Drive = { Direction: 'LinearX' };
+    expect(hasLibraryMarker(n)).toBe(false);
+  });
+});

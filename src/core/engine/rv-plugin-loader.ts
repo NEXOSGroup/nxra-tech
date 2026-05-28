@@ -15,10 +15,15 @@
  *   export default new MyPlugin();
  */
 
-import type { RVViewerPlugin } from '../rv-plugin';
+/** Minimaler Plugin-Shape den der Loader prüft. Vermeidet rv-plugin.ts-Import
+ *  und damit transitiv rv-viewer.ts. RVViewerPlugin erfüllt PluginLoadable
+ *  strukturell (id: string). Phase 2 of plan-182. */
+export interface PluginLoadable {
+  readonly id: string;
+}
 
 export interface ExternalPluginModule {
-  default: RVViewerPlugin | (new () => RVViewerPlugin);
+  default: PluginLoadable | (new () => PluginLoadable);
 }
 
 /**
@@ -33,7 +38,7 @@ export async function loadExternalPlugin(
   pluginId: string,
   baseUrl: string,
   signal?: AbortSignal,
-): Promise<RVViewerPlugin | null> {
+): Promise<PluginLoadable | null> {
   if (signal?.aborted) return null;
 
   const url = `${baseUrl}/plugins/${pluginId}.js`;
@@ -47,7 +52,7 @@ export async function loadExternalPlugin(
 
     // Support both class export and instance export
     const plugin = typeof PluginOrInstance === 'function'
-      ? new (PluginOrInstance as new () => RVViewerPlugin)()
+      ? new (PluginOrInstance as new () => PluginLoadable)()
       : PluginOrInstance;
 
     // Basic shape validation

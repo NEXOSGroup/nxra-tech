@@ -11,6 +11,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import viewerSrc from '../src/core/rv-viewer.ts?raw';
+import eventsSrc from '../src/core/rv-viewer-events.ts?raw';
 import cameraManagerSrc from '../src/core/rv-camera-manager.ts?raw';
 import visualSettingsSrc from '../src/core/rv-visual-settings-manager.ts?raw';
 
@@ -21,8 +22,9 @@ describe('rv-viewer exports', () => {
     expect(viewerSrc).toContain('export class RVViewer');
   });
 
-  it('exports ViewerEvents interface', () => {
-    expect(viewerSrc).toContain('export interface ViewerEvents');
+  it('re-exports ViewerEvents (extracted to rv-viewer-events.ts, plan-182 Phase 1)', () => {
+    // The interface was extracted to rv-viewer-events.ts; rv-viewer.ts now re-exports it.
+    expect(viewerSrc).toMatch(/export\s+type\s*\{\s*ViewerEvents[^}]*\}\s*from\s+['"]\.\/rv-viewer-events['"]/);
   });
 
   it('exports RVViewerOptions interface', () => {
@@ -113,8 +115,12 @@ describe('CameraManager delegation', () => {
     expect(cameraManagerSrc).toContain('animateCameraTo(');
   });
 
-  it('CameraManager has applyViewportOffset', () => {
-    expect(cameraManagerSrc).toContain('applyViewportOffset(');
+  it('RVViewer frames selections with panel-aware distance (pivot stays on bbox center)', () => {
+    // Panel compensation pulls the camera back symmetrically instead of shifting
+    // the orbit target, so the rotation pivot always sits on the bounding-box
+    // center. (Replaces the former CameraManager.applyViewportOffset, which
+    // shifted the orbit target laterally and moved the pivot off-center.)
+    expect(viewerSrc).toContain('_panelFitScale(');
   });
 
   it('CameraManager has cancelCameraAnimation', () => {
@@ -145,12 +151,16 @@ describe('VisualSettingsManager delegation', () => {
 });
 
 // ─── ViewerEvents type map ──────────────────────────────────────────────
+// Events are now declared in rv-viewer-events.ts (plan-182 Phase 1).
+// Tests check eventsSrc (the extracted module) rather than viewerSrc.
 
 describe('ViewerEvents type map', () => {
   const events = [
-    'model-loaded', 'model-cleared', 'drive-hover', 'drive-focus',
-    'connection-state-changed', 'sensor-changed', 'mu-spawned', 'mu-consumed',
+    'model-loaded', 'model-cleared',
+    'connection-state-changed',
+    'component-event',
     'object-hover', 'object-unhover', 'object-click',
+    'object-focus', 'object-blur',
     'xr-session-start', 'xr-session-end',
     'fpv-enter', 'fpv-exit',
     'context-menu-request',
@@ -159,17 +169,17 @@ describe('ViewerEvents type map', () => {
 
   for (const event of events) {
     it(`includes '${event}' event`, () => {
-      expect(viewerSrc).toContain(`'${event}'`);
+      expect(eventsSrc).toContain(`'${event}'`);
     });
   }
 
   it('uses void for parameterless XR events', () => {
-    expect(viewerSrc).toMatch(/'xr-session-start':\s*void/);
-    expect(viewerSrc).toMatch(/'xr-session-end':\s*void/);
+    expect(eventsSrc).toMatch(/'xr-session-start':\s*void/);
+    expect(eventsSrc).toMatch(/'xr-session-end':\s*void/);
   });
 
   it('uses void for parameterless FPV events', () => {
-    expect(viewerSrc).toMatch(/'fpv-enter':\s*void/);
-    expect(viewerSrc).toMatch(/'fpv-exit':\s*void/);
+    expect(eventsSrc).toMatch(/'fpv-enter':\s*void/);
+    expect(eventsSrc).toMatch(/'fpv-exit':\s*void/);
   });
 });

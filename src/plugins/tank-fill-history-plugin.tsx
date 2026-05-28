@@ -42,17 +42,17 @@ import { ProcessIndustryPlugin } from './processindustry-plugin';
  *  so a viewer sees the same color in the chart and on the pipe.
  *
  *  Paint / coatings / resin plant: raw solvents & resins → intermediates →
- *  finished products → recovered solvent. */
+ *  finished products → recovered solvent. Dusty-pastel palette (MUI 300). */
 export const RESOURCE_COLORS: Record<string, string> = {
-  Xylene:              '#b39ddb',
-  MEK:                 '#90caf9',
-  'Epoxy Resin':       '#ffb74d',
-  'Pigment Paste':     '#d84315',
-  'Automotive Paint':  '#3949ab',
-  'Wood Varnish':      '#6d4c41',
-  'Recovered Solvent': '#4db6ac',
+  Xylene:              '#9575CD', // dusty lavender
+  MEK:                 '#4FC3F7', // dusty sky
+  'Epoxy Resin':       '#FFAB91', // dusty coral
+  'Pigment Paste':     '#F48FB1', // dusty rose
+  'Automotive Paint':  '#7986CB', // dusty periwinkle
+  'Wood Varnish':      '#A1887F', // dusty taupe
+  'Recovered Solvent': '#4DB6AC', // dusty teal
 };
-export const UNKNOWN_COLOR = '#9e9e9e';
+export const UNKNOWN_COLOR = '#90A4AE'; // blue-grey 400 — muted neutral
 
 export const SAMPLE_INTERVAL_MS = 1000;
 export const HISTORY_WINDOW_S = 300;
@@ -135,8 +135,6 @@ export class TankFillHistoryPlugin implements RVViewerPlugin {
 }
 
 // ─── Left-sidebar button ────────────────────────────────────────────────
-
-const PANEL_ID = 'tank-fill-history';
 
 function TankFillHistoryButton({ viewer }: UISlotProps) {
   const [open, setOpen] = useState(false);
@@ -338,7 +336,6 @@ function TankFillHistoryPanel({ viewer, open, onClose }: { viewer: RVViewer; ope
       defaultHeight={DEFAULT_HEIGHT}
       defaultPosition={defaultPos}
       zIndex={1500}
-      panelId={PANEL_ID}
     >
       {!hasTanks ? (
         <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', px: 2 }}>

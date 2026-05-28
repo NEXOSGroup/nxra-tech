@@ -13,6 +13,8 @@ import type { ModelPluginModule } from '../../../core/rv-model-plugin-manager';
 import { ProcessIndustryPlugin } from '../../processindustry-plugin';
 import { TankFillHistoryPlugin } from '../../tank-fill-history-plugin';
 import { PipeColoringPlugin } from '../../pipe-coloring-plugin';
+import { ProcessingUnitModePlugin } from '../../processing-unit-mode-plugin';
+import { FpvPlugin } from '../../fpv-plugin';
 
 /** Model filenames (without .glb) that this module handles. */
 export const models = [
@@ -22,6 +24,11 @@ export const models = [
   'DemoProcessIndustryPlant',
   'demoprocessindustryplant',
 ];
+
+/** Default environment preset applied on every load of this model — gives the
+ *  pumping plant a soft outdoor look (sky background, olive-green floor). The
+ *  user can still override it via the Environment settings tab. */
+export const defaultEnvironmentPreset = 'Outdoor' as const;
 
 const registeredIds: string[] = [];
 
@@ -33,6 +40,9 @@ export function registerModelPlugins(viewer: RVViewer): void {
     new ProcessIndustryPlugin(),
     new TankFillHistoryPlugin(),
     new PipeColoringPlugin(),
+    new ProcessingUnitModePlugin(),
+    // Walk-through exploration — lets users get inside the plant.
+    new FpvPlugin(),
   ];
   for (const p of instances) {
     viewer.use(p);
@@ -47,4 +57,4 @@ export function unregisterModelPlugins(viewer: RVViewer): void {
   registeredIds.length = 0;
 }
 
-export default { models, registerModelPlugins, unregisterModelPlugins } satisfies ModelPluginModule;
+export default { models, defaultEnvironmentPreset, registerModelPlugins, unregisterModelPlugins } satisfies ModelPluginModule;

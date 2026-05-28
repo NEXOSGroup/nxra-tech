@@ -34,7 +34,7 @@ describe('layout-constants', () => {
     expect(BOTTOM_BAR_HEIGHT).toBe(52);
     expect(LEFT_PANEL_TOP).toBe(56);
     expect(LEFT_PANEL_LEFT).toBe(8);
-    expect(LEFT_PANEL_BOTTOM).toBe(8);
+    expect(LEFT_PANEL_BOTTOM).toBe(56);
     expect(LEFT_PANEL_ZINDEX).toBe(1200);
     expect(SETTINGS_PANEL_WIDTH).toBe(540);
     expect(INSPECTOR_PANEL_WIDTH).toBe(320);

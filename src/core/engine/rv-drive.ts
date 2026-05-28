@@ -154,6 +154,37 @@ export class RVDrive implements RVComponent {
     return Math.abs(this.currentPosition - this.targetPosition) < 0.01;
   }
 
+  /** Authoritative current runtime values for UI display (live source of truth).
+   *  Keys match the PascalCase display/schema names so the value resolver can
+   *  merge this directly over static config. */
+  getLiveState(): Record<string, unknown> {
+    return {
+      CurrentPosition: this.currentPosition,
+      CurrentSpeed: this.currentSpeed,
+      IsRunning: this.isRunning,
+      IsAtTarget: this.isAtTarget,
+      TargetPosition: this.targetPosition,
+      TargetSpeed: this.targetSpeed,
+      JogForward: this.jogForward,
+      JogBackward: this.jogBackward,
+    };
+  }
+
+  /** Apply an inspector edit to the live runtime state. `TargetSpeed` has a
+   *  config↔runtime split (config `TargetSpeed` is copied to runtime
+   *  `targetSpeed` at initDrive), so editing it must update both for the change
+   *  to take effect on motion and display immediately. Other fields fall back
+   *  to the caller's generic same-named assignment. */
+  setLiveField(fieldName: string, value: unknown): boolean {
+    if (fieldName === 'TargetSpeed') {
+      const n = Number(value);
+      this.TargetSpeed = n;
+      this.targetSpeed = n;
+      return true;
+    }
+    return false;
+  }
+
   /** Check if drive is completely idle (no motion, no jog, no overwrite, no behaviors). */
   get isIdle(): boolean {
     return !this.isRunning && !this.jogForward && !this.jogBackward
@@ -292,6 +323,23 @@ export class RVDrive implements RVComponent {
   refreshBaseTransform(): void {
     this.basePosition.copy(this.node.position);
     this.baseQuaternion.copy(this.node.quaternion);
+  }
+
+  /**
+   * Re-derive runtime fields from the config fields after a LATE config change
+   * (e.g. an overlay override applied after the initial initDrive — see the
+   * scene loader's overlay reconciliation). Unlike initDrive(), this does NOT
+   * re-cache the base transform or reset currentPosition, so it can be called
+   * post-load without compounding the StartPosition offset. Mirrors the
+   * config→runtime sync in initDrive (axis, isRotary, targetSpeed).
+   */
+  reapplyConfig(): void {
+    this.isRotary = isRotation(this.Direction);
+    const rawAxis = directionToGltfAxis(this.Direction);
+    this.axis.copy(rawAxis);
+    if (this.ReverseDirection) this.axis.negate();
+    this.targetSpeed = this.TargetSpeed;
+    this.applyToNode();
   }
 
   /** Apply current position to Three.js node transform */

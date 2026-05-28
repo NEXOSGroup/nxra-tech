@@ -8,7 +8,7 @@
  */
 import { describe, test, expect, vi } from 'vitest';
 import { Group, PerspectiveCamera } from 'three';
-import { LayoutPlannerPlugin } from '../../realvirtual-WebViewer-Private~/src/plugins/layout-planner';
+import { LayoutPlannerPlugin } from '../src/plugins/layout-planner';
 
 // Minimal viewer mock
 function createMockViewer() {
@@ -29,6 +29,19 @@ function createMockViewer() {
     markRenderDirty: vi.fn(),
     fitToNodes: vi.fn(),
     highlighter: { highlight: vi.fn(), clear: vi.fn() },
+    outlineManager: {
+      available: false,
+      hasOutlines: false,
+      setStyle: vi.fn(),
+      setOutlined: vi.fn(),
+      clear: vi.fn(),
+      setSize: vi.fn(),
+    },
+    selectionManager: {
+      getSnapshot: vi.fn(() => ({ selectedPaths: [], primaryPath: null })),
+      clear: vi.fn(),
+      select: vi.fn(),
+    },
     renderer: { domElement: document.createElement('canvas') },
     on: vi.fn(() => vi.fn()),
     getPlugin: vi.fn(),

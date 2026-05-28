@@ -315,7 +315,7 @@ Enforcement is on the Unity server side. The relay forwards all messages regardl
 
 A relay server is a Node.js WebSocket multiplexer that enables multiuser sessions when clients cannot reach Unity directly (firewalls, NAT, Teams meetings, public web sessions).
 
-> **The relay server source code lives in a separate repository.** It is no longer bundled with the WebViewer. The settings store ships with a default hosted relay URL (`wss://download.realvirtual.io/relay`) and the WebViewer plugin handles both `local` and `relay` connection modes (see `connectionMode` in [multiuser-settings-store.ts](src/core/hmi/multiuser-settings-store.ts)).
+> **The relay server source code lives in a separate repository.** It is no longer bundled with realvirtual WEB. The settings store ships with a default hosted relay URL (`wss://download.realvirtual.io/relay`) and the realvirtual WEB plugin handles both `local` and `relay` connection modes (see `connectionMode` in [multiuser-settings-store.ts](src/core/hmi/multiuser-settings-store.ts)).
 
 ### Architecture
 - Express.js HTTP + `ws` WebSocket on a single port (default 7000)
@@ -418,7 +418,7 @@ All WebSocket callbacks enqueue events to a `ConcurrentQueue<PresenceEvent>`. Th
 
 ---
 
-## WebViewer Client (multiuser-plugin.ts)
+## realvirtual WEB Client (multiuser-plugin.ts)
 
 ### Drive Map Building
 
@@ -617,7 +617,7 @@ Unity (Host)        Relay Server        Browser A        Browser B
 | `Packages/io.realvirtual.professional/Runtime/MultiplayerWEB/Avatar.prefab` | Remote player avatar template |
 | `Packages/io.realvirtual.professional/Runtime/MultiplayerWEB/MultiplayerWeb.prefab` | Pre-configured MultiplayerWEB instance |
 
-### WebViewer Side
+### realvirtual WEB Side
 | File | Purpose |
 |------|---------|
 | `src/plugins/multiuser-plugin.ts` | Core multiuser logic, message handling, ownership |
@@ -629,7 +629,7 @@ Unity (Host)        Relay Server        Browser A        Browser B
 | `src/core/types/plugin-types.ts` | MultiuserPluginAPI interface |
 
 ### Relay Server
-The relay server lives in its own repository (not in this WebViewer repo). The hosted endpoint defaults to `wss://download.realvirtual.io/relay`.
+The relay server lives in its own repository (not in this realvirtual WEB repo). The hosted endpoint defaults to `wss://download.realvirtual.io/relay`.
 
 ### Teams Integration
 | File | Purpose |

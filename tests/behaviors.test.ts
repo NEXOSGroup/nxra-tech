@@ -1,0 +1,227 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
+
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { Object3D } from 'three';
+import {
+  BehaviorManager,
+  defineBehavior,
+  compileGlob,
+  matchesAny,
+  extractGlbName,
+  registerAllBehaviors,
+} from '../src/core/behaviors';
+import { EventEmitter } from '../src/core/rv-events';
+import { ContextMenuStore } from '../src/core/hmi/context-menu-store';
+import type { BindContextHost } from '../src/core/behavior-runtime';
+
+function makeHost(): { host: BindContextHost; events: EventEmitter<Record<string, unknown>> } {
+  const events = new EventEmitter<Record<string, unknown>>();
+  const host: BindContextHost = {
+    signalStore: null,
+    on: (event, cb) => events.on(event, cb as never),
+    contextMenu: new ContextMenuStore(),
+    drives: [],
+    registry: null,
+  };
+  return { host, events };
+}
+
+describe('extractGlbName', () => {
+  it('strips dir + .glb extension', () => {
+    expect(extractGlbName('/public/models/MyMachine.glb')).toBe('MyMachine');
+    expect(extractGlbName('http://x/models/Foo_v3.glb?v=1')).toBe('Foo_v3');
+    expect(extractGlbName('Bar.GLB')).toBe('Bar');
+  });
+  it('returns empty string for null/undefined', () => {
+    expect(extractGlbName(null)).toBe('');
+    expect(extractGlbName(undefined)).toBe('');
+  });
+});
+
+describe('compileGlob / matchesAny', () => {
+  it('* matches any chars including empty', () => {
+    expect(compileGlob('Belt_*').test('Belt_')).toBe(true);
+    expect(compileGlob('Belt_*').test('Belt_Infeed')).toBe(true);
+    expect(compileGlob('Belt_*').test('Belt')).toBe(false);
+  });
+
+  it('? matches exactly one char', () => {
+    expect(compileGlob('Belt_v?').test('Belt_v1')).toBe(true);
+    expect(compileGlob('Belt_v?').test('Belt_v3')).toBe(true);
+    expect(compileGlob('Belt_v?').test('Belt_v12')).toBe(false);
+    expect(compileGlob('Belt_v?').test('Belt_v')).toBe(false);
+  });
+
+  it('matchesAny supports exact, glob, and bare wildcard', () => {
+    expect(matchesAny(['Foo'], 'Foo')).toBe(true);
+    expect(matchesAny(['Foo'], 'Bar')).toBe(false);
+    expect(matchesAny(['Foo_*'], 'Foo_X')).toBe(true);
+    expect(matchesAny(['*'], 'AnythingGoes')).toBe(true);
+    expect(matchesAny(['A', 'B', 'C_*'], 'C_1')).toBe(true);
+  });
+});
+
+describe('BehaviorManager — discovery + model match', () => {
+  let manager: BehaviorManager;
+  beforeEach(() => { manager = new BehaviorManager(); });
+
+  it('register + count + ids', () => {
+    manager.register('foo', defineBehavior({ models: ['Foo'], bind: () => {} }));
+    manager.register('bar', defineBehavior({ models: ['Bar'], bind: () => {} }));
+    expect(manager.count).toBe(2);
+    expect(manager.ids()).toEqual(['foo', 'bar']);
+  });
+
+  it('rejects malformed behaviors', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // @ts-expect-error invalid shape
+    manager.register('bad', { not: 'a behavior' });
+    expect(manager.count).toBe(0);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('matches GLB filename, NOT root.name (regression guard)', () => {
+    // Behavior models: ['MyMachine']; root.name is intentionally different.
+    let fired = false;
+    manager.register('m', defineBehavior({
+      models: ['MyMachine'],
+      bind: () => { fired = true; },
+    }));
+    const { host } = makeHost();
+    const root = new Object3D(); root.name = 'SceneRoot_X';
+    manager.triggerLoad(host, root, 'MyMachine'); // simulates filename match
+    expect(fired).toBe(true);
+  });
+
+  it('does not match when filename differs from models[] entry', () => {
+    let fired = false;
+    manager.register('m', defineBehavior({
+      models: ['MyMachine'],
+      bind: () => { fired = true; },
+    }));
+    const { host } = makeHost();
+    manager.triggerLoad(host, new Object3D(), 'OtherMachine');
+    expect(fired).toBe(false);
+  });
+
+  it('supports glob patterns in models[] — Belt_*', () => {
+    let count = 0;
+    manager.register('b', defineBehavior({
+      models: ['Belt_*'],
+      bind: () => { count++; },
+    }));
+    const { host } = makeHost();
+    manager.triggerLoad(host, new Object3D(), 'Belt_Infeed');
+    manager.disposeAll();
+    manager.triggerLoad(host, new Object3D(), 'Belt_v3');
+    manager.disposeAll();
+    manager.triggerLoad(host, new Object3D(), 'Belt');  // does NOT match Belt_*
+    expect(count).toBe(2);
+  });
+
+  it('supports single-char glob ?', () => {
+    let count = 0;
+    manager.register('b', defineBehavior({
+      models: ['Belt_v?'],
+      bind: () => { count++; },
+    }));
+    const { host } = makeHost();
+    manager.triggerLoad(host, new Object3D(), 'Belt_v1');
+    manager.disposeAll();
+    manager.triggerLoad(host, new Object3D(), 'Belt_v3');
+    manager.disposeAll();
+    manager.triggerLoad(host, new Object3D(), 'Belt_v12');  // 2 chars after ?
+    expect(count).toBe(2);
+  });
+
+  it('supports wildcard "*" applies to every model', () => {
+    let count = 0;
+    manager.register('all', defineBehavior({
+      models: ['*'],
+      bind: () => { count++; },
+    }));
+    const { host } = makeHost();
+    manager.triggerLoad(host, new Object3D(), 'AnythingA');
+    manager.disposeAll();
+    manager.triggerLoad(host, new Object3D(), 'OtherB');
+    expect(count).toBe(2);
+  });
+});
+
+describe('BehaviorManager — lifecycle via events', () => {
+  it('re-invokes bind on second model-loaded event', () => {
+    const manager = new BehaviorManager();
+    let count = 0;
+    manager.register('m', defineBehavior({
+      models: ['Foo'],
+      bind: () => { count++; },
+    }));
+    const { host, events } = makeHost();
+    let currentRoot: Object3D | null = null;
+    let currentUrl: string | null = null;
+    manager.attach(host, () => currentRoot, () => currentUrl);
+
+    currentRoot = new Object3D();
+    currentUrl = '/models/Foo.glb';
+    events.emit('model-loaded', { result: {} });
+    expect(count).toBe(1);
+
+    events.emit('model-cleared', undefined);
+    events.emit('model-loaded', { result: {} });
+    expect(count).toBe(2);
+  });
+
+  it('disposes active binds on model-cleared (no further fixedUpdate fires)', () => {
+    const manager = new BehaviorManager();
+    const tickSpy = vi.fn();
+    manager.register('m', defineBehavior({
+      models: ['*'],
+      bind: (rv) => { rv.onFixedUpdate(tickSpy); },
+    }));
+    const { host, events } = makeHost();
+    let currentRoot: Object3D | null = new Object3D();
+    manager.attach(host, () => currentRoot, () => '/models/X.glb');
+
+    events.emit('model-loaded', { result: {} });
+    manager.tick(0.016);
+    expect(tickSpy).toHaveBeenCalledTimes(1);
+
+    events.emit('model-cleared', undefined);
+    manager.tick(0.016);
+    expect(tickSpy).toHaveBeenCalledTimes(1); // disposed, no further calls
+  });
+
+  it('logs warning when two behaviors match same model', () => {
+    const manager = new BehaviorManager();
+    manager.register('A', defineBehavior({ models: ['Foo'], bind: () => {} }));
+    manager.register('B', defineBehavior({ models: ['Foo'], bind: () => {} }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { host } = makeHost();
+    manager.triggerLoad(host, new Object3D(), 'Foo');
+    // Expect warning about multiple matches.
+    // (The actual triggerLoad helper does not log; only the event-driven path does.
+    //  So switch to the event-driven path to validate.)
+    warn.mockClear();
+    const { host: host2, events } = makeHost();
+    let currentRoot: Object3D | null = new Object3D();
+    manager.disposeAll();
+    manager.attach(host2, () => currentRoot, () => '/models/Foo.glb');
+    events.emit('model-loaded', { result: {} });
+    const msgs = warn.mock.calls.map(c => String(c[0])).join('\n');
+    expect(msgs).toMatch(/multiple behaviors matched/);
+    warn.mockRestore();
+  });
+});
+
+describe('registerAllBehaviors — Vite glob discovery', () => {
+  it('runs without error and registers any modules present in src/behaviors/', () => {
+    const manager = new BehaviorManager();
+    // Discovery is build-time — may register 0..N behaviors depending on which
+    // files exist when tests run. We just assert the call doesn't throw.
+    expect(() => registerAllBehaviors(manager)).not.toThrow();
+    // count is >= 0
+    expect(manager.count).toBeGreaterThanOrEqual(0);
+  });
+});

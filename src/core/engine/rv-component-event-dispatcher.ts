@@ -14,7 +14,7 @@
  */
 
 import type { Object3D } from 'three';
-import type { RVViewer } from '../rv-viewer';
+import type { ViewerHost } from './rv-viewer-host';
 import type { SelectionSnapshot } from './rv-selection-manager';
 import type { NodeRegistry } from './rv-node-registry';
 import type { ObjectHoverData, ObjectUnhoverData } from './rv-raycast-manager';
@@ -28,7 +28,7 @@ export class ComponentEventDispatcher {
   private _selectedNodes = new Set<Object3D>();
   private _unsubs: Array<() => void> = [];
 
-  constructor(private viewer: RVViewer, private registry: NodeRegistry) {
+  constructor(private viewer: ViewerHost, private registry: NodeRegistry) {
     this._unsubs.push(
       viewer.on('object-hover', (data) => this._dispatchHover((data as ObjectHoverData | null)?.node ?? null, data as ObjectHoverData | null)),
       viewer.on('object-unhover', (data) => this._dispatchHover(null, null, data as ObjectUnhoverData | undefined)),

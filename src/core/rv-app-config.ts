@@ -9,7 +9,6 @@
  */
 
 import type { VisualSettings } from './hmi/visual-settings-store';
-import type { PhysicsSettings } from './hmi/physics-settings-store';
 import type { InterfaceSettings } from '../interfaces/interface-settings-store';
 import type { SearchSettings } from './hmi/search-settings-store';
 import type { UIVisibilityRule } from './hmi/ui-context-store';
@@ -24,7 +23,7 @@ export interface UIContextConfig {
 }
 
 /** Settings tab identifiers used for selective locking. */
-export type SettingsTabId = 'model' | 'mouse' | 'visual' | 'environment' | 'physics' | 'interfaces' | 'devtools' | 'tests' | 'mcp' | 'multiuser' | 'groups';
+export type SettingsTabId = 'model' | 'mouse' | 'visual' | 'environment' | 'interfaces' | 'devtools' | 'tests' | 'mcp' | 'multiuser' | 'groups';
 
 /** Top-level app configuration loaded from `public/settings.json`. */
 export interface RVAppConfig {
@@ -54,7 +53,6 @@ export interface RVAppConfig {
 
   /** Partial overrides merged on top of localStorage values. */
   visual?: Partial<VisualSettings>;
-  physics?: Partial<PhysicsSettings>;
   interface?: Partial<InterfaceSettings>;
   search?: Partial<SearchSettings>;
 

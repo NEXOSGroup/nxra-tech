@@ -1,12 +1,12 @@
 # Debugging & Observability
 
-Guide for debugging the realvirtual WebViewer — structured logging, HTTP debug API, Claude Code integration, and automated E2E testing.
+Guide for debugging realvirtual WEB — structured logging, HTTP debug API, Claude Code integration, and automated E2E testing.
 
 ---
 
 ## 1. Structured Logging System
 
-The WebViewer uses a category-based structured logging system (`rv-debug.ts`) with an always-on ring buffer. All log entries are captured regardless of whether a category is enabled for console output.
+realvirtual WEB uses a category-based structured logging system (`rv-debug.ts`) with an always-on ring buffer. All log entries are captured regardless of whether a category is enabled for console output.
 
 ### Debug Categories
 
@@ -108,7 +108,7 @@ interface LogEntry {
 
 ## 2. Debug HTTP API
 
-The WebViewer exposes a bidirectional debug bridge via HTTP endpoints on the Vite dev server. The browser pushes state snapshots at ~1 Hz; external tools read them via GET requests.
+realvirtual WEB exposes a bidirectional debug bridge via HTTP endpoints on the Vite dev server. The browser pushes state snapshots at ~1 Hz; external tools read them via GET requests.
 
 ### Base URL
 
@@ -180,7 +180,7 @@ curl -s http://localhost:5173/__api/debug/cmd/results
 
 ### `/debugweb` Command
 
-Inspects the running WebViewer directly from Claude Code:
+Inspects the running realvirtual WEB directly from Claude Code:
 
 ```
 /debugweb                           # Full state overview
@@ -241,7 +241,7 @@ This provides Claude Code with browser navigation, element clicking, form fillin
 
 ## 4. E2E Testing
 
-Automated end-to-end tests in `e2e/` verify WebViewer functionality using Playwright.
+Automated end-to-end tests in `e2e/` verify realvirtual WEB functionality using Playwright.
 
 ### Running Tests
 

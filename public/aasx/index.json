@@ -6,5 +6,13 @@
   "http://smart.festo.com/aas/99920200617190044000012858": {
     "file": "24_Festo.aasx",
     "idShort": "Festo_EMME-AS-40-M-LV-AS_99920200617190044000012858"
+  },
+  "https://aas.boschrexroth.com/ctrlxdrive/R911410072-MS2N-Demo-0001": {
+    "file": "25_BoschRexroth.aasx",
+    "idShort": "BoschRexroth_ctrlXDRIVE_MS2N_R911410072"
+  },
+  "https://demo.realvirtual.io/aas/sew/KA47-DRN90M4-Demo-0001": {
+    "file": "26_SEW_KA47-DRN90M4.aasx",
+    "idShort": "SEW_KA47-DRN90M4"
   }
 }

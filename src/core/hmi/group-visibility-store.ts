@@ -9,6 +9,8 @@
  * visual-settings-store.ts.
  */
 
+import { lsLoad } from './ls-store-utils';
+
 const STORAGE_KEY = 'rv-group-visibility';
 
 export interface GroupVisibilitySettings {
@@ -40,25 +42,28 @@ const DEFAULTS: GroupVisibilitySettings = {
  * Returns defaults if nothing saved or data is corrupted.
  */
 export function loadGroupVisibilitySettings(): GroupVisibilitySettings {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { ...DEFAULTS };
-    const parsed = JSON.parse(raw) as Partial<GroupVisibilitySettings>;
-    return {
-      hiddenGroups: Array.isArray(parsed.hiddenGroups) ? parsed.hiddenGroups : [],
-      isolatedGroup: typeof parsed.isolatedGroup === 'string' ? parsed.isolatedGroup : null,
-      excludedFromOverlay: Array.isArray(parsed.excludedFromOverlay) ? parsed.excludedFromOverlay : [],
-      defaultHiddenGroups: Array.isArray(parsed.defaultHiddenGroups) ? parsed.defaultHiddenGroups : [],
-      hiddenAutoFilters: Array.isArray(parsed.hiddenAutoFilters) ? parsed.hiddenAutoFilters : [],
-      isolatedAutoFilter: typeof parsed.isolatedAutoFilter === 'string' ? parsed.isolatedAutoFilter : null,
-    };
-  } catch {
-    return { ...DEFAULTS };
-  }
+  return lsLoad<GroupVisibilitySettings>(STORAGE_KEY, DEFAULTS, {
+    // Coerce non-array fields back to [] and non-string isolated* fields to null
+    // (mirrors the prior defensive parsing).
+    validate: (_merged, parsed) => {
+      const fixed: Partial<GroupVisibilitySettings> = {};
+      if (!Array.isArray(parsed.hiddenGroups)) fixed.hiddenGroups = [];
+      if (typeof parsed.isolatedGroup !== 'string') fixed.isolatedGroup = null;
+      if (!Array.isArray(parsed.excludedFromOverlay)) fixed.excludedFromOverlay = [];
+      if (!Array.isArray(parsed.defaultHiddenGroups)) fixed.defaultHiddenGroups = [];
+      if (!Array.isArray(parsed.hiddenAutoFilters)) fixed.hiddenAutoFilters = [];
+      if (typeof parsed.isolatedAutoFilter !== 'string') fixed.isolatedAutoFilter = null;
+      return fixed;
+    },
+  });
 }
 
 /**
  * Save group visibility settings to localStorage.
+ *
+ * Intentionally no isSettingsLocked() guard — the prior implementation did
+ * not enforce one (group visibility is a runtime UI affordance, not a
+ * configuration), keep behavior unchanged.
  */
 export function saveGroupVisibilitySettings(settings: GroupVisibilitySettings): void {
   try {

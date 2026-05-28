@@ -3,7 +3,8 @@
 
 /** Persists search/filter settings to localStorage. Supports self-registering filter subscribers. */
 
-import { getAppConfig, isSettingsLocked } from '../rv-app-config';
+import { getAppConfig } from '../rv-app-config';
+import { lsLoad, lsSave } from './ls-store-utils';
 
 const STORAGE_KEY = 'rv-search-settings';
 
@@ -51,37 +52,16 @@ export function isTypeEnabled(settings: SearchSettings, types: string[]): boolea
 // ─── Persistence ────────────────────────────────────────────────
 
 export function loadSearchSettings(): SearchSettings {
-  // Layer 1+2: DEFAULTS + localStorage
-  const fromStorage = loadFromLocalStorage();
-
-  // Layer 3: Config override (from singleton)
-  const override = getAppConfig().search;
-  if (!override) return fromStorage;
-  return {
-    highlightEnabled: override.highlightEnabled ?? fromStorage.highlightEnabled,
-    nodesEnabled: override.nodesEnabled ?? fromStorage.nodesEnabled,
-    disabledTypes: override.disabledTypes ?? fromStorage.disabledTypes,
-  };
-}
-
-function loadFromLocalStorage(): SearchSettings {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { ...DEFAULTS, disabledTypes: [] };
-    const parsed = JSON.parse(raw) as Partial<SearchSettings>;
-    return {
-      highlightEnabled: parsed.highlightEnabled ?? DEFAULTS.highlightEnabled,
-      nodesEnabled: parsed.nodesEnabled ?? DEFAULTS.nodesEnabled,
-      disabledTypes: Array.isArray(parsed.disabledTypes) ? parsed.disabledTypes : [],
-    };
-  } catch {
-    return { ...DEFAULTS, disabledTypes: [] };
-  }
+  return lsLoad<SearchSettings>(STORAGE_KEY, DEFAULTS, {
+    // Reject non-array `disabledTypes` entries to match prior defensive behavior.
+    validate: (_merged, parsed) => {
+      if (!Array.isArray(parsed.disabledTypes)) return { disabledTypes: [] };
+      return {};
+    },
+    configOverride: getAppConfig().search,
+  });
 }
 
 export function saveSearchSettings(settings: SearchSettings): void {
-  if (isSettingsLocked()) return; // Lock guard
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
-  } catch { /* quota exceeded — silently ignore */ }
+  lsSave(STORAGE_KEY, settings);
 }

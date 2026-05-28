@@ -15,7 +15,10 @@ import type { LoadResult } from '../engine/rv-scene-loader';
 import type { RVViewer } from '../rv-viewer';
 import type { ContextMenuTarget } from './context-menu-store';
 import { loadOverlay, saveOverlay, saveOriginals, loadOriginals, removeOriginals, type RVExtrasOverlay } from '../engine/rv-extras-overlay-store';
+import { materialise as materialiseEdits, freshOpId } from './scene/rv-scene-edits';
+import { getSceneStore } from './scene/scene-store-singleton';
 import { isHiddenComponentType } from './rv-inspector-helpers';
+import { isEphemeralField } from './rv-value-resolver';
 import { openSetPositionDialog } from './SetPositionDialog';
 
 // ─── Layout Object Helpers (for context menu) ──────────────────────────
@@ -63,6 +66,16 @@ export interface EditableNodeInfo {
   /** Component types present on this node (e.g. ['Drive', 'TransportSurface']). */
   types: string[];
 }
+
+/**
+ * Source of a selectNode() call.
+ * - 'tree'     — explicit selection from the hierarchy panel; sub-node paths
+ *                under a LayoutObject must remain unchanged
+ * - 'viewport' — 3D-viewport pick; resolves up to the LayoutObject root so
+ *                clicking any sub-mesh selects the whole placed object
+ * - 'api'      — programmatic call from plugins/tests; no resolution applied
+ */
+export type SelectionSource = 'tree' | 'viewport' | 'api';
 
 // ─── Plugin State (external store for React) ─────────────────────────────
 
@@ -197,11 +210,71 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
     this.notify();
   }
 
-  selectNode(path: string, showInspector = false): void {
+  /**
+   * Update the selected node path and snapshot it to localStorage.
+   *
+   * `source` differentiates click origins: viewport picks resolve up to the
+   * enclosing LayoutObject (matches the whole-object hover/click highlight),
+   * tree/api selections stay on the explicit path.
+   */
+  selectNode(path: string, showInspector?: boolean): void;
+  selectNode(path: string, source: SelectionSource): void;
+  selectNode(path: string, showInspector: boolean, source: SelectionSource): void;
+  selectNode(
+    path: string,
+    showInspectorOrSource: boolean | SelectionSource = false,
+    sourceArg: SelectionSource = 'api',
+  ): void {
+    const show = typeof showInspectorOrSource === 'boolean' ? showInspectorOrSource : false;
+    const source: SelectionSource = typeof showInspectorOrSource === 'string'
+      ? showInspectorOrSource
+      : sourceArg;
+    if (source === 'viewport') {
+      const resolved = this.findLayoutObjectAncestor(path);
+      if (resolved) path = resolved;
+    }
     this._selectedNodePath = path;
-    this._showInspector = showInspector;
+    this._showInspector = show;
     localStorage.setItem(LS_KEY_SELECTED_NODE, path);
     this.notify();
+  }
+
+  /** Cache for ancestor lookups; invalidated whenever editableNodes refresh. */
+  private _ancestorCache = new Map<string, string | null>();
+
+  /**
+   * Walk up the registered hierarchy from `path` and return the path of the
+   * nearest ancestor (inclusive) whose Three.js node carries a
+   * `userData.realvirtual.LayoutObject` marker. Returns null if no such
+   * ancestor exists. Cached per-path; cleared on `refreshEditableNodes`.
+   */
+  findLayoutObjectAncestor(path: string): string | null {
+    if (this._ancestorCache.has(path)) return this._ancestorCache.get(path)!;
+    if (!this._viewer?.registry) return null;
+    const node = this._viewer.registry.getNode(path);
+    if (!node) return null;
+    let current: import('three').Object3D | null = node;
+    while (current) {
+      const rv = current.userData?.realvirtual as Record<string, unknown> | undefined;
+      if (rv?.LayoutObject) {
+        const ancestor = this._viewer.registry.getPathForNode(current);
+        this._ancestorCache.set(path, ancestor);
+        return ancestor;
+      }
+      current = current.parent;
+    }
+    this._ancestorCache.set(path, null);
+    return null;
+  }
+
+  /** Convenience: read the currently selected node path. */
+  getSelectedPath(): string | null {
+    return this._selectedNodePath;
+  }
+
+  /** Convenience: snapshot of editable nodes (matches `state.editableNodes`). */
+  getEditableNodes(): EditableNodeInfo[] {
+    return this._editableNodes;
   }
 
   clearSelection(): void {
@@ -244,6 +317,8 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
   private _eventUnsubs: (() => void)[] = [];
   /** Ancestor override for LayoutObject hover resolution. */
   private _layoutAncestorOverride: ((mesh: import('three').Object3D) => import('three').Object3D | null) | null = null;
+  /** Cleanup handle for the SceneStore subscription (keeps `_overlay` cache fresh). */
+  private _sceneStoreUnsub: (() => void) | null = null;
 
   /** The RVViewer instance (available after onModelLoaded). */
   get viewer(): RVViewer | null { return this._viewer; }
@@ -291,50 +366,105 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
   }
 
   /**
-   * Update a single field in the overlay and persist to localStorage.
-   * Also applies the value to the live scene node's userData.
+   * Update a single field. Routes through SceneStore.applyOp so the change
+   * enters the unified op log and participates in undo/redo. The legacy
+   * localStorage write is kept ONLY for the boot path (no SceneStore yet);
+   * SceneStore-driven sessions persist via the per-base draft autosave.
    */
-  updateOverlayField(nodePath: string, componentType: string, fieldName: string, value: unknown): void {
-    // Snapshot original before first override
+  updateOverlayField(nodePath: string, componentType: string, fieldName: string, value: unknown): boolean {
+    // Block edits on sub-paths of locked LayoutObjects. The LayoutObject root
+    // itself remains editable so the user can unlock it without first
+    // un-editing every nested field.
+    const ancestor = this.findLayoutObjectAncestor(nodePath);
+    if (ancestor && ancestor !== nodePath) {
+      const obj = this._viewer?.registry?.getNode(ancestor);
+      const rv = obj?.userData?.realvirtual as Record<string, Record<string, unknown>> | undefined;
+      if (rv?.LayoutObject?.Locked === true) {
+        console.warn(`[rvExtrasEditor] Cannot edit ${nodePath}: LayoutObject ${ancestor} is locked`);
+        return false;
+      }
+    }
+
+    // Never persist ephemeral runtime state (e.g. a drive's CurrentPosition, a
+    // sensor's Occupied) as an override. Only config fields can become overrides
+    // and be saved — otherwise drafts/layouts accumulate meaningless runtime
+    // snapshots that mis-seed the simulation on reload.
+    if (this._viewer && isEphemeralField(this._viewer, nodePath, componentType, fieldName)) {
+      console.warn(`[rvExtrasEditor] Refusing to persist runtime field ${componentType}.${fieldName}`);
+      return false;
+    }
+
+    // No-op guard: drag handlers fire continuously with the same value;
+    // bail out before allocating ops or touching localStorage.
+    const prev = this.readSceneField(nodePath, componentType, fieldName);
+    if (Object.is(prev, value)) return true;
+
+    // Snapshot original before first override (for the legacy reset path).
     this.snapshotOriginal(nodePath, componentType, fieldName);
 
-    const overlay = this.ensureOverlay();
+    const sceneStore = getSceneStore();
+    if (sceneStore) {
+      // Optimistically reflect the override in the cached overlay and notify
+      // NOW, so the inspector marks the field as overridden the moment it
+      // changes. `applyOp` runs asynchronously through the SceneStore op queue;
+      // without this the override dot only appears after the queue flushes (or,
+      // in some scene states, not until a reload re-materialises the ops). The
+      // SceneStore subscription later re-materialises the overlay to the same
+      // value (idempotent — it no-ops when structurally equal).
+      const ov = this.ensureOverlay();
+      if (!ov.nodes[nodePath]) ov.nodes[nodePath] = {};
+      if (!ov.nodes[nodePath][componentType]) ov.nodes[nodePath][componentType] = {};
+      ov.nodes[nodePath][componentType][fieldName] = value;
+      this.notify();
 
+      // Op-based path — applyOp pushes a `setField` op, the executor writes
+      // userData + reapplies schema. The store's notify cascades back to
+      // this plugin via _sceneStoreUnsub → _refreshOverlayFromScene.
+      void sceneStore.applyOp({
+        id: freshOpId(), ts: Date.now(), schemaV: 1,
+        kind: 'setField', nodePath, componentType, fieldName, value, prev,
+      });
+      return true;
+    }
+
+    // Legacy fallback — pre-SceneStore boot or test environments.
+    const overlay = this.ensureOverlay();
     if (!overlay.nodes[nodePath]) overlay.nodes[nodePath] = {};
     if (!overlay.nodes[nodePath][componentType]) overlay.nodes[nodePath][componentType] = {};
     overlay.nodes[nodePath][componentType][fieldName] = value;
-
-    // Apply to live scene node
     this.applyFieldToScene(nodePath, componentType, fieldName, value);
-
-    // Persist
     if (this._glbName) saveOverlay(this._glbName, overlay);
     this.notify();
+    return true;
   }
 
   /**
-   * Reset a single field override — remove it from the overlay and
-   * restore the GLB default value on the live scene node.
+   * Reset a single field override. Op-based path emits an `unsetField` op;
+   * the executor restores the prev value from the inverse path.
    */
   resetField(nodePath: string, componentType: string, fieldName: string): void {
-    if (!this._overlay) return;
+    const prev = this.readSceneField(nodePath, componentType, fieldName);
+    const sceneStore = getSceneStore();
+    if (sceneStore) {
+      void sceneStore.applyOp({
+        id: freshOpId(), ts: Date.now(), schemaV: 1,
+        kind: 'unsetField', nodePath, componentType, fieldName, prev,
+      });
+      return;
+    }
 
+    // Legacy fallback
+    if (!this._overlay) return;
     const nodeOverrides = this._overlay.nodes[nodePath];
     if (!nodeOverrides?.[componentType]) return;
     delete nodeOverrides[componentType][fieldName];
-
-    // Restore original value to scene
     const key = this.origKey(nodePath, componentType, fieldName);
     if (this._originals.has(key)) {
       this.applyFieldToScene(nodePath, componentType, fieldName, this._originals.get(key));
       this._originals.delete(key);
     }
-
-    // Clean up empty containers
     if (Object.keys(nodeOverrides[componentType]).length === 0) delete nodeOverrides[componentType];
     if (Object.keys(nodeOverrides).length === 0) delete this._overlay.nodes[nodePath];
-
-    // Persist overlay and originals sidecar
     if (this._glbName) {
       saveOverlay(this._glbName, this._overlay);
       removeOriginals(this._glbName, [key]);
@@ -343,14 +473,29 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
   }
 
   /**
-   * Reset all overrides for a specific component on a node.
+   * Reset all overrides for a component. Wrapped in a transaction so the
+   * batch is one undo step.
    */
   resetComponent(nodePath: string, componentType: string): void {
+    const sceneStore = getSceneStore();
+    if (sceneStore && this._overlay?.nodes[nodePath]?.[componentType]) {
+      const fields = Object.keys(this._overlay.nodes[nodePath][componentType]);
+      void sceneStore.withTransaction(`Reset ${componentType}`, async () => {
+        for (const fieldName of fields) {
+          const prev = this.readSceneField(nodePath, componentType, fieldName);
+          await sceneStore.applyOp({
+            id: freshOpId(), ts: Date.now(), schemaV: 1,
+            kind: 'unsetField', nodePath, componentType, fieldName, prev,
+          });
+        }
+      });
+      return;
+    }
+
+    // Legacy fallback
     if (!this._overlay) return;
     const nodeOverrides = this._overlay.nodes[nodePath];
     if (!nodeOverrides?.[componentType]) return;
-
-    // Restore all original values for this component
     const removedKeys: string[] = [];
     for (const fieldName of Object.keys(nodeOverrides[componentType])) {
       const key = this.origKey(nodePath, componentType, fieldName);
@@ -360,11 +505,8 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
         removedKeys.push(key);
       }
     }
-
     delete nodeOverrides[componentType];
     if (Object.keys(nodeOverrides).length === 0) delete this._overlay.nodes[nodePath];
-
-    // Persist overlay and originals sidecar
     if (this._glbName) {
       saveOverlay(this._glbName, this._overlay);
       if (removedKeys.length > 0) removeOriginals(this._glbName, removedKeys);
@@ -373,12 +515,34 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
   }
 
   /**
-   * Reset all overrides for a node — remove the entire node entry from the overlay.
+   * Reset all overrides for a node — emits one transaction wrapping all
+   * unsetField primitives so undo restores the entire node in one step.
    */
   resetNode(nodePath: string): void {
-    if (!this._overlay) return;
+    const sceneStore = getSceneStore();
+    if (sceneStore && this._overlay?.nodes[nodePath]) {
+      const nodeOv = this._overlay.nodes[nodePath];
+      const work: Array<{ componentType: string; fieldName: string; prev: unknown }> = [];
+      for (const [componentType, fields] of Object.entries(nodeOv)) {
+        for (const fieldName of Object.keys(fields)) {
+          work.push({ componentType, fieldName, prev: this.readSceneField(nodePath, componentType, fieldName) });
+        }
+      }
+      if (work.length === 0) return;
+      void sceneStore.withTransaction(`Reset node`, async () => {
+        for (const w of work) {
+          await sceneStore.applyOp({
+            id: freshOpId(), ts: Date.now(), schemaV: 1,
+            kind: 'unsetField', nodePath, componentType: w.componentType,
+            fieldName: w.fieldName, prev: w.prev,
+          });
+        }
+      });
+      return;
+    }
 
-    // Restore all original values for this node
+    // Legacy fallback
+    if (!this._overlay) return;
     const nodeOverrides = this._overlay.nodes[nodePath];
     const removedKeys: string[] = [];
     if (nodeOverrides) {
@@ -393,10 +557,7 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
         }
       }
     }
-
     delete this._overlay.nodes[nodePath];
-
-    // Persist overlay and originals sidecar
     if (this._glbName) {
       saveOverlay(this._glbName, this._overlay);
       if (removedKeys.length > 0) removeOriginals(this._glbName, removedKeys);
@@ -491,14 +652,12 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
           },
           action: (target) => {
             const paths = getLayoutPaths(viewer, target).filter(p => !isNodeLocked(viewer, p));
-            for (const p of paths) {
-              const node = viewer.registry?.getNode(p);
-              if (node) node.visible = false;
-              viewer.selectionManager.deselect(p);
-            }
-            viewer.markRenderDirty();
+            if (paths.length === 0) return;
+            // The layout-planner plugin owns the actual scene/store/SceneStore
+            // mutation — it listens for `layout-objects-deleted` and routes
+            // through its own removal pipeline (undo-safe). Don't mutate
+            // visibility here; the planner clears the selection itself.
             viewer.emit('layout-objects-deleted', { paths });
-            plugin.refreshEditableNodes();
           },
         },
       ],
@@ -540,20 +699,54 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
     // Sort by path for consistent display
     this._editableNodes.sort((a, b) => a.path.localeCompare(b.path));
 
-    // Load overlay from localStorage (derive GLB name from URL)
+    // Load overlay state. Priority:
+    //   1) Materialise the active unified Scene's edit log into an overlay —
+    //      wins when the load came through the new SceneStore (op-based).
+    //   2) Legacy localStorage (rv-extras-overlay:<glbName>) — kept for the
+    //      boot path that loads a GLB directly without going through the
+    //      Scene panel (e.g. ?model=). The originals sidecar is loaded the
+    //      same way for reset-after-reload support.
     const modelUrl = viewer.currentModelUrl;
     if (modelUrl) {
       this._glbName = modelUrl.split('/').pop() ?? modelUrl;
-      this._overlay = loadOverlay(this._glbName);
+      const scene = viewer.currentScene;
+      if (scene) {
+        // Materialise the scene's op log into an overlay snapshot — read-only
+        // CACHE for the inspector's "is this field overridden?" rendering.
+        // Inspector mutations now flow through SceneStore.applyOp (see
+        // updateOverlayField above); the SceneStore subscription below keeps
+        // this cache fresh after undo/redo or external edits.
+        this._overlay = materialiseEdits(scene.edits.ops).overlay;
+      } else {
+        this._overlay = loadOverlay(this._glbName);
+      }
 
-      // Load persisted originals sidecar (for reset-after-reload support)
+      // Originals sidecar: legacy-only. Future PR may capture originals
+      // during loadGLB traversal so this side store can be retired.
       this._originals = loadOriginals(this._glbName);
 
-      // Snapshot original values for overlay fields BEFORE they were applied
-      // (the scene loader applies overlays during traversal, so by this point
-      // userData already has overlay values. The persisted sidecar from a
-      // previous session provides the true originals. For new overrides made
-      // in this session, snapshotOriginal() captures them on first edit.)
+      // Subscribe to SceneStore so _overlay stays in sync with the op log
+      // (e.g. after undo / redo or external applyOp calls). The
+      // subscription is torn down in dispose().
+      const sceneStore = getSceneStore();
+      if (sceneStore && !this._sceneStoreUnsub) {
+        this._sceneStoreUnsub = sceneStore.subscribe(() => {
+          // Materialise from the store's LIVE op log (its draft snapshot), not
+          // viewer.currentScene.edits.ops — the latter is a stale copy that is
+          // only refreshed on load/save, so it never reflects in-progress edits.
+          // Reading it here was why a freshly-edited field's override mark was
+          // wiped right after it appeared (and only showed up again on reload).
+          const ops = sceneStore.getSnapshot().draft?.edits.ops
+            ?? viewer.currentScene?.edits.ops;
+          if (!ops) return;
+          const next = materialiseEdits(ops).overlay;
+          // Only notify if the overlay actually changed structurally.
+          if (JSON.stringify(this._overlay) !== JSON.stringify(next)) {
+            this._overlay = next;
+            this.notify();
+          }
+        });
+      }
     }
 
     // Register layout object context menu items
@@ -574,17 +767,33 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
       viewer.raycastManager.addAncestorOverride(this._layoutAncestorOverride);
     }
 
-    // Subscribe to selection-changed for loose-coupled scene interaction
+    // Subscribe to selection-changed for loose-coupled scene interaction.
+    // Preserve the current inspector visibility — switching the selected
+    // object in the 3D scene should follow the inspector to the new node
+    // when it's open, NOT close it (the prior `false` literal closed the
+    // inspector on every scene selection change).
     this._eventUnsubs.push(
       viewer.on('selection-changed', (snapshot) => {
         const path = snapshot.primaryPath;
         if (!path) {
           this.clearSelection();
         } else if (this._panelOpen) {
-          this.selectAndReveal(path, false);
+          this.selectAndReveal(path, this._showInspector);
         } else {
-          this.selectNode(path, false);
+          this.selectNode(path, this._showInspector);
         }
+      }),
+    );
+
+    // Subscribe to object-focus (canvas double-click + F key) — opens the
+    // Property Inspector alongside the camera-zoom that the viewer's built-in
+    // handler already performs. We accept any path the registry knows; the
+    // inspector itself decides what to render (empty state for nodes without
+    // rv_extras components).
+    this._eventUnsubs.push(
+      viewer.on('object-focus', ({ path }) => {
+        if (!path) return;
+        this.selectAndReveal(path, true);
       }),
     );
 
@@ -608,9 +817,43 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
     this.notify();
   }
 
+  /**
+   * Remove all overlay entries whose path falls under the given prefix
+   * (i.e. the prefix itself OR `${prefix}/...`).
+   *
+   * Called when a LayoutObject is deleted so re-placing a catalog item
+   * with the same root name doesn't inherit the previous instance's
+   * sub-overlay state. Returns the number of paths purged (legacy path
+   * only — SceneStore op-log entries are not retroactively rewritten;
+   * they unwind via the standard undo/redo replay).
+   */
+  purgeOverlaysForSubtree(prefix: string): number {
+    if (!this._overlay) return 0;
+    const toDelete: string[] = [];
+    for (const path of Object.keys(this._overlay.nodes)) {
+      if (path === prefix || path.startsWith(prefix + '/')) toDelete.push(path);
+    }
+    for (const path of toDelete) delete this._overlay.nodes[path];
+    // Also clear originals snapshot entries for the subtree
+    const removedKeys: string[] = [];
+    for (const key of this._originals.keys()) {
+      if (key === prefix || key.startsWith(prefix + '/')) {
+        removedKeys.push(key);
+      }
+    }
+    for (const key of removedKeys) this._originals.delete(key);
+    if (this._glbName && toDelete.length > 0) {
+      saveOverlay(this._glbName, this._overlay);
+      if (removedKeys.length > 0) removeOriginals(this._glbName, removedKeys);
+    }
+    if (toDelete.length > 0) this.notify();
+    return toDelete.length;
+  }
+
   /** Re-scan the scene for editable nodes. Call after adding/removing nodes with userData.realvirtual. */
   refreshEditableNodes(): void {
     if (!this._viewer) return;
+    this._ancestorCache.clear();
     this._editableNodes = [];
     const registry = this._viewer.registry;
     if (!registry) return;
@@ -637,6 +880,12 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
     // Unsubscribe viewer events
     for (const unsub of this._eventUnsubs) unsub();
     this._eventUnsubs.length = 0;
+
+    // Unsubscribe from SceneStore
+    if (this._sceneStoreUnsub) {
+      this._sceneStoreUnsub();
+      this._sceneStoreUnsub = null;
+    }
 
     // Remove ancestor override
     if (this._layoutAncestorOverride && this._viewer?.raycastManager) {

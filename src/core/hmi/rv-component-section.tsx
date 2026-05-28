@@ -13,8 +13,9 @@ import {
   Box,
   Typography,
   Tooltip,
+  Button,
 } from '@mui/material';
-import { ExpandMore } from '@mui/icons-material';
+import { ExpandMore, ChevronRight } from '@mui/icons-material';
 import type { RVViewer } from '../rv-viewer';
 import type { SignalStore } from '../engine/rv-signal-store';
 import { getConsumedFields } from '../engine/rv-extras-validator';
@@ -26,35 +27,63 @@ import {
   inferFieldType,
   isComponentRef,
   isScriptableObject,
-  HIDDEN_FIELD_NAMES,
+  isFieldHidden,
 } from './rv-inspector-helpers';
 import { flattenObjectFields } from './rv-field-editors';
 import { FieldRow } from './rv-field-row';
 import { fieldRendererRegistry } from './rv-field-renderer-registry';
+import { componentActionRegistry, type ComponentActionContext } from './rv-component-action-registry';
 
 // ── Expand state persistence (default: expanded) ────────────────────────
 
 const LS_KEY_COLLAPSED = 'rv-inspector-collapsed';
+const LS_KEY_SECTION_COLLAPSED = 'rv-inspector-section-collapsed';
 
-/** Module-level cache to avoid re-parsing localStorage on every toggle. */
+/** Module-level caches to avoid re-parsing localStorage on every toggle. */
 let _collapsedCache: Set<string> | null = null;
+let _sectionCollapsedCache: Set<string> | null = null;
+
+function loadSet(storageKey: string, cacheRef: 'other' | 'section'): Set<string> {
+  if (cacheRef === 'other' && _collapsedCache) return _collapsedCache;
+  if (cacheRef === 'section' && _sectionCollapsedCache) return _sectionCollapsedCache;
+  let set: Set<string>;
+  try {
+    const raw = localStorage.getItem(storageKey);
+    set = raw ? new Set(JSON.parse(raw) as string[]) : new Set();
+  } catch {
+    set = new Set();
+  }
+  if (cacheRef === 'other') _collapsedCache = set;
+  else _sectionCollapsedCache = set;
+  return set;
+}
+
+function persistSet(storageKey: string, set: Set<string>): void {
+  localStorage.setItem(storageKey, JSON.stringify([...set]));
+}
 
 function loadCollapsedSet(): Set<string> {
-  if (_collapsedCache) return _collapsedCache;
-  try {
-    const raw = localStorage.getItem(LS_KEY_COLLAPSED);
-    _collapsedCache = raw ? new Set(JSON.parse(raw) as string[]) : new Set();
-  } catch {
-    _collapsedCache = new Set();
-  }
-  return _collapsedCache;
+  return loadSet(LS_KEY_COLLAPSED, 'other');
 }
 
 function persistCollapsed(key: string, collapsed: boolean): void {
   const set = loadCollapsedSet();
   if (collapsed) set.add(key); else set.delete(key);
-  localStorage.setItem(LS_KEY_COLLAPSED, JSON.stringify([...set]));
+  persistSet(LS_KEY_COLLAPSED, set);
 }
+
+function loadSectionCollapsedSet(): Set<string> {
+  return loadSet(LS_KEY_SECTION_COLLAPSED, 'section');
+}
+
+function persistSectionCollapsed(key: string, collapsed: boolean): void {
+  const set = loadSectionCollapsedSet();
+  if (collapsed) set.add(key); else set.delete(key);
+  persistSet(LS_KEY_SECTION_COLLAPSED, set);
+}
+
+/** Stable empty-actions array — shared by every section without registered actions. */
+const EMPTY_ACTIONS: readonly import('./rv-component-action-registry').ComponentAction[] = Object.freeze([]);
 
 // ── ComponentSection ─────────────────────────────────────────────────────
 
@@ -79,11 +108,20 @@ export function ComponentSection({ nodePath, componentType, data, overriddenFiel
   const base = baseComponentType(componentType);
   const expandKey = `${nodePath}:${componentType}`;
   const [showOther, setShowOther] = useState(() => !loadCollapsedSet().has(expandKey));
+  const [sectionExpanded, setSectionExpanded] = useState(() => !loadSectionCollapsedSet().has(expandKey));
 
   const toggleOther = useCallback(() => {
     setShowOther(prev => {
       const next = !prev;
       persistCollapsed(expandKey, !next);
+      return next;
+    });
+  }, [expandKey]);
+
+  const toggleSection = useCallback(() => {
+    setSectionExpanded(prev => {
+      const next = !prev;
+      persistSectionCollapsed(expandKey, !next);
       return next;
     });
   }, [expandKey]);
@@ -116,7 +154,7 @@ export function ComponentSection({ nodePath, componentType, data, overriddenFiel
 
     for (const [key, value] of Object.entries(data)) {
       if (key.startsWith('_')) continue;
-      if (HIDDEN_FIELD_NAMES.has(key)) continue;
+      if (isFieldHidden(base, key)) continue;
       if (consumed.has(key)) {
         consumedRaw.push([key, value]);
       } else {
@@ -128,6 +166,36 @@ export function ComponentSection({ nodePath, componentType, data, overriddenFiel
     // Other entries flatten objects into sub-field rows
     return { consumedEntries: consumedRaw, otherEntries: flattenEntries(otherRaw) };
   }, [base, data, flattenEntries]);
+
+  // Action buttons contributed by plugins for this component type. Re-resolved
+  // on every render — the registry is small and lookups are O(1); this keeps
+  // visibility/isActive snappy without a separate tick-mechanism.
+  const actions = useMemo(() => {
+    // Look up by both the literal componentType (e.g. "ReplayRecording_1")
+    // and its stripped base (e.g. "ReplayRecording") so plugins can register
+    // against either form. Concrete-first lets a per-instance override beat
+    // a generic base registration, should we ever ship one.
+    const concrete = componentActionRegistry.get(componentType);
+    const baseList = base !== componentType ? componentActionRegistry.get(base) : EMPTY_ACTIONS;
+    return [...concrete, ...baseList];
+  }, [componentType, base]);
+
+  // Re-evaluation tick — `isActive` reads from `node.userData`, which the
+  // action mutates synchronously. React doesn't see that change on its own
+  // (no state subscription), so we bump a local counter on every click to
+  // force isActive() to re-run for the icon's active/outlined style.
+  // Re-render is local to this section.
+  const [actionTick, setActionTick] = useState(0);
+
+  const actionCtx = useMemo<ComponentActionContext | null>(() => {
+    if (!viewer || actions.length === 0) return null;
+    const node = viewer.registry?.getNode(nodePath);
+    if (!node) return null;
+    return { node, nodePath, viewer, componentData: data };
+    // actionTick is intentionally in deps so the ctx identity changes on
+    // click — drives the actions.map() loop to re-evaluate isActive().
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewer, nodePath, data, actions.length, actionTick]);
 
   return (
     <Box>
@@ -144,17 +212,33 @@ export function ComponentSection({ nodePath, componentType, data, overriddenFiel
           borderTop: `1px solid ${color}22`,
         }}
       >
-        <Typography
+        <Box
+          onClick={toggleSection}
           sx={{
-            fontSize: 10,
-            fontWeight: 700,
-            color: color,
-            letterSpacing: 0.5,
-            textTransform: 'uppercase',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 0.25,
+            cursor: 'pointer',
+            userSelect: 'none',
+            '&:hover .rv-comp-title': { textDecoration: 'underline' },
           }}
         >
-          {componentType}
-        </Typography>
+          {sectionExpanded
+            ? <ExpandMore sx={{ fontSize: 14, color: color }} />
+            : <ChevronRight sx={{ fontSize: 14, color: color }} />}
+          <Typography
+            className="rv-comp-title"
+            sx={{
+              fontSize: 10,
+              fontWeight: 700,
+              color: color,
+              letterSpacing: 0.5,
+              textTransform: 'uppercase',
+            }}
+          >
+            {componentType}
+          </Typography>
+        </Box>
         {signalValue != null && (
           <Typography
             sx={{
@@ -172,7 +256,7 @@ export function ComponentSection({ nodePath, componentType, data, overriddenFiel
         {overriddenFields.size > 0 && (
           <Tooltip title="Click to reset all overrides for this component" placement="top">
             <Typography
-              onClick={onResetComponent}
+              onClick={(e) => { e.stopPropagation(); onResetComponent(); }}
               sx={{
                 fontSize: 9,
                 color: '#4fc3f7',
@@ -188,7 +272,7 @@ export function ComponentSection({ nodePath, componentType, data, overriddenFiel
       </Box>
 
       {/* Consumed (editable) fields */}
-      {consumedEntries.map(([fieldName, value]) => {
+      {sectionExpanded && consumedEntries.map(([fieldName, value]) => {
         // Check for a custom field renderer plugin
         const CustomRenderer = fieldRendererRegistry.getRenderer(componentType, fieldName);
         if (CustomRenderer) {
@@ -219,8 +303,73 @@ export function ComponentSection({ nodePath, componentType, data, overriddenFiel
         );
       })}
 
+      {/* Action buttons contributed by plugins (e.g. Splat Invert X/Y/Z,
+          Drive Jog, Sensor Reset). Rendered between consumed fields and the
+          collapsible "other fields" section so they sit visually with the
+          editable area, not with the diagnostic dump.
+          Styling: theme primary accent — intentionally NOT the component's
+          own color, so the buttons read consistently across all sections and
+          stand out from the section's text/header tint. */}
+      {sectionExpanded && actions.length > 0 && actionCtx && (
+        <Box sx={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: 0.5, px: 1, py: 0.5 }}>
+          {actions.map((action) => {
+            // Per-render visibility check — lets plugins hide actions based
+            // on node state (e.g. "Stop" only when running).
+            if (action.visible && !action.visible(actionCtx)) return null;
+            const active = action.isActive ? action.isActive(actionCtx) : false;
+            const Icon = action.icon;
+            const button = (
+              <Button
+                key={action.id}
+                size="small"
+                // Explicit `color` overrides the theme primary — used by
+                // axis-coded buttons (Splat Invert X/Y/Z = red/green/blue
+                // to match Three.js axis convention). Falls back to MUI's
+                // theme primary when not specified.
+                color={action.color ? undefined : 'primary'}
+                variant={active ? 'contained' : 'outlined'}
+                onClick={() => {
+                  action.onClick(actionCtx);
+                  // Immediately re-evaluate isActive — the action mutated
+                  // userData synchronously, but React has no way to notice
+                  // without our nudge.
+                  setActionTick(t => t + 1);
+                }}
+                startIcon={Icon ? <Icon sx={{ fontSize: 14 }} /> : undefined}
+                sx={{
+                  minWidth: 0,
+                  height: 24,
+                  px: 0.75,
+                  py: 0,
+                  fontSize: 10,
+                  fontWeight: 600,
+                  textTransform: 'none',
+                  // Custom color path — overrides MUI's color prop. Active
+                  // = filled (contained), inactive = outlined; hover
+                  // brightens proportionally.
+                  ...(action.color ? {
+                    color: active ? '#fff' : action.color,
+                    bgcolor: active ? action.color : 'transparent',
+                    borderColor: action.color,
+                    '&:hover': {
+                      bgcolor: active ? action.color : action.color + '22',
+                      borderColor: action.color,
+                    },
+                  } : {}),
+                }}
+              >
+                {action.label ?? action.id}
+              </Button>
+            );
+            return action.tooltip
+              ? <Tooltip key={action.id} title={action.tooltip} placement="top">{button}</Tooltip>
+              : button;
+          })}
+        </Box>
+      )}
+
       {/* Collapsible other (read-only) fields — hidden when consumedOnly is active */}
-      {!consumedOnly && otherEntries.length > 0 && (
+      {sectionExpanded && !consumedOnly && otherEntries.length > 0 && (
         <>
           <Box
             onClick={toggleOther}
