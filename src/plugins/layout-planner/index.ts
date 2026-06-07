@@ -448,12 +448,15 @@ const PLANNER_OUTLINE_STYLE: OutlineStyle = {
 
 // ─── Plugin ─────────────────────────────────────────────────────────────
 
-/** Standard parts library shipped with every build. Scanned from the public
- *  realvirtual library repository on GitHub (one tree API call per boot since
- *  the branch is pinned). Always loaded by `_loadCatalogs`, in addition to any
- *  constructor- or `?library=`-provided catalogs. */
+/** Standard parts library shipped with every build. Loaded from a pre-built
+ *  `catalog.json` served via raw.githubusercontent.com — unlike the GitHub
+ *  tree API (60 req/h per IP, anonymous), the raw host is not rate-limited, so
+ *  the public demo never hits a 403. Regenerate the manifest with
+ *  `scripts/build-library-catalog.mjs` whenever the library repo changes.
+ *  Always loaded by `_loadCatalogs`, in addition to any constructor- or
+ *  `?library=`-provided catalogs. */
 const DEFAULT_LIBRARY_URLS = [
-  'https://github.com/game4automation/realvirtual-Library/tree/main',
+  'https://raw.githubusercontent.com/game4automation/realvirtual-Library/main/catalog.json',
 ];
 
 export interface LayoutPlannerOptions {
