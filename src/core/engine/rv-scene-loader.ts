@@ -41,7 +41,6 @@ import { deduplicateMaterials, type DedupResult } from './rv-material-dedup';
 import { applyUberMaterial, type UberResult } from './rv-uber-material';
 import { mergeStaticUberMeshes, type StaticUberMergeResult } from './rv-static-merge-uber';
 import { mergeKinematicGroupMeshes, type KinematicMergeResult } from './rv-kinematic-merge-uber';
-import { mergeStaticGeometries, type StaticMergeResult } from './rv-static-merge';
 import { buildRaycastGeometries, type RaycastGeometrySet } from './rv-raycast-geometry';
 import { applyOverlayToNode, type RVExtrasOverlay } from './rv-extras-overlay-store';
 import { applyKinematicsSpec } from '../behavior-runtime';
@@ -135,7 +134,6 @@ export interface LoadResult {
   uberResult: UberResult | null;
   uberMergeResult: StaticUberMergeResult | null;
   kinematicMergeResult: KinematicMergeResult | null;
-  mergeResult: StaticMergeResult | null;
   pipelineNodes: { pipes: Object3D[]; tanks: Object3D[]; pumps: Object3D[]; processingUnits: Object3D[] };
   metadataNodes: Object3D[];
   /** Group names that were re-parented under Kinematic nodes (for auto-exclude from overlay). */
@@ -237,20 +235,18 @@ export async function loadAndPrepareGLTF(url: string, scene: Scene): Promise<Pre
   return { root, gltfParser };
 }
 
-/** Result of processMeshes — contains mesh stats and drive/transport node sets. */
+/** Result of processMeshes — contains mesh stats and the drive node set. */
 export interface MeshProcessResult {
   triangleCount: number;
   driveNodeSet: Set<Object3D>;
-  transportSurfaceNodeSet: Set<Object3D>;
 }
 
 /**
  * Pre-scan for Drive/TransportSurface nodes and classify meshes:
  * shadow casting, matrixAutoUpdate, triangle counting.
  *
- * CRITICAL: Returns driveNodeSet and transportSurfaceNodeSet — these MUST be
- * passed to subsequent functions so drive meshes are NOT incorrectly set to
- * matrixAutoUpdate = false.
+ * CRITICAL: Returns driveNodeSet — it MUST be passed to subsequent functions
+ * so drive meshes are NOT incorrectly set to matrixAutoUpdate = false.
  */
 export function processMeshes(root: Object3D): MeshProcessResult {
   let triangleCount = 0;
@@ -258,12 +254,6 @@ export function processMeshes(root: Object3D): MeshProcessResult {
   // Pre-scan: Drive/TransportSurface node sets for shadow classification
   // Collect drive node set for static/dynamic classification (Phase 1.3)
   // We need a two-step approach: first find all drives, then classify meshes
-
-  // Pipeline nodes for tooltip hover
-  const pipeNodes: Object3D[] = [];
-  const tankNodes: Object3D[] = [];
-  const pumpNodes: Object3D[] = [];
-  const processingUnitNodes: Object3D[] = [];
 
   // Collect drive node set for static/dynamic classification (Phase 1.3)
   // We need a two-step approach: first find all drives, then classify meshes
@@ -333,12 +323,7 @@ export function processMeshes(root: Object3D): MeshProcessResult {
     }
   });
 
-  return { triangleCount, driveNodeSet, transportSurfaceNodeSet };
-}
-
-/** Result of registerSignals — renamed node map for alias registration. */
-export interface SignalRegistrationResult {
-  renamedNodes: Map<Object3D, string>;
+  return { triangleCount, driveNodeSet };
 }
 
 /**
@@ -1067,7 +1052,7 @@ export async function loadGLB(url: string, scene: Scene, options?: LoadGLBOption
   const { root, gltfParser } = await loadAndPrepareGLTF(url, scene);
 
   // Phase 2: Process meshes (shadow classification, triangle counting, drive/transport node sets)
-  const { triangleCount, driveNodeSet, transportSurfaceNodeSet } = processMeshes(root);
+  const { triangleCount, driveNodeSet } = processMeshes(root);
 
   // Phase 3: Detect renamed nodes (Three.js dedup)
   const renamedNodes = detectRenamedNodes(gltfParser);
@@ -1191,10 +1176,6 @@ export async function loadGLB(url: string, scene: Scene, options?: LoadGLBOption
       )
     : null;
 
-  // Phase 11: General-purpose static geometry merge — DISABLED (Phase 4
-  // scope; the uber fast path above already handles the common case).
-  const mergeResult = { originalCount: 0, mergedCount: 0 };
-
   // Phase 12: Bounding box (after merge — merged geometry changes bounds)
   const boundingBox = new Box3().setFromObject(root);
 
@@ -1260,7 +1241,6 @@ export async function loadGLB(url: string, scene: Scene, options?: LoadGLBOption
     uberResult,
     uberMergeResult,
     kinematicMergeResult,
-    mergeResult,
     pipelineNodes,
     metadataNodes: traverseResult.metadataNodes,
     kinematicGroupNames,

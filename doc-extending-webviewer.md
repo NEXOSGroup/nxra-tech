@@ -2285,7 +2285,7 @@ These plugins are documented inline (in their source) rather than in dedicated l
 ### Process simulation: Pipe / Tank / Pipeline / SafetyDoor
 
 - **Pipe flow propagation** — [src/core/engine/rv-pipe-flow.ts](src/core/engine/rv-pipe-flow.ts). Propagates flow values through connected `Pipe` components based on graph traversal; works hand-in-hand with `Pump` and `Tank`.
-- **Pipeline simulation** — [src/core/engine/rv-pipeline-sim.ts](src/core/engine/rv-pipeline-sim.ts). Higher-level pipeline orchestration: pump speed, tank levels, processing-unit throughput.
+- **Pipeline simulation** — [src/plugins/processindustry-plugin.ts](src/plugins/processindustry-plugin.ts). Higher-level pipeline orchestration: pump speed, tank levels, processing-unit throughput.
 - **Tank fill** — [src/core/engine/rv-tank-fill.ts](src/core/engine/rv-tank-fill.ts). Renders a fill-level visualization inside a tank mesh, driven by a signal or a `Tank` component value.
 - **Safety door** — [src/core/engine/rv-safety-door.ts](src/core/engine/rv-safety-door.ts). Renders an amber hazard halo around a safety-door component when its zone is breached.
 

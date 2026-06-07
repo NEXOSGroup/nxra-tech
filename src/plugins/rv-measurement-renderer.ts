@@ -202,11 +202,8 @@ export class MeasurementRenderer {
     const { line, lineMaterial, lineGeometry, isLine2 } = this._createLine(pA, pB, color);
     this.group.add(line);
 
-    // Distance label sprite at midpoint — includes X/Y/Z deltas
-    const dx = pB[0] - pA[0];
-    const dy = pB[1] - pA[1];
-    const dz = pB[2] - pA[2];
-    const { texture, material: labelMaterial, aspect } = this._createLabelSprite(m.distance, m.color, dx, dy, dz);
+    // Distance label sprite at midpoint
+    const { texture, material: labelMaterial, aspect } = this._createLabelSprite(m.distance, m.color);
     const label = new Sprite(labelMaterial);
     const mid = [(pA[0] + pB[0]) / 2, (pA[1] + pB[1]) / 2, (pA[2] + pB[2]) / 2];
     label.position.set(mid[0], mid[1], mid[2]);
@@ -273,13 +270,10 @@ export class MeasurementRenderer {
     res.line.visible = m.visible;
     res.label.visible = m.visible;
 
-    // Recreate label texture with deltas
+    // Recreate label texture
     res.labelTexture.dispose();
     res.labelMaterial.dispose();
-    const dx = m.pointB[0] - m.pointA[0];
-    const dy = m.pointB[1] - m.pointA[1];
-    const dz = m.pointB[2] - m.pointA[2];
-    const { texture, material, aspect } = this._createLabelSprite(m.distance, m.color, dx, dy, dz);
+    const { texture, material, aspect } = this._createLabelSprite(m.distance, m.color);
     res.label.material = material;
     res.labelTexture = texture;
     res.labelMaterial = material;
@@ -582,7 +576,7 @@ export class MeasurementRenderer {
     }
   }
 
-  private _createLabelSprite(distance: number, hexColor: string, _dx = 0, _dy = 0, _dz = 0): { texture: CanvasTexture; material: SpriteMaterial; aspect: number } {
+  private _createLabelSprite(distance: number, hexColor: string): { texture: CanvasTexture; material: SpriteMaterial; aspect: number } {
     const text = formatDistance(distance, this.unit);
 
     // Fixed power-of-2 canvas to avoid mipmap artifacts

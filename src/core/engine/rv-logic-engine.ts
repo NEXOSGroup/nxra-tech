@@ -292,8 +292,7 @@ function buildStep(
       const resolved = registry.resolve(ref);
       const destination = (data?.['Destination'] as number) ?? 0;
       const relative = (data?.['Relative'] as boolean) ?? false;
-      const direction = (data?.['Direction'] as string) ?? 'Automatic';
-      step = new RVDriveTo(resolved.drive ?? null, destination, relative, direction);
+      step = new RVDriveTo(resolved.drive ?? null, destination, relative);
       break;
     }
 
@@ -328,8 +327,7 @@ function buildStep(
       const resolved = registry.resolve(ref);
       const destination = (data?.['Destination'] as number) ?? 0;
       const relative = (data?.['Relative'] as boolean) ?? false;
-      const direction = (data?.['Direction'] as string) ?? 'Automatic';
-      step = new RVStartDriveTo(resolved.drive ?? null, destination, relative, direction);
+      step = new RVStartDriveTo(resolved.drive ?? null, destination, relative);
       break;
     }
 

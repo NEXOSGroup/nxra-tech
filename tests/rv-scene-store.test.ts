@@ -90,7 +90,6 @@ describe('SceneStore', () => {
 
     it('starts with empty My Scenes', () => {
       expect(store.listScenes()).toEqual([]);
-      expect(store.getSnapshot().active).toBeNull();
     });
   });
 
@@ -326,24 +325,4 @@ describe('SceneStore', () => {
     });
   });
 
-  // ─── Snapshot/legacy active mirror ────────────────────────────────────
-
-  describe('legacy active mirror', () => {
-    it('builtin draft surfaces as { kind: "glb", url, label }', async () => {
-      await store.openBuiltin('/models/Demo.glb', 'Demo');
-      const a = store.getSnapshot().active;
-      expect(a).toEqual({ kind: 'glb', url: '/models/Demo.glb', label: 'Demo' });
-    });
-
-    it('saved empty-base scene surfaces as { kind: "layout", id, name, ... }', async () => {
-      const seeded = writeScene({ ...makeDraftScene(empty, 'Empty A'), id: newSceneId() });
-      await store.openScene(seeded.id);
-      const a = store.getSnapshot().active;
-      expect(a?.kind).toBe('layout');
-      if (a?.kind === 'layout') {
-        expect(a.id).toBe(seeded.id);
-        expect(a.name).toBe('Empty A');
-      }
-    });
-  });
 });

@@ -3014,17 +3014,12 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     kinSourceMeshes: number;
     /** Merged chunks created by kinematic merge */
     kinChunksCreated: number;
-    /** Static meshes before merge */
-    staticMeshesOriginal: number;
-    /** Merged meshes created */
-    staticMeshesMerged: number;
   } {
     const info = this.renderer.info;
     const dedup = this._lastLoadResult?.dedupResult;
     const uber = this._lastLoadResult?.uberResult;
     const uberMerge = this._lastLoadResult?.uberMergeResult;
     const kinMerge = this._lastLoadResult?.kinematicMergeResult;
-    const merge = this._lastLoadResult?.mergeResult;
     return {
       // triangles / drawCalls come from the snapshot taken right after
       // renderer.render() — see _lastFrameStats. Reading info.render
@@ -3046,8 +3041,6 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       kinGroupsMerged: kinMerge?.groupsMerged ?? 0,
       kinSourceMeshes: kinMerge?.sourceMeshCount ?? 0,
       kinChunksCreated: kinMerge?.chunksCreated ?? 0,
-      staticMeshesOriginal: merge?.originalCount ?? 0,
-      staticMeshesMerged: merge?.mergedCount ?? 0,
     };
   }
 
@@ -3596,12 +3589,10 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
         const rnd = info.render;
         if (!mem || !rnd) return;
         const dedup = this._lastLoadResult?.dedupResult;
-        const merge = this._lastLoadResult?.mergeResult;
         debug('render',
           `DC: ${rnd.calls ?? 0} | Tris: ${rnd.triangles ?? 0} | ` +
           `Geo: ${mem.geometries ?? 0} | Tex: ${mem.textures ?? 0}` +
-          (dedup ? ` | Mat: ${dedup.uniqueCount}/${dedup.originalCount}` : '') +
-          (merge && merge.mergedCount > 0 ? ` | Merge: ${merge.originalCount}→${merge.mergedCount}` : '')
+          (dedup ? ` | Mat: ${dedup.uniqueCount}/${dedup.originalCount}` : '')
         );
         if (this._lastGeoCount > 0 && (mem.geometries ?? 0) > this._lastGeoCount + 10) {
           console.warn(`[Perf] Geometry count growing: ${this._lastGeoCount} → ${mem.geometries}`);

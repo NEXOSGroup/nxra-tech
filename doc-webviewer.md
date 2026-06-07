@@ -94,7 +94,6 @@ src/
 │   │   ├── rv-logic-step.ts             # LogicStep base + step types
 │   │   ├── rv-logic-engine.ts           # LogicStep tree builder
 │   │   ├── rv-pipe-flow.ts              # Process pipe flow propagation
-│   │   ├── rv-pipeline-sim.ts           # Pipeline simulation
 │   │   ├── rv-tank-fill.ts              # Tank fill visualization
 │   │   ├── rv-safety-door.ts            # Safety door / hazard zone halo
 │   │   │
@@ -104,8 +103,6 @@ src/
 │   │   ├── rv-highlight-manager.ts      # Highlight overlays + edge glow
 │   │   ├── rv-selection-manager.ts      # Selection state + events
 │   │   ├── rv-gizmo-manager.ts          # Generic 3D gizmo overlays (sensors, etc.)
-│   │   ├── rv-mesh-bake.ts              # Static mesh baking
-│   │   ├── rv-static-merge.ts           # Static merge candidates
 │   │   ├── rv-static-merge-uber.ts      # Uber-material static merge
 │   │   ├── rv-kinematic-merge-uber.ts   # Uber-material kinematic merge
 │   │   ├── rv-uber-material.ts          # Uber-material (PBR atlas-shared)

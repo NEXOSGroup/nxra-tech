@@ -18,9 +18,8 @@
  * concurrent calls, autosaves the draft, and notifies React via
  * useSyncExternalStore.
  *
- * Backward-compat shims (loadScene with SceneSource, createNewLayout, etc.)
- * keep the existing SceneWindow rendering until it's switched over to call
- * the new API directly.
+ * A few thin backward-compat shims (loadScene, createNewLayout,
+ * exportLayoutJSON) remain for callers still on the old API.
  */
 
 import type { RVViewer } from '../../rv-viewer';
@@ -43,16 +42,12 @@ import {
 import { applyForward, applyInverse } from './rv-scene-executors';
 import { showInfoOverlay, hideInfoOverlay } from '../info-overlay-store';
 
-// ─── Legacy compat types (existing SceneWindow.tsx reads these) ─────────
+// ─── Legacy compat type (used by the `loadScene` shim) ──────────────────
 
-/** @deprecated Translated from `RvScene` for the legacy SceneWindow. */
+/** @deprecated Source descriptor for the legacy `loadScene` shim. */
 export type SceneSource =
   | { kind: 'glb'; url: string; label: string }
   | { kind: 'layout'; id: string; name: string; modifiedAt: string };
-/** @deprecated */
-export type GLBSceneRef = Extract<SceneSource, { kind: 'glb' }>;
-/** @deprecated */
-export type LayoutSceneRef = Extract<SceneSource, { kind: 'layout' }>;
 
 // ─── Snapshot ───────────────────────────────────────────────────────────
 
@@ -71,14 +66,6 @@ export interface SceneSnapshot {
   /** Tooltip text "Undo: <action>" / "Redo: <action>"; null when disabled. */
   undoLabel: string | null;
   redoLabel: string | null;
-
-  // ── Legacy compat mirror (SceneWindow.tsx) ──────────────────────────
-  /** @deprecated mirror of `builtins` as legacy GLBSceneRef[]. */
-  glbScenes: GLBSceneRef[];
-  /** @deprecated mirror of `scenes` as legacy LayoutSceneRef[]. */
-  layouts: LayoutSceneRef[];
-  /** @deprecated synthesized from `saved` (or `draft` for builtin clicks). */
-  active: SceneSource | null;
 }
 
 // ─── Internal state ─────────────────────────────────────────────────────
@@ -731,22 +718,7 @@ export class SceneStore {
       canRedo: this.canRedo(),
       undoLabel: this.describeUndo(),
       redoLabel: this.describeRedo(),
-      glbScenes: this._builtins.map(b => ({ kind: 'glb' as const, url: b.url, label: b.label })),
-      layouts: this._scenes.map(toLegacyLayoutRef),
-      active: this._toLegacyActive(draft),
     };
-  }
-
-  private _toLegacyActive(draft: RvScene | null): SceneSource | null {
-    const cur = this._saved ?? draft;
-    if (!cur) return null;
-    if (cur.base.kind === 'builtin') {
-      return { kind: 'glb', url: cur.base.url, label: cur.base.label };
-    }
-    if (this._saved) {
-      return { kind: 'layout', id: this._saved.id, name: this._saved.name, modifiedAt: this._saved.modifiedAt };
-    }
-    return null;
   }
 
   private _notify(): void {
@@ -770,31 +742,8 @@ export class SceneStore {
     return this.saveAs(name);
   }
 
-  /** @deprecated Use `save()`. */
-  saveActiveLayout(): void { void this.save(); }
-
-  /** @deprecated Use `saveAs(name)`. */
-  async saveActiveLayoutAs(name: string): Promise<string | null> {
-    if (!this._workspace) return null;
-    return this.saveAs(name);
-  }
-
-  /** @deprecated Use `rename(id, name)`. */
-  renameLayoutById(id: string, name: string): void { this.rename(id, name); }
-
-  /** @deprecated Use `duplicate(id)`. */
-  duplicateLayoutById(id: string): string | null {
-    try { return this.duplicate(id); } catch { return null; }
-  }
-
-  /** @deprecated Use `delete(id)`. */
-  async deleteLayoutById(id: string): Promise<void> { await this.delete(id); }
-
   /** @deprecated Use `exportSceneJSON(id)`. */
   exportLayoutJSON(id: string): void { this.exportSceneJSON(id); }
-
-  /** @deprecated Use `importSceneJSON(file)`. */
-  async importLayoutJSON(file: File): Promise<string> { return this.importSceneJSON(file); }
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -817,10 +766,6 @@ function freshShell(base: SceneBase, name: string): WorkspaceShell {
     base,
     createdAt: new Date().toISOString(),
   };
-}
-
-function toLegacyLayoutRef(m: RvSceneMeta): LayoutSceneRef {
-  return { kind: 'layout', id: m.id, name: m.name, modifiedAt: m.modifiedAt };
 }
 
 /**

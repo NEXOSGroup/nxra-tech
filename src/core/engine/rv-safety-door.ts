@@ -5,7 +5,7 @@
  * rv-safety-door.ts — Minimal demo visualization for WebSafetyDoor extras.
  *
  * Renders an amber outline around the door mesh (local), plus a floor halo
- * and a "SAFETY DOOR — OPEN" text label both delegated to the shared
+ * and a "SAFETY DOOR - OPEN" text label both delegated to the shared
  * GizmoOverlayManager (plan-154). Overlay-only — no state machine, no
  * signals, no drive observation. See plan-155 for the full minimal-scope
  * rationale and extension points.
@@ -37,7 +37,7 @@ import type { GizmoHandle } from './rv-gizmo-manager';
 import { traverseMeshes } from './rv-traverse-utils';
 
 const AMBER = 0xffa726;
-const LABEL_TEXT = 'SAFETY DOOR — OPEN';
+const LABEL_TEXT = 'SAFETY DOOR - OPEN';
 
 /** Viewer event payload for the global show-all toggle. */
 type ShowAllPayload = { show: boolean };

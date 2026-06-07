@@ -185,7 +185,7 @@ describe('RVWaitForSensor', () => {
 describe('RVDriveTo', () => {
   it('should start drive movement to destination', () => {
     const drive = makeDrive('d1', 0);
-    const step = new RVDriveTo(drive, 500, false, 'Automatic');
+    const step = new RVDriveTo(drive, 500, false);
     step.start();
 
     expect(step.state).toBe(StepState.Active);
@@ -195,7 +195,7 @@ describe('RVDriveTo', () => {
 
   it('should finish when drive reaches target', () => {
     const drive = makeDrive('d1', 0);
-    const step = new RVDriveTo(drive, 500, false, 'Automatic');
+    const step = new RVDriveTo(drive, 500, false);
     step.start();
 
     // Simulate drive reaching target
@@ -206,7 +206,7 @@ describe('RVDriveTo', () => {
 
   it('should support relative destination', () => {
     const drive = makeDrive('d1', 100);
-    const step = new RVDriveTo(drive, 200, true, 'Automatic');
+    const step = new RVDriveTo(drive, 200, true);
     step.start();
 
     expect(drive.targetPosition).toBe(300); // 100 + 200
@@ -224,14 +224,14 @@ describe('RVDriveTo', () => {
     drive.UpperLimit = 200;
     drive.initDrive();
 
-    const step = new RVDriveTo(drive, 500, false, 'Automatic');
+    const step = new RVDriveTo(drive, 500, false);
     step.start();
 
     expect(drive.targetPosition).toBe(200); // clamped to upperLimit
   });
 
   it('should skip with null drive', () => {
-    const step = new RVDriveTo(null, 100, false, 'Automatic');
+    const step = new RVDriveTo(null, 100, false);
     step.start();
     expect(step.state).toBe(StepState.Finished);
   });
@@ -553,7 +553,7 @@ describe('Progress Getter', () => {
 
   it('RVDriveTo: should reflect drive position progress', () => {
     const drive = makeDrive('dp1', 0);
-    const step = new RVDriveTo(drive, 1000, false, 'Automatic');
+    const step = new RVDriveTo(drive, 1000, false);
     expect(step.progress).toBe(0);
 
     step.start();

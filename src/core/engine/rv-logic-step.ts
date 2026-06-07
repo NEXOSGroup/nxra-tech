@@ -382,16 +382,14 @@ export class RVDriveTo extends RVLogicStep {
   drive: RVDrive | null;
   destination: number;
   relative: boolean;
-  direction: string;
   private startPosition = 0;
   private targetPosition = 0;
 
-  constructor(drive: RVDrive | null, destination: number, relative: boolean, direction: string) {
+  constructor(drive: RVDrive | null, destination: number, relative: boolean) {
     super();
     this.drive = drive;
     this.destination = destination;
     this.relative = relative;
-    this.direction = direction;
   }
 
   get progress(): number {
@@ -497,14 +495,12 @@ export class RVStartDriveTo extends RVLogicStep {
   drive: RVDrive | null;
   destination: number;
   relative: boolean;
-  direction: string;
 
-  constructor(drive: RVDrive | null, destination: number, relative: boolean, direction: string) {
+  constructor(drive: RVDrive | null, destination: number, relative: boolean) {
     super();
     this.drive = drive;
     this.destination = destination;
     this.relative = relative;
-    this.direction = direction;
   }
 
   get progress(): number {

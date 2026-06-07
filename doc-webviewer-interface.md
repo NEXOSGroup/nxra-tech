@@ -8,8 +8,8 @@ Connect realvirtual WEB to real PLCs and controllers via WebSocket or MQTT — i
 |-----------|----------|------|--------|
 | **WebSocket Realtime** | WebSocket v2 JSON | None | Implemented |
 | **ctrlX (Bosch Rexroth)** | WebSocket v2 JSON | Bearer token (SSL) | Implemented |
-| **TwinCAT HMI** | WebSocket JSON | Planned | Planned |
-| **MQTT** | MQTT over WebSocket | Username/Password | Planned |
+| **TwinCAT HMI** | WebSocket JSON | Token (`?cid=`) | Implemented |
+| **MQTT** | MQTT over WebSocket | Username/Password | Implemented |
 | **KEBA** | WebSocket + REST | HTTP token | Planned |
 
 Only **one interface** can be active at a time (mutex constraint enforced by `InterfaceManager`).
@@ -46,6 +46,8 @@ Only **one interface** can be active at a time (mutex constraint enforced by `In
 | `InterfaceManager` | `src/interfaces/interface-manager.ts` | Mutex, registry, plugin lifecycle forwarding |
 | `WebSocketRealtimeInterface` | `src/interfaces/websocket-realtime-interface.ts` | WebSocket Realtime v2 protocol |
 | `CtrlXInterface` | `src/interfaces/ctrlx-interface.ts` | Bosch ctrlX (extends WS Realtime) |
+| `MqttInterface` | `src/interfaces/mqtt-interface.ts` | MQTT over WebSocket (mqtt.js) |
+| `TwinCatHmiInterface` | `src/interfaces/twincat-hmi-interface.ts` | Beckhoff TwinCAT HMI (WebSocket JSON, `?cid=` token) |
 | `InterfaceSettings` | `src/interfaces/interface-settings-store.ts` | localStorage persistence |
 
 ## Connection Lifecycle
