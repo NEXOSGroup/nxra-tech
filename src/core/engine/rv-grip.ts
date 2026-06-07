@@ -15,6 +15,7 @@ import { debug } from './rv-debug';
 const _gripWorldPos = new Vector3();
 const _tmpVec = new Vector3();
 const _tmpQuat = new Quaternion();
+const _tmpParentQuat = new Quaternion();
 
 /**
  * RVGrip — TypeScript port of Grip.cs
@@ -166,8 +167,17 @@ export class RVGrip implements RVComponent {
           mu.node.parent?.worldToLocal(mu.node.position);
         }
         if (target.AlignRotation) {
+          // Want the MU's WORLD rotation to equal the GripTarget's after attach()
+          // (which preserves world transform). So set the MU's LOCAL quaternion to
+          // parentWorld⁻¹ ⊗ targetWorld. Copying the target's world quaternion
+          // straight into the (local) quaternion double-rotated the part whenever
+          // the MU's current parent was itself rotated.
           target.node.getWorldQuaternion(_tmpQuat);
           mu.node.quaternion.copy(_tmpQuat);
+          if (mu.node.parent) {
+            mu.node.parent.getWorldQuaternion(_tmpParentQuat);
+            mu.node.quaternion.premultiply(_tmpParentQuat.invert());
+          }
         }
         // Reparent MU to GripTarget (matches C# Grip.AutoPlace behavior).
         // If the GripTarget is on a moving object, the MU follows it.

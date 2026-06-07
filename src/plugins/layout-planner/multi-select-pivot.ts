@@ -61,6 +61,17 @@ export class MultiSelectPivot {
   ): void {
     const tc = this.deps.transformControls;
 
+    // If the selection is being torn down WHILE a gizmo drag is still in flight
+    // (e.g. ESC pressed mid-drag, which clears the selection synchronously),
+    // flush the in-progress member transforms to the store first. Otherwise
+    // tearDown() re-parents members at their dragged world pose but the store
+    // keeps the pre-drag pose — visual and persisted state silently diverge and
+    // the layout corrupts on the next save/undo/reload. Guarded by isDragging so
+    // it is a no-op for ordinary selection changes (clicks, shift-add, box-select).
+    if (tc.isDragging && this._pivot && this._members.length > 0) {
+      this.writeTransformsOnDragEnd();
+    }
+
     // Always tear down any prior pivot before deciding the new attachment.
     this.tearDown();
 

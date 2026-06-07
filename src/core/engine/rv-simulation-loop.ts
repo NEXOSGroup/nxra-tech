@@ -19,6 +19,13 @@ export interface AnimationLoopRenderer {
 
 export class SimulationLoop {
   fixedTimeStep = 1 / 60; // 16.67ms
+  /** Hard ceiling on fixed-update sub-steps executed in a single frame. The
+   *  0.1s frameTime clamp already bounds this to ~6, but an explicit cap makes
+   *  the guarantee independent of the clamp and lets a heavy frame stay
+   *  responsive instead of compounding into a catch-up spiral. Leftover
+   *  accumulated time beyond the cap is dropped (sim prefers real-time pacing
+   *  over replaying seconds of physics). */
+  maxSubSteps = 6;
   private accumulator = 0;
   private lastTime = 0;
   private running = false;
@@ -97,10 +104,15 @@ export class SimulationLoop {
       this.accumulator = 0;
     } else {
       this.accumulator += frameTime;
-      while (this.accumulator >= this.fixedTimeStep) {
+      let substeps = 0;
+      while (this.accumulator >= this.fixedTimeStep && substeps < this.maxSubSteps) {
         this.onFixedUpdate(this.fixedTimeStep);
         this.accumulator -= this.fixedTimeStep;
+        substeps++;
       }
+      // Hit the sub-step ceiling: drop the unprocessed backlog so a slow frame
+      // doesn't snowball into an ever-growing catch-up burst (real-time pacing).
+      if (this.accumulator > this.fixedTimeStep) this.accumulator = 0;
     }
 
     this.onRender(frameTime);
@@ -132,10 +144,15 @@ export class SimulationLoop {
       this.accumulator = 0;
     } else {
       this.accumulator += frameTime;
-      while (this.accumulator >= this.fixedTimeStep) {
+      let substeps = 0;
+      while (this.accumulator >= this.fixedTimeStep && substeps < this.maxSubSteps) {
         this.onFixedUpdate(this.fixedTimeStep);
         this.accumulator -= this.fixedTimeStep;
+        substeps++;
       }
+      // Hit the sub-step ceiling: drop the unprocessed backlog so a slow frame
+      // doesn't snowball into an ever-growing catch-up burst (real-time pacing).
+      if (this.accumulator > this.fixedTimeStep) this.accumulator = 0;
     }
 
     this.onRender(frameTime);

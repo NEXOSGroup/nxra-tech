@@ -454,9 +454,10 @@ export class RVTransportSurface implements RVComponent {
     return this.drive.currentSpeed;
   }
 
-  /** Is the surface actively transporting? */
+  /** Is the surface actively transporting? (either direction — a reversed belt
+   *  has negative speed but is still moving). */
   get isActive(): boolean {
-    return this.drive != null && this.speed > 0;
+    return this.drive != null && this.speed !== 0;
   }
 
   /** Authoritative current runtime value for UI display (live source of truth). */
@@ -530,8 +531,16 @@ export class RVTransportSurface implements RVComponent {
     // Linear transport: position += direction * speed * dt
     // Speed is in mm/s, Three.js positions are in meters -> divide by MM_TO_METERS
     const speedM = this.speed / MM_TO_METERS;
-    _movement.copy(this.direction).multiplyScalar(speedM * dt);
-    mu.getPosition().add(_movement);
+    if (speedM !== 0 && dt !== 0) {
+      _movement.copy(this.direction).multiplyScalar(speedM * dt);
+      // Use the explicit get-mutate-set round-trip (matching the carry path above):
+      // `getPosition()` returns the live `node.position` reference for clone MUs but
+      // a shared TEMP Vector3 for instanced MUs — mutating that temp in place would
+      // be lost on return, freezing instanced MUs on the belt. `setPosition()` writes
+      // back into the pool's Float32Array, so both backends advance correctly.
+      _scratchVecA.copy(mu.getPosition()).add(_movement);
+      mu.setPosition(_scratchVecA);
+    }
   }
 
   /** Recompute `this.direction` (world) from `this.localDirection` × current world quaternion. */

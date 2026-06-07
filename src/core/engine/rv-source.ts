@@ -581,7 +581,10 @@ export class RVSource implements RVComponent {
 
     this.spawnParent.add(clone);
 
-    const mu = new RVMovingUnit(clone, this.node.name, this.templateHalfSize.clone(), this.templateLocalCenter?.clone());
+    // Pass the template vectors by reference — AABB.fromHalfSize() copies them
+    // into its own fields and they are immutable after setTemplate(), so cloning
+    // per spawn was pure GC churn (the instanced path already passes by reference).
+    const mu = new RVMovingUnit(clone, this.node.name, this.templateHalfSize, this.templateLocalCenter ?? undefined);
     this.lastSpawnedMU = mu;
     return mu;
   }

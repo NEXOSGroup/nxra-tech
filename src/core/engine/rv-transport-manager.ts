@@ -60,6 +60,13 @@ export class RVTransportManager {
   /** Total MUs consumed by sinks since start */
   totalConsumed = 0;
 
+  /** Hard safety ceiling on simultaneously-live MUs. A source feeding a belt
+   *  with no downstream sink (or a jammed line) would otherwise spawn without
+   *  bound until the tab runs out of memory. At the cap, sources hold their
+   *  preview instead of spawning and resume automatically once MUs drain. */
+  maxLiveMUs = 5000;
+  private _muCapWarned = false;
+
   /**
    * Main update loop - called every fixed timestep (16.67ms @ 60Hz).
    *
@@ -82,8 +89,18 @@ export class RVTransportManager {
     //    Layout-Planner is active) the source instead shows a held "showcase"
     //    instance at its origin and does not spawn; the frame spawning
     //    re-enables, the held instance is released as the first real MU.
+    const atCap = this.mus.length >= this.maxLiveMUs;
+    if (atCap && !this._muCapWarned) {
+      this._muCapWarned = true;
+      console.warn(`[TransportManager] live-MU cap of ${this.maxLiveMUs} reached — sources are holding. Check for a missing/blocked Sink downstream.`);
+    } else if (!atCap && this._muCapWarned && this.mus.length < this.maxLiveMUs * 0.9) {
+      // Re-arm the warning once the line has clearly drained (hysteresis).
+      this._muCapWarned = false;
+    }
     for (const source of this.sources) {
-      const mu = source.update(dt, this.spawnEnabled, this.preferCloneMU);
+      // Pass spawning-disabled while at the cap so sources show their preview
+      // instead of spawning; they resume automatically as MUs drain.
+      const mu = source.update(dt, this.spawnEnabled && !atCap, this.preferCloneMU);
       if (mu) {
         this.mus.push(mu);
         this.totalSpawned++;
@@ -131,9 +148,16 @@ export class RVTransportManager {
         mu.lastSurfaceTickId = undefined;
       }
 
-      // Find a new surface (XZ only — Y is irrelevant for belt conveyors)
+      // Find a new surface (XZ only — Y is irrelevant for belt conveyors).
+      // Attachment is purely geometric (AABB overlap) — we do NOT skip stopped
+      // (inactive) surfaces. A stopped belt contributes `speed*dt = 0` so it
+      // moves the MU nowhere, but the MU must still ATTACH to it so it (a) gets
+      // carried by a rotating/translating parent (turntable, lift, transfer) and
+      // (b) starts moving the instant the belt's drive is started by the PLC.
+      // Skipping inactive surfaces here made attachment depend on run history
+      // (an MU could STAY on a stopped surface but never FIND one), which broke
+      // hand-off onto stationary turntables and spawning before drives start.
       for (const surface of this.surfaces) {
-        if (!surface.isActive) continue;
         if (surface.aabb.overlapsXZ(mu.aabb)) {
           mu.currentSurface = surface;
           // Note: `lastSurfaceTickId` is left as-is — usually undefined (first

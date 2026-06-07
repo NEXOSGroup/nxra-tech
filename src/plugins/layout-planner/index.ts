@@ -2403,6 +2403,10 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
             MathUtils.degToRad(comp.rotation[1]),
             MathUtils.degToRad(comp.rotation[2]),
           );
+          // Restore scale too — without this a scaled GLB placement reverted to
+          // 1:1 on reload (the splat branch above and placeFromRecord already do
+          // this; this GLB bulk branch silently dropped it).
+          clone.scale.set(comp.scale?.[0] || 1, comp.scale?.[1] || 1, comp.scale?.[2] || 1);
           if (comp.visible === false) clone.visible = false;
           syncLayoutMarkerComponents(clone, comp.visible !== false);
           if (url !== comp.glbUrl) {
@@ -3118,13 +3122,14 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
           showInfoOverlay(`Restoring ${comp.label}… (${restored + 1}/${saved.length})`);
           const clone = await this._modelCache.getOrLoad(glbUrl);
           this._addPlacedToScene(clone, comp.id, comp.label, comp.catalogId);
-          // Restore saved position (including Y) and rotation — don't re-drop
+          // Restore saved position (including Y), rotation and scale — don't re-drop
           clone.position.set(comp.position[0], comp.position[1], comp.position[2]);
           clone.rotation.set(
             MathUtils.degToRad(comp.rotation[0]),
             MathUtils.degToRad(comp.rotation[1]),
             MathUtils.degToRad(comp.rotation[2]),
           );
+          clone.scale.set(comp.scale?.[0] || 1, comp.scale?.[1] || 1, comp.scale?.[2] || 1);
           restored++;
         } catch (e) {
           console.warn(`[LayoutPlanner] Failed to restore component ${comp.label}:`, e);

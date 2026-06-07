@@ -246,7 +246,11 @@ export class RVDrive implements RVComponent {
     // because conveyor drives should not physically translate the mesh — only belt texture
     // would scroll in Unity, while the frame stays put.
     if (this.jogForward || this.jogBackward) {
-      this.currentSpeed = this.targetSpeed;
+      // Sign the speed by jog direction. TransportSurface reads `drive.currentSpeed`
+      // as its belt speed, so a negative value reverses the conveyor. Without the
+      // sign, a Backward jog moved the belt forward (matches Unity Drive.cs which
+      // sets CurrentSpeed = ±TargetSpeed). Forward wins if both bits are set.
+      this.currentSpeed = this.jogForward ? this.targetSpeed : -this.targetSpeed;
       this.isRunning = true;
       return;
     }
@@ -277,6 +281,10 @@ export class RVDrive implements RVComponent {
       } else if (this.currentSpeed < speed) {
         // Accelerate
         this.currentSpeed = Math.min(speed, this.currentSpeed + accel * dt);
+      } else if (this.currentSpeed > speed) {
+        // TargetSpeed was lowered mid-motion — ramp down toward the new limit
+        // instead of holding the old (higher) speed until the braking point.
+        this.currentSpeed = Math.max(speed, this.currentSpeed - accel * dt);
       }
     } else {
       this.currentSpeed = speed;
