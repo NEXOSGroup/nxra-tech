@@ -2,6 +2,7 @@
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
 import { describe, it, expect } from 'vitest';
+import { Object3D } from 'three';
 import {
   buildTree,
   computeAncestors,
@@ -113,6 +114,53 @@ describe('buildTree', () => {
     // A, B, C are typeless single-child wrappers but C has 2 children, so flattening
     // stops at the multi-child level. Result top-level is [leaf1, leaf2].
     expect(tree.map(n => n.name)).toEqual(['leaf1', 'leaf2']);
+  });
+
+  it('LayoutObject lazy-inject: a nested Drive node with Three.js descendants shows an expand caret', () => {
+    // Reproduces the turntable bug: Drive-Rot-Y (under a LayoutObject) had
+    // Three.js children (Transport-Z, Snap-*, ...) but no canExpandLazy flag,
+    // so the user couldn't open it to see them.
+    const turntableRoot = new Object3D(); turntableRoot.name = 'Turntable';
+    turntableRoot.userData.realvirtual = { LayoutObject: {}, } as Record<string, unknown>;
+    const driveNode = new Object3D(); driveNode.name = 'Drive-Rot-Y';
+    driveNode.userData.realvirtual = { Drive: {} } as Record<string, unknown>;
+    turntableRoot.add(driveNode);
+    const transport = new Object3D(); transport.name = 'Transport-Z'; driveNode.add(transport);
+    const snap = new Object3D(); snap.name = 'Snap-ZP-x'; driveNode.add(snap);
+
+    const mockViewer = {
+      registry: {
+        getNode: (path: string) => path === 'Turntable' ? turntableRoot : null,
+        registerNode: () => { /* no-op for the test */ },
+      },
+    } as unknown as Parameters<typeof buildTree>[2];
+
+    const tree = buildTree(
+      [info('Turntable', ['LayoutObject'])],
+      null,
+      mockViewer,
+      new Set(['Turntable']),   // LayoutObject expanded, Drive-Rot-Y NOT expanded
+    );
+
+    expect(tree).toHaveLength(1);
+    const tt = tree[0];
+    expect(tt.name).toBe('Turntable');
+    const drive = tt.children.find(c => c.name === 'Drive-Rot-Y');
+    expect(drive).toBeDefined();
+    expect(drive!.children).toEqual([]);                 // not yet injected
+    expect(drive!.canExpandLazy).toBe(true);             // but a caret should show
+  });
+
+  it('LayoutObject lazy-inject: a leaf Three.js child without descendants stays non-expandable', () => {
+    const root = new Object3D(); root.name = 'Asset';
+    root.userData.realvirtual = { LayoutObject: {} } as Record<string, unknown>;
+    const leaf = new Object3D(); leaf.name = 'Plain'; root.add(leaf);    // no own children
+    const mockViewer = {
+      registry: { getNode: (path: string) => path === 'Asset' ? root : null, registerNode: () => {} },
+    } as unknown as Parameters<typeof buildTree>[2];
+    const tree = buildTree([info('Asset', ['LayoutObject'])], null, mockViewer, new Set(['Asset']));
+    const plain = tree[0].children.find(c => c.name === 'Plain')!;
+    expect(plain.canExpandLazy).toBeUndefined();
   });
 });
 

@@ -74,6 +74,29 @@ describe('scanAndRegisterSnaps', () => {
     expect(all[0].ownerRoot).toBe(owner);
   });
 
+  it('keeps the authored flow (in/out) for non-turntable assets', () => {
+    const reg = new SnapPointRegistry();
+    scanAndRegisterSnaps(buildRollConveyorMock(), reg);
+    const all = reg.getAll();
+    expect(all.find((s) => s.dir.code === 'ZN')?.flow).toBe('in');
+    expect(all.find((s) => s.dir.code === 'ZP')?.flow).toBe('out');
+  });
+
+  it('forces ports to bidirectional for a turntable asset (axis kept, flow overridden)', () => {
+    const reg = new SnapPointRegistry();
+    const tt = new Group(); tt.name = 'Turntable-4Way';
+    const zn = new Object3D(); zn.name = 'Snap-ZN-tt'; zn.position.set(0, 0, -0.5);
+    const zp = new Object3D(); zp.name = 'Snap-ZP-tt'; zp.position.set(0, 0, 0.5);
+    tt.add(zn, zp);
+    scanAndRegisterSnaps(tt, reg, tt);
+    const all = reg.getAll();
+    // Axis preserved from the name…
+    expect(all.find((s) => s.dir.code === 'ZN')).toBeTruthy();
+    expect(all.find((s) => s.dir.code === 'ZP')).toBeTruthy();
+    // …but every port is bidirectional so any conveyor can attach either way.
+    expect(all.every((s) => s.flow === 'bidi')).toBe(true);
+  });
+
   it('records a sensible scenePath for debug', () => {
     const reg = new SnapPointRegistry();
     const root = new Group();

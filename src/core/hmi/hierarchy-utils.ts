@@ -252,8 +252,25 @@ function injectThreeJsChildren(
     // Cascade lazily — only descend when the user has expanded this child
     if (expandedPaths.has(childPath)) {
       injectThreeJsChildren(childNode, child, viewer, expandedPaths, overlay);
+    } else if (hasInjectableThreeJsChildren(child)) {
+      // Not yet expanded but real Three.js descendants exist (e.g. Drive-Rot-Y
+      // has Transport-Z, Snap-*, …) — show the expand caret so the user can
+      // open them. Without this, deeply-nested kinematics from authored GLBs
+      // are invisible until they happen to be expanded by some other code path.
+      childNode.canExpandLazy = true;
     }
   }
+}
+
+/** True when `obj` has any child that would inject into the tree (non-overlay). */
+function hasInjectableThreeJsChildren(obj: import('three').Object3D): boolean {
+  for (const c of obj.children) {
+    const ud = (c.userData ?? {}) as Record<string, unknown>;
+    if (ud._highlightOverlay || ud._isGhostOverlay) continue;
+    if (!(c.name || c.uuid)) continue;
+    return true;
+  }
+  return false;
 }
 
 /**

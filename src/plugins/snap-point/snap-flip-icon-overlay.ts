@@ -17,7 +17,7 @@
  * target so the standard `'object-click'` event fires on the icon.
  */
 
-import { CanvasTexture, Vector3, type Object3D, type Texture } from 'three';
+import { Vector3, type Object3D, type Texture } from 'three';
 import type { RVViewer } from '../../core/rv-viewer';
 import type { RVViewerPlugin } from '../../core/rv-plugin';
 import type { GizmoHandle } from '../../core/engine/rv-gizmo-manager';
@@ -26,75 +26,16 @@ import { canFlipPlacedComponent, flipPlacedComponent } from './snap-flip-service
 import { findLayoutAncestor } from '../layout-planner/layout-predicates';
 import { getSnapFlipIconsVisible } from '../../core/hmi/visual-settings-store';
 import { isContextActive } from '../../core/hmi/ui-context-store';
+import { applyScreenSpaceScale } from '../../core/engine/rv-screen-space-scale';
+import { makeSnapMarkerTexture } from './snap-marker-texture';
 
 /** `userData` flag we set on the sprite mesh to identify it on click. */
 const FLIP_ICON_MARKER = 'isFlipIcon';
 
-/**
- * Module-shared icon texture — a circular rotate arrow on a filled disc.
- *
- * Built once on first use. We paint the entire icon (background + outline +
- * arrow) directly into the canvas so it stays readable on light AND dark
- * scene backgrounds. SpriteMaterial uses `color: white` to render the
- * texture unmodulated.
- */
-let _sharedTex: CanvasTexture | null = null;
-function _getFlipIconTexture(): CanvasTexture {
-  if (_sharedTex) return _sharedTex;
-  const size = 256;                   // upscaled for crisp DPI
-  const canvas = document.createElement('canvas');
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext('2d')!;
-  ctx.clearRect(0, 0, size, size);
-
-  const cx = size / 2;
-  const cy = size / 2;
-  const discR = size * 0.46;
-
-  // 1) Solid disc background (vivid accent colour) — clearly visible on
-  //    any scene background, dark or light.
-  ctx.fillStyle = '#4fc34f';          // planner green (matches the gizmo/outline)
-  ctx.beginPath();
-  ctx.arc(cx, cy, discR, 0, Math.PI * 2);
-  ctx.fill();
-
-  // 2) White outline around the disc — adds contrast against blue/blueish
-  //    scene backgrounds.
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = size * 0.04;
-  ctx.beginPath();
-  ctx.arc(cx, cy, discR, 0, Math.PI * 2);
-  ctx.stroke();
-
-  // 3) Circular-arrow glyph in white on top of the disc.
-  const ringR = size * 0.26;
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = size * 0.085;
-  ctx.lineCap = 'round';
-  ctx.beginPath();
-  // Three-quarter arc, leaves a gap at the top-right for the arrowhead.
-  ctx.arc(cx, cy, ringR, -Math.PI * 0.3, Math.PI * 1.3);
-  ctx.stroke();
-
-  // 4) Arrowhead at the open end of the arc (filled triangle).
-  const tipAng = -Math.PI * 0.3;
-  const tipX = cx + ringR * Math.cos(tipAng);
-  const tipY = cy + ringR * Math.sin(tipAng);
-  const head = size * 0.13;
-  ctx.fillStyle = '#ffffff';
-  ctx.beginPath();
-  ctx.moveTo(tipX + head * 0.9, tipY - head * 0.2);
-  ctx.lineTo(tipX - head * 0.4, tipY - head * 0.9);
-  ctx.lineTo(tipX - head * 0.1, tipY + head * 0.5);
-  ctx.closePath();
-  ctx.fill();
-
-  const tex = new CanvasTexture(canvas);
-  tex.needsUpdate = true;
-  _sharedTex = tex;
-  return tex;
-}
+/** Constant on-screen size of the rotate icon, in pixels — matches the active
+ *  "+" snap marker (ACTIVE_MARKER_PX) so the rotate button and the hover marker
+ *  are the same (small) size. Applied per frame, like the transform gizmo. */
+const FLIP_ICON_PX = 15;
 
 /**
  * Compute the inverse of the maximum world-scale along the node's parent
@@ -133,7 +74,6 @@ export class SnapFlipIconOverlay implements RVViewerPlugin {
   /** World-space size the icon sprite was created at — used as the click
    *  hit-test radius so a click far from the icon never triggers a flip. */
   private currentIconWorldSize = 0;
-  private currentSelectionPath: string | null = null;
   private dragging = false;
   private unsubs: Array<() => void> = [];
   private _tmpScale = new Vector3();
@@ -146,7 +86,9 @@ export class SnapFlipIconOverlay implements RVViewerPlugin {
 
   init(viewer: RVViewer): void {
     this.viewer = viewer;
-    this.texture = _getFlipIconTexture();
+    // Shared marker texture with the rotate glyph — same disc/ring base as the
+    // snap-point "+" markers, tinted by the SpriteMaterial colour below.
+    this.texture = makeSnapMarkerTexture('rotate');
 
     this.unsubs.push(
       viewer.on('object-hover', (data) => {
@@ -162,16 +104,9 @@ export class SnapFlipIconOverlay implements RVViewerPlugin {
         this._maybeShow(n);
       }),
       viewer.on('object-unhover', () => this._armHideTimer()),
-      viewer.on('selection-changed', (snap) => {
-        this.currentSelectionPath = snap.primaryPath ?? null;
-        const primary = snap.primaryPath ? viewer.registry?.getNode(snap.primaryPath) ?? null : null;
-        if (primary) this._maybeShow(primary);
-        else if (!this._isSelectionStillVisible()) this._armHideTimer();
-      }),
-      viewer.on('object-blur', () => {
-        this.currentSelectionPath = null;
-        this._armHideTimer();
-      }),
+      // Hover-only: the rotate icon appears solely while the cursor is over the
+      // asset (plus the grace window to reach the icon). It no longer pins to
+      // the current selection.
       viewer.on('model-cleared', () => this._hide()),
       viewer.on('layout-drag-start', () => { this.dragging = true; this._hide(); }),
       viewer.on('layout-drag-end', () => { this.dragging = false; }),
@@ -199,15 +134,12 @@ export class SnapFlipIconOverlay implements RVViewerPlugin {
     );
   }
 
-  /** Begin the grace timer; the icon stays visible until it fires. */
+  /** Begin the grace timer; the icon stays visible until it fires. The grace
+   *  window lets the cursor travel from the asset onto the icon to click it. */
   private _armHideTimer(): void {
     this._cancelHideTimer();
-    // If the currently selected path still owns this icon, keep it pinned.
-    if (this._isSelectionStillVisible()) return;
     this.hideTimer = setTimeout(() => {
       this.hideTimer = null;
-      // Final re-check before tearing down — selection may have changed.
-      if (this._isSelectionStillVisible()) return;
       this._hide();
     }, this.GRACE_MS);
   }
@@ -219,15 +151,20 @@ export class SnapFlipIconOverlay implements RVViewerPlugin {
     }
   }
 
-  /** True if the icon currently belongs to the selected placement. */
-  private _isSelectionStillVisible(): boolean {
-    if (!this.currentRoot || !this.currentSelectionPath || !this.viewer) return false;
-    const selNode = this.viewer.registry?.getNode(this.currentSelectionPath) ?? null;
-    if (!selNode) return false;
-    return findLayoutAncestor(selNode) === this.currentRoot;
-  }
-
   onModelCleared?(): void { this._hide(); }
+
+  /** Per-frame: keep the rotate icon at a constant on-screen pixel size (like
+   *  the transform gizmo) and refresh the click hit-test radius accordingly. */
+  onRender(): void {
+    if (!this.currentHandle || !this.viewer) return;
+    if (!this.currentHandle.root.visible) return;
+    const camera = this.viewer.camera;
+    const renderer = this.viewer.renderer;
+    if (!camera || !renderer) return;
+    this.currentIconWorldSize = applyScreenSpaceScale(
+      this.currentHandle.root, FLIP_ICON_PX, camera, renderer.domElement.clientHeight,
+    );
+  }
 
   dispose(): void {
     this._hide();
@@ -298,12 +235,16 @@ export class SnapFlipIconOverlay implements RVViewerPlugin {
     // world scale, so a fixed worldSize would shrink to invisibility in
     // those scenes. We undo the inherited scale so the icon always
     // renders at its intended size in world units.
+    // Initial world size for the first frame only — `onRender` immediately
+    // rescales the icon to a constant on-screen pixel size (FLIP_ICON_PX).
     const comp = _scaleCompensation(anchorNode, this._tmpScale);
-    const worldSize = 0.18 * comp;    // ~18 cm at world scale 1
+    const worldSize = 0.10 * comp;
 
     this.currentHandle = this.viewer.gizmoManager.create(anchorNode, {
       shape: 'sprite',
-      color: 0xffffff,                 // texture is pre-coloured; keep tint white
+      // The 'rotate' texture bakes a green disc + white glyph (same look as the
+      // "+" hover marker) → render untinted.
+      color: 0xffffff,
       opacity: 1.0,
       depthTest: false,                // always-on-top
       spriteTexture: this.texture,

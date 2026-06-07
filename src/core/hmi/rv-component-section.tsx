@@ -96,6 +96,8 @@ export interface ComponentSectionProps {
   signalValue?: string | null;
   /** Optional action element rendered in the component header (e.g. "Open AAS" button). */
   headerAction?: React.ReactNode;
+  /** Optional extra content rendered inside the expanded card, below the field rows (e.g. BehaviorLiveStateSections). */
+  extraContent?: React.ReactNode;
   onFieldEdit: (fieldName: string, value: unknown) => void;
   onFieldReset: (fieldName: string) => void;
   onResetComponent: () => void;
@@ -103,7 +105,7 @@ export interface ComponentSectionProps {
   signalStore: SignalStore | null;
 }
 
-export function ComponentSection({ nodePath, componentType, data, overriddenFields, consumedOnly, signalValue, headerAction, onFieldEdit, onFieldReset, onResetComponent, viewer, signalStore }: ComponentSectionProps) {
+export function ComponentSection({ nodePath, componentType, data, overriddenFields, consumedOnly, signalValue, headerAction, extraContent, onFieldEdit, onFieldReset, onResetComponent, viewer, signalStore }: ComponentSectionProps) {
   const color = componentColor(componentType);
   const base = baseComponentType(componentType);
   const expandKey = `${nodePath}:${componentType}`;
@@ -407,6 +409,8 @@ export function ComponentSection({ nodePath, componentType, data, overriddenFiel
           ))}
         </>
       )}
+
+      {sectionExpanded && extraContent}
     </Box>
   );
 }

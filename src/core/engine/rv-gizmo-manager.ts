@@ -152,6 +152,10 @@ export interface GizmoOptions {
 /** Handle returned when a gizmo is created. */
 export interface GizmoHandle {
   readonly id: string;
+  /** The top-level gizmo Object3D (Sprite / Mesh / Group) added to the scene
+   *  graph. Exposed so callers can apply per-frame transforms (e.g. constant
+   *  screen-space sprite scaling), read-only by convention. */
+  readonly root: Object3D;
   update(opts: Partial<GizmoOptions>): void;
   setVisible(v: boolean): void;
   dispose(): void;
@@ -416,6 +420,7 @@ export class GizmoOverlayManager {
 
     const handle: GizmoHandle = {
       id,
+      root: entry.root,
       update: (partial) => this._updateEntry(entry, partial),
       setVisible: (v) => this._setEntryVisible(entry, v),
       dispose: () => this._disposeEntry(entry),

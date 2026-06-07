@@ -30,7 +30,7 @@
  * static meshes and only when the shadow map actually rebuilds.
  */
 
-import type { Mesh } from 'three';
+import type { Mesh, Object3D } from 'three';
 
 /** Subset of material properties the classifier reads. Kept loose to avoid
  *  coupling to a specific Three.js material subclass. */
@@ -64,4 +64,21 @@ export function classifyShadows(mesh: Mesh): boolean {
       (mat.opacity ?? 1) < 1
     );
   return !hasAlpha;
+}
+
+/**
+ * Apply the standard shadow policy to every mesh under `root`: opaque meshes
+ * cast (per `classifyShadows`), all meshes receive. Mirrors the per-mesh logic
+ * in `processMeshes()` so dynamically-added subtrees (library placements, MU
+ * clones, instanced pools) match the static GLB scene.
+ *
+ * @param root The subtree root to traverse and flag.
+ */
+export function applyShadowFlags(root: Object3D): void {
+  root.traverse((node) => {
+    const mesh = node as Mesh;
+    if (!mesh.isMesh) return;
+    mesh.castShadow = classifyShadows(mesh);
+    mesh.receiveShadow = true;
+  });
 }

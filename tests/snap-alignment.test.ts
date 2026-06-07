@@ -2,9 +2,12 @@
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
 import { describe, it, expect } from 'vitest';
-import { Object3D, Vector3 } from 'three';
+import { Object3D, Vector3, Quaternion } from 'three';
+import { Group, Matrix4 } from 'three';
 import {
   computeSnapAlignedWorldMatrix,
+  computeTwoSnapAlignedWorldMatrix,
+  computeSnapPivotAlignedWorldMatrix,
   flipMatrixForAxis,
 } from '../src/plugins/snap-point/snap-alignment';
 
@@ -42,6 +45,104 @@ describe('computeSnapAlignedWorldMatrix', () => {
     expect(got.x).toBeCloseTo(5, 5);
     expect(got.y).toBeCloseTo(0, 5);
     expect(got.z).toBeCloseTo(0, 5);
+  });
+
+  it('computeTwoSnapAlignedWorldMatrix auto-rotates to mate BOTH ports', () => {
+    // Two ports 2 m apart along world X.
+    const targetA = new Object3D(); targetA.position.set(0, 0, 0);
+    const targetB = new Object3D(); targetB.position.set(2, 0, 0);
+    targetA.updateMatrixWorld(true); targetB.updateMatrixWorld(true);
+
+    // A part 2 m long with snaps at local ±Z, placed off to the side and
+    // rotated arbitrarily (its snap axis does NOT yet point along X).
+    const mover = new Object3D();
+    mover.position.set(5, 0, 5);
+    mover.quaternion.setFromAxisAngle(new Vector3(0, 1, 0), (50 * Math.PI) / 180);
+    const snapA = new Object3D(); snapA.position.set(0, 0, -1);
+    const snapB = new Object3D(); snapB.position.set(0, 0, 1);
+    mover.add(snapA); mover.add(snapB);
+    mover.updateMatrixWorld(true);
+
+    const M = computeTwoSnapAlignedWorldMatrix(targetA, snapA, targetB, snapB, mover);
+    applyMatrix(mover, M);
+    snapA.updateMatrixWorld(true); snapB.updateMatrixWorld(true);
+
+    // snapA → targetA, snapB → targetB (rotation solved from the two ports).
+    const a = snapA.getWorldPosition(new Vector3());
+    const b = snapB.getWorldPosition(new Vector3());
+    expect(a.x).toBeCloseTo(0, 4); expect(a.y).toBeCloseTo(0, 4); expect(a.z).toBeCloseTo(0, 4);
+    expect(b.x).toBeCloseTo(2, 4); expect(b.y).toBeCloseTo(0, 4); expect(b.z).toBeCloseTo(0, 4);
+  });
+
+  it('snap lands on target under a TRANSFORMED parent (world→local applied)', () => {
+    // Target snap at world (0,0,0).
+    const targetRoot = new Object3D();
+    const targetSnap = new Object3D();
+    targetRoot.add(targetSnap);
+    targetRoot.updateMatrixWorld(true);
+
+    // Moving object under a translated parent (e.g. the loaded model root).
+    const parent = new Group();
+    parent.position.set(10, 0, -4);
+    const obj = new Object3D();
+    parent.add(obj);
+    const snap = new Object3D();
+    snap.position.set(0, 0, 1);
+    obj.add(snap);
+    parent.updateMatrixWorld(true);
+
+    const M = computeSnapAlignedWorldMatrix(targetSnap, obj, snap, 'Z');
+    // The fix: convert the WORLD matrix to the object's parent-local frame
+    // before assigning (what the magnetic tick / ghost path now do).
+    const local = new Matrix4().copy(parent.matrixWorld).invert().multiply(M);
+    applyMatrix(obj, local);
+    snap.updateMatrixWorld(true);
+
+    const got = snap.getWorldPosition(new Vector3());
+    expect(got.x).toBeCloseTo(0, 4);
+    expect(got.y).toBeCloseTo(0, 4);
+    expect(got.z).toBeCloseTo(0, 4);
+  });
+
+  it('computeSnapPivotAlignedWorldMatrix mates by rotating around the moving snap', () => {
+    // Target: owner at world (5,0,0) with a ZN snap at local (0,0,-0.5) → outward -Z.
+    const targetOwner = new Object3D();
+    targetOwner.position.set(5, 0, 0);
+    targetOwner.userData._layoutId = 'tgt';
+    const targetSnap = new Object3D();
+    targetSnap.position.set(0, 0, -0.5);
+    targetOwner.add(targetSnap);
+    targetOwner.updateMatrixWorld(true);
+
+    // Moving asset, arbitrarily placed + rotated, with a ZP snap (outward +Z).
+    const obj = new Object3D();
+    obj.position.set(1, 0, 1);
+    obj.quaternion.setFromAxisAngle(new Vector3(0, 1, 0), (30 * Math.PI) / 180);
+    obj.userData._layoutId = 'mov';
+    const movingSnap = new Object3D();
+    movingSnap.position.set(0, 0, 0.5);
+    obj.add(movingSnap);
+    obj.updateMatrixWorld(true);
+
+    const M = computeSnapPivotAlignedWorldMatrix(
+      targetSnap, obj, movingSnap,
+      { axis: 'Z', sign: 'N', code: 'ZN' },
+      { axis: 'Z', sign: 'P', code: 'ZP' },
+    );
+    applyMatrix(obj, M);
+    movingSnap.updateMatrixWorld(true);
+
+    // Moving snap lands exactly on the target snap.
+    const got = movingSnap.getWorldPosition(new Vector3());
+    expect(got.x).toBeCloseTo(5, 4);
+    expect(got.y).toBeCloseTo(0, 4);
+    expect(got.z).toBeCloseTo(-0.5, 4);
+
+    // Outward axis now anti-parallel to the target's (-Z) → moving outward = +Z.
+    const out = new Vector3(0, 0, 1).applyQuaternion(obj.getWorldQuaternion(new Quaternion()));
+    expect(out.x).toBeCloseTo(0, 4);
+    expect(out.y).toBeCloseTo(0, 4);
+    expect(out.z).toBeCloseTo(1, 4);
   });
 
   it('flipMatrixForAxis is identity (current convention has no flip)', () => {

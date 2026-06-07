@@ -17,79 +17,32 @@
  * raycasting so they cannot steal hover events from the underlying scene.
  */
 
-import {
-  CanvasTexture,
-  type Texture,
-} from 'three';
 import type { RVViewer } from '../../core/rv-viewer';
 import type { SnapPoint, SnapPointRegistry } from '../../core/engine/rv-snap-point-registry';
 import type { GizmoHandle } from '../../core/engine/rv-gizmo-manager';
+import { applyScreenSpaceScale } from '../../core/engine/rv-screen-space-scale';
+import { makeSnapMarkerTexture, _disposeSnapMarkerTextures } from './snap-marker-texture';
 
-const IDLE_MARKER_SIZE_M = 0.15;
-const ACTIVE_MARKER_SIZE_M = 0.22;
+/** Initial world size before the first per-frame screen-space rescale. */
+const IDLE_MARKER_SIZE_M = 0.06;
+const ACTIVE_MARKER_SIZE_M = 0.10;
+/** Constant on-screen marker size in pixels (applied per frame, like the
+ *  transform gizmo). Markers therefore keep the same size at any zoom. The
+ *  hover marker grows only slightly over idle (minimal grow). */
+const IDLE_MARKER_PX = 13;
+const ACTIVE_MARKER_PX = 15;
 const OCCUPIED_OPACITY = 0.5;
 const IDLE_OPACITY = 0.95;
 const COLOR_IDLE = 0x4fc34f;        // planner green (matches the gizmo/outline)
 const COLOR_OCCUPIED = 0x808080;    // grey for occupied
-const COLOR_ACTIVE = 0x6dfc9c;      // lighter green for hover highlight
+/** Opacity for the dragged object's own snaps (faint hint during drag). */
+const DRAG_MOVING_OPACITY = 0.4;
+/** Distinct colour for a snap that an approaching moving snap can mate with. */
+const COLOR_DRAG_MATCH = 0xffd24a;  // gold — stands out from the green moving snaps
 /** renderOrder above everything else; the active sprite sits one slot higher. */
 const RENDER_ORDER_IDLE = 2000;
 const RENDER_ORDER_ACTIVE = 2001;
 
-/** Backing canvas texture (lazy, shared across every snap-point marker). */
-let _sharedCircleTex: CanvasTexture | null = null;
-
-function _getCircleTexture(): CanvasTexture {
-  if (_sharedCircleTex) return _sharedCircleTex;
-  const size = 256;
-  const canvas = document.createElement('canvas');
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext('2d')!;
-  ctx.clearRect(0, 0, size, size);
-
-  const cx = size / 2;
-  const cy = size / 2;
-  const rOuter = size / 2 - 8;
-  const rInner = rOuter - 8;
-
-  // Filled disc — the marker reads as a solid target dot. The SpriteMaterial
-  // multiplies this white fill with its `color`, so the same texture serves
-  // every state (idle blue, occupied grey, active green).
-  ctx.beginPath();
-  ctx.arc(cx, cy, rInner, 0, Math.PI * 2);
-  ctx.fillStyle = '#ffffff';
-  ctx.fill();
-
-  // Slim outer ring at full opacity — gives a crisp silhouette against any
-  // background. Rendered on the same white pixels so material tint applies.
-  ctx.lineWidth = 8;
-  ctx.strokeStyle = '#ffffff';
-  ctx.beginPath();
-  ctx.arc(cx, cy, rOuter - 4, 0, Math.PI * 2);
-  ctx.stroke();
-
-  // Dark "+" cut into the filled disc so it stays visible against the tinted
-  // fill. Using globalCompositeOperation = 'destination-out' would erase the
-  // disc; we instead draw with a semi-opaque dark color so the icon reads
-  // regardless of the chosen marker tint.
-  const plus = rInner * 0.55;
-  ctx.lineWidth = 14;
-  ctx.lineCap = 'round';
-  ctx.strokeStyle = 'rgba(15,30,55,0.85)';
-  ctx.beginPath();
-  ctx.moveTo(cx - plus, cy);
-  ctx.lineTo(cx + plus, cy);
-  ctx.moveTo(cx, cy - plus);
-  ctx.lineTo(cx, cy + plus);
-  ctx.stroke();
-
-  const tex = new CanvasTexture(canvas);
-  tex.needsUpdate = true;
-  tex.anisotropy = 4;
-  _sharedCircleTex = tex;
-  return tex;
-}
 
 export class SnapMarkerRenderer {
   private readonly viewer: RVViewer;
@@ -106,6 +59,10 @@ export class SnapMarkerRenderer {
   private activeHandle: GizmoHandle | null = null;
   /** Snap currently shown as active — used to avoid redundant rebuilds. */
   private activeSnapId: string | null = null;
+
+  /** Snap ids whose idle handle is currently overridden by a drag hint
+   *  (faint-moving or gold-match). Reset back to idle style on clear. */
+  private _dragStyled: Set<string> = new Set();
 
   private enabled = false;
   private showAllIdle = false;
@@ -126,7 +83,7 @@ export class SnapMarkerRenderer {
     const all = this.registry.getAll();
     if (all.length === 0) return;
 
-    const tex = _getCircleTexture();
+    const tex = makeSnapMarkerTexture('none');
     const gizmoMgr = this.viewer.gizmoManager;
 
     for (const sp of all) {
@@ -209,9 +166,12 @@ export class SnapMarkerRenderer {
     }
     this.activeHandle = this.viewer.gizmoManager.create(snap.object3D, {
       shape: 'sprite',
-      color: COLOR_ACTIVE,
+      // The 'plus' texture bakes its own green disc + white glyph → render it
+      // untinted so the white glyph stays white on the green background.
+      color: 0xffffff,
       opacity: 1.0,
-      spriteTexture: _getCircleTexture(),
+      // Only the hover marker carries the "+" icon.
+      spriteTexture: makeSnapMarkerTexture('plus'),
       worldSize: ACTIVE_MARKER_SIZE_M,
       attachToNode: true,
       excludeFromRaycast: true,
@@ -231,6 +191,89 @@ export class SnapMarkerRenderer {
     }
   }
 
+  /**
+   * Per-frame: keep every visible marker at a constant on-screen pixel size
+   * (idle/drag markers at IDLE_MARKER_PX, the hover marker at ACTIVE_MARKER_PX)
+   * regardless of camera distance / zoom — same approach as the FloorGizmo.
+   * Cheap no-op when disabled or when no camera/renderer is available.
+   */
+  updateScreenSize(): void {
+    if (!this.enabled) return;
+    const camera = this.viewer.camera;
+    const renderer = this.viewer.renderer;
+    if (!camera || !renderer) return;
+    const h = renderer.domElement.clientHeight;
+    for (const handle of this.handleBySnapId.values()) {
+      if (!handle.root.visible) continue;
+      applyScreenSpaceScale(handle.root, IDLE_MARKER_PX, camera, h);
+    }
+    if (this.activeHandle?.root.visible) {
+      applyScreenSpaceScale(this.activeHandle.root, ACTIVE_MARKER_PX, camera, h);
+    }
+  }
+
+  /**
+   * Drag-time hints: show the dragged object's own snaps faintly (`movingIds`)
+   * and any approaching compatible match emphasised in gold (`targetIds`).
+   * Reuses each snap's existing idle handle (no gizmo churn). Snaps that were
+   * hinted on a previous call but are absent now are restored to their idle
+   * look. Occupied snaps are never hinted. No-op when the renderer is disabled.
+   */
+  setDragHints(movingIds: Iterable<string>, targetIds: Iterable<string>): void {
+    if (!this.enabled) {
+      if (this._dragStyled.size > 0) this.clearDragHints();
+      return;
+    }
+    const next = new Set<string>();
+    // Targets first so a target also present in movingIds keeps the gold style.
+    for (const id of targetIds) {
+      const handle = this.handleBySnapId.get(id);
+      if (!handle) continue;
+      if (this.registry.getById(id)?.occupied) continue;
+      handle.setVisible(true);
+      handle.update({ color: COLOR_DRAG_MATCH, opacity: IDLE_OPACITY });
+      next.add(id);
+    }
+    for (const id of movingIds) {
+      if (next.has(id)) continue;
+      const handle = this.handleBySnapId.get(id);
+      if (!handle) continue;
+      if (this.registry.getById(id)?.occupied) continue;
+      handle.setVisible(true);
+      handle.update({ color: COLOR_IDLE, opacity: DRAG_MOVING_OPACITY });
+      next.add(id);
+    }
+    // Restore any snap that was hinted before but isn't now.
+    for (const id of this._dragStyled) {
+      if (!next.has(id)) this._resetIdleStyle(id);
+    }
+    this._dragStyled = next;
+    this.viewer.markRenderDirty?.();
+  }
+
+  /** Clear all drag hints, restoring each affected snap to its idle look. */
+  clearDragHints(): void {
+    if (this._dragStyled.size === 0) return;
+    for (const id of this._dragStyled) this._resetIdleStyle(id);
+    this._dragStyled.clear();
+    this.viewer.markRenderDirty?.();
+  }
+
+  /** Restore a single snap's handle to its canonical idle colour/opacity and
+   *  the visibility `refreshAll` would give it (occupied / showAllIdle aware). */
+  private _resetIdleStyle(id: string): void {
+    const handle = this.handleBySnapId.get(id);
+    if (!handle) return;
+    const sp = this.registry.getById(id);
+    const occupied = sp?.occupied ?? false;
+    handle.update({
+      color: occupied ? COLOR_OCCUPIED : COLOR_IDLE,
+      opacity: occupied ? OCCUPIED_OPACITY : IDLE_OPACITY,
+    });
+    const visible = this.visibleBySnapId.get(id) ?? false;
+    handle.setVisible(this.enabled && !occupied && (this.showAllIdle || visible));
+  }
+
   /** Enable/disable the entire renderer (e.g. mode switch). */
   setEnabled(on: boolean): void {
     if (this.enabled === on) return;
@@ -240,6 +283,7 @@ export class SnapMarkerRenderer {
       // Hide everything without losing the logical visibility state.
       for (const handle of this.handleBySnapId.values()) handle.setVisible(false);
       this.hideActive();
+      this._dragStyled.clear();
     }
     this.viewer.markRenderDirty?.();
   }
@@ -303,18 +347,12 @@ export class SnapMarkerRenderer {
     this.handleBySnapId.clear();
     this.visibleBySnapId.clear();
     this.occupiedBySnapId.clear();
+    this._dragStyled.clear();
   }
 }
 
-/** Test-only helper: drop the shared texture (caller's responsibility to
- *  ensure no live renderer still references it). Module-level so test
- *  isolation can avoid texture re-use across suites. */
+/** Test-only helper: drop the shared marker textures (delegates to the shared
+ *  texture module — kept for backwards compatibility with older test imports). */
 export function _disposeSharedCircleTexture(): void {
-  _sharedCircleTex?.dispose();
-  _sharedCircleTex = null;
-}
-
-/** Test-only export so suites can assert on cached texture state. */
-export function _getSharedCircleTextureForTest(): Texture | null {
-  return _sharedCircleTex;
+  _disposeSnapMarkerTextures();
 }

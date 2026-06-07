@@ -46,6 +46,8 @@ import type { Pass } from 'three/addons/postprocessing/Pass.js';
 import type { AOMode } from './hmi/visual-settings-store';
 import { PostProcessingManager, type PostProcessingHost } from './rv-post-processing';
 import { createGroundFade, drawCheckerPattern } from './engine/rv-ground-plane';
+import { createGroundReflector, setReflectorStrength, setReflectorBlur } from './engine/rv-ground-reflector';
+import type { Reflector } from 'three/addons/objects/Reflector.js';
 import type { ToneMappingType, ShadowQuality, ProjectionType, VisualSettings } from './hmi/visual-settings-store';
 import {
   loadVisualSettings,
@@ -858,6 +860,77 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     }
   }
 
+  /**
+   * Whether the optional floor reflection is active. No-op when there is no
+   * reflector (WebGPU backend or ground disabled at construction). When on, the
+   * checker floor is made partly transparent so the mirror beneath reads
+   * through — see {@link applyReflectionBlend}.
+   */
+  get reflectionEnabled(): boolean {
+    return this._reflectionEnabled && !!this._groundReflector;
+  }
+  set reflectionEnabled(v: boolean) {
+    if (!this._groundReflector) return;
+    if (this._reflectionEnabled === v) return;
+    this._reflectionEnabled = v;
+    this._groundReflector.visible = v;
+    if (v) {
+      // Push current strength/blur to the reflector on enable. The strength/blur
+      // setters early-return when their value equals the field default, so this
+      // guarantees the reflector matches viewer state even when it was never
+      // changed away from the default.
+      setReflectorStrength(this._groundReflector, this._reflectionStrength);
+      setReflectorBlur(this._groundReflector, this._reflectionBlur);
+    }
+    this.applyReflectionBlend();
+    this._renderDirty = true;
+  }
+
+  /**
+   * Floor reflection strength (0 = none, 1 = full mirror). Drives both the
+   * mirror's reflection brightness and how transparent the checker floor
+   * becomes, so the two move together with no muddy dark-mirror artifact.
+   */
+  get reflectionStrength(): number {
+    return this._reflectionStrength;
+  }
+  set reflectionStrength(v: number) {
+    const clamped = Math.max(0, Math.min(1, v));
+    if (this._reflectionStrength === clamped) return;
+    this._reflectionStrength = clamped;
+    if (this._groundReflector) setReflectorStrength(this._groundReflector, clamped);
+    this.applyReflectionBlend();
+    this._renderDirty = true;
+  }
+
+  /**
+   * Floor reflection blur / gloss (0 = sharp mirror, 1 = soft frosted gloss).
+   * Softens the reflection with a separable Gaussian; 0 skips the blur passes.
+   */
+  get reflectionBlur(): number {
+    return this._reflectionBlur;
+  }
+  set reflectionBlur(v: number) {
+    const clamped = Math.max(0, Math.min(1, v));
+    if (this._reflectionBlur === clamped) return;
+    this._reflectionBlur = clamped;
+    if (this._groundReflector) setReflectorBlur(this._groundReflector, clamped);
+    this._renderDirty = true;
+  }
+
+  /** Apply the reflection blend to the checker floor: when reflection is on,
+   *  lower the checker opacity proportionally to strength so the mirror shows
+   *  through; when off, restore full opacity. */
+  private applyReflectionBlend(): void {
+    if (!this._groundMesh) return;
+    const mat = this._groundMesh.material as MeshStandardMaterial;
+    mat.opacity = this._reflectionEnabled
+      ? Math.max(0.4, 1 - 0.6 * this._reflectionStrength)
+      : 1;
+    mat.needsUpdate = true;
+    this._renderDirty = true;
+  }
+
 
   /**
    * Cancel any in-progress camera animation immediately.
@@ -1354,6 +1427,18 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       this.sceneFixtures.add(ground);
       this._groundMesh = ground;
       this._checkerCanvas = canvas;
+
+      // Optional floor reflection (WebGL-only). A Reflector mirror sits just
+      // beneath the checker plane; it stays hidden until reflectionEnabled is
+      // set. Sized/positioned in lockstep with the checker in loadModel().
+      const reflector = createGroundReflector(this.isWebGPU, ground);
+      if (reflector) {
+        reflector.position.y = -0.002; // a hair below the checker to avoid z-fighting
+        reflector.userData._rvGroundReflector = true;
+        this.scene.add(reflector);
+        this.sceneFixtures.add(reflector);
+        this._groundReflector = reflector;
+      }
     }
 
     // --- Renderer-dependent init ---
@@ -1985,6 +2070,13 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       const checkerMap = ((this._groundMesh as Mesh).material as MeshStandardMaterial).map;
       if (checkerMap) {
         checkerMap.repeat.set(groundSize / metersPerRepeat, groundSize / metersPerRepeat);
+      }
+
+      // Keep the reflection mirror locked to the checker disc (same scale and
+      // X/Z position; stays a hair below to avoid z-fighting).
+      if (this._groundReflector) {
+        this._groundReflector.scale.set(groundSize / 200, groundSize / 200, 1);
+        this._groundReflector.position.set(center.x, -0.002, center.z);
       }
     }
 
@@ -2782,6 +2874,11 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this.groundBrightness = settings.groundBrightness ?? 1.0;
     this.backgroundBrightness = settings.backgroundBrightness ?? 1.0;
     this.checkerContrast = settings.checkerContrast ?? 1.0;
+    // Strength/blur before enabled so the checker blend + mirror are configured
+    // once with the right values when reflection is switched on.
+    this.reflectionStrength = settings.reflectionStrength ?? 0.8;
+    this.reflectionBlur = settings.reflectionBlur ?? 1.0;
+    this.reflectionEnabled = settings.reflectionEnabled ?? false;
 
     // 11. Navigation sensitivity (OrbitControls)
     if (this.controls) {
@@ -3093,6 +3190,14 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   private _groundBrightness = 1.0;
   /** Floor base color (default white). */
   private _groundColor = new Color(0xffffff);
+  /** Optional floor reflection mirror (WebGL-only; null on WebGPU / no ground). */
+  private _groundReflector: Reflector | null = null;
+  /** Whether the floor reflection is currently enabled. */
+  private _reflectionEnabled = false;
+  /** Floor reflection strength (0 = none, 1 = full mirror). */
+  private _reflectionStrength = 0.8;
+  /** Floor reflection blur / gloss (0 = sharp mirror, 1 = soft frosted gloss). */
+  private _reflectionBlur = 1.0;
 
   // Isolate-overlay and desaturation pass state now live in PostProcessingManager.
 

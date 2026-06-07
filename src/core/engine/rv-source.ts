@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
-import { Object3D, Vector3, Quaternion, MeshBasicMaterial, type Material, type Mesh, type Sprite, type Texture } from 'three';
+import { Object3D, Mesh, Vector3, Quaternion, MeshBasicMaterial, type Sprite, type Texture } from 'three';
 import {
   RVMovingUnit, InstancedMovingUnit, MUInstancePool,
   computeTemplateAABBInfo, analyzeTemplate,
@@ -13,6 +13,7 @@ import { NodeRegistry } from './rv-node-registry';
 import { debug } from './rv-debug';
 import { MM_TO_METERS } from './rv-constants';
 import { buildSourceMarker } from './rv-source-marker';
+import { applyShadowFlags } from './rv-mesh-classifier';
 
 // Pre-allocated temp vectors (no GC in hot path)
 const _sourcePos = new Vector3();
@@ -43,11 +44,15 @@ function stripComponentMetadata(obj: Object3D): void {
   });
 }
 
-// Shared white transparent material for the always-visible source ghost. The
-// ghost previews the spawned MU at the source position; a flat translucent
-// white reads clearly as a "template preview" distinct from the solid spawned
-// MUs. Shared across all sources (read-only) — disposed never (module-lived).
-const _sourceGhostMaterial = new MeshBasicMaterial({
+// Shared white transparent OVERLAY material for the always-visible source
+// ghost. The ghost is a clone of the real source visual (keeping its real
+// materials); on top of every ghost mesh we add a translucent white shell
+// using this material so the part stays recognizable but reads clearly as a
+// "template preview" distinct from the solid spawned MUs. Shared across all
+// sources (read-only) — never disposed (module-lived). `depthWrite:false`
+// keeps it from occluding, the high `renderOrder` set on each overlay mesh
+// draws it after the real ghost surface.
+const _sourceGhostOverlayMaterial = new MeshBasicMaterial({
   color: 0xffffff,
   transparent: true,
   opacity: 0.3,
@@ -114,17 +119,20 @@ export class RVSource implements RVComponent {
   /** Raw GLB extras for computing spawn config in init() */
   rawExtras: Record<string, unknown> | null = null;
 
-  /** Always-visible white-transparent preview of the spawned MU, shown at the
-   *  source position. Lets the user always see (and select / place in the
-   *  Layout-Planner) the source, even before the first MU spawns and while the
-   *  simulation runs. Built in `setTemplate`, removed in `dispose`. */
+  /** Always-visible ghost CLONE of the spawned MU (separate-template case),
+   *  shown at the source position: a clone of the MU template keeping its real
+   *  materials, with translucent white overlay shells. Lets the user always see
+   *  (and select / place in the Layout-Planner) the source, even before the
+   *  first MU spawns and while the simulation runs. The real source/template
+   *  materials are NEVER mutated. Null for the self-template case (which adds
+   *  overlay shells directly onto the source node — see `_overlayMeshes`).
+   *  Built in `setTemplate`, removed in `dispose`. */
   private _ghostNode: Object3D | null = null;
 
-  /** When the source IS its own MU template (`sourceIsTemplate`), the source
-   *  node is rendered in place as a white ghost. We keep the original mesh
-   *  materials (in subtree-traversal order) so spawned clones restore the real
-   *  look. Null for the separate-template case (which uses `_ghostNode`). */
-  private _selfGhostOriginalMaterials: Array<Material | Material[]> | null = null;
+  /** White overlay-shell meshes added on top of real meshes for the ghost look
+   *  (self-template: on the source node; separate-template: on the ghost
+   *  clone). Detached on dispose. Shared geometry/material are NOT disposed. */
+  private _overlayMeshes: Mesh[] = [];
 
   /** Showcase instance: a real-material preview MU held at the source origin
    *  while spawning is disabled (planner). Rendered ALONGSIDE the ghost. When
@@ -171,6 +179,25 @@ export class RVSource implements RVComponent {
   }
 
   /**
+   * Find the MU template inside the source's own asset subtree by node name,
+   * skipping the source's own ghost / overlay / preview / marker children. The
+   * template ref (`muName`) may be a bare name or a relative path — match on the
+   * last segment. Returns null when no in-subtree match exists (caller then
+   * falls back to the global registry).
+   */
+  private _resolveTemplateInSubtree(root: Object3D, muName: string): Object3D | null {
+    const wanted = muName.includes('/') ? muName.slice(muName.lastIndexOf('/') + 1) : muName;
+    let found: Object3D | null = null;
+    root.traverse((child) => {
+      if (found) return;
+      const ud = child.userData;
+      if (ud?._isSourceGhost || ud?._isGhostOverlay || ud?._isSourcePreview || ud?._isSourceMarker) return;
+      if (child.name === wanted || child.name === muName) found = child;
+    });
+    return found;
+  }
+
+  /**
    * Compute spawn config, resolve template, and register with transport manager.
    * Called after applySchema + resolveComponentRefs.
    */
@@ -187,17 +214,25 @@ export class RVSource implements RVComponent {
     }
     this.spawnParent = this._resolveSpawnParent(context.root);
 
-    // Find MU template via registry (path-based, safe)
+    // Find MU template.
     let template: Object3D | null = null;
     if (this.sourceIsTemplate) {
       template = this.node;
       debug('loader', `Source: ${this.node.name} mode=${this.spawnMode} interval=${this.spawnInterval}s template=SELF`);
     } else if (this.muName) {
-      template = context.registry.getNode(this.muName);
+      // A source's MU template ALWAYS lives within its own asset subtree, so
+      // search the placed clone's subtree (context.root) first. This avoids the
+      // global registry's name-suffix fallback, which would otherwise resolve a
+      // 2nd placement's template to the FIRST source's (hidden, ghosted) node
+      // when both assets share internal node names. Fall back to the global
+      // registry only when the subtree search comes up empty (e.g. the main
+      // loadGLB path where context.root is the whole model root).
+      template = this._resolveTemplateInSubtree(context.root, this.muName)
+        ?? context.registry.getNode(this.muName);
       if (template) {
         debug('loader', `Source: ${this.node.name} mode=${this.spawnMode} interval=${this.spawnInterval}s template="${this.muName}"`);
       } else {
-        console.warn(`  Source: ${this.node.name} - MU template "${this.muName}" not found in registry`);
+        console.warn(`  Source: ${this.node.name} - MU template "${this.muName}" not found`);
       }
     } else {
       console.warn(`  Source: ${this.node.name} - no MU template configured`);
@@ -206,9 +241,8 @@ export class RVSource implements RVComponent {
     // If the resolved MU template IS the source node itself (e.g. a placed
     // source whose `ThisObjectAsMU` path resolves back to its own node but did
     // not match the name-based `sourceIsTemplate` heuristic), treat it as
-    // self-template. Otherwise `_buildGhost` would attach a `_isSourceGhost`
-    // child that `spawn()` would clone into every MU (a ghost moving with the
-    // instance), and the source node would be hidden instead of ghost-rendered.
+    // self-template so the real meshes get hidden behind the ghost (rather than
+    // the source node being hidden as a separate template).
     if (template === this.node) this.sourceIsTemplate = true;
 
     if (template) {
@@ -245,7 +279,11 @@ export class RVSource implements RVComponent {
 
     // ThisObjectAsMU is serialized as a relative path string (or null/empty if self)
     const templateRef = this.ThisObjectAsMU;
-    const nodeName = this.node.name;
+    // Use the ORIGINAL (pre-rename) node name when available. The Layout-Planner
+    // renames placed clones (`Foo` → `Foo_2`) BEFORE this runs, which would
+    // otherwise break the `templateRef === nodeName` self-reference test for the
+    // 2nd+ placement and mis-classify a self-template source as separate-template.
+    const nodeName = (this.node.userData._originalName as string) ?? this.node.name;
     this.sourceIsTemplate = !templateRef || templateRef === '' ||
       templateRef === nodeName || templateRef.endsWith('/' + nodeName);
     this.muName = this.sourceIsTemplate ? nodeName : templateRef;
@@ -278,59 +316,31 @@ export class RVSource implements RVComponent {
     }
 
     if (this.sourceIsTemplate) {
-      // The source node IS the MU template. Render it in place as a white
-      // ghost (kept visible) so the user always sees the source; spawned
-      // clones/instances restore the real materials.
-      this._ghostifySelf(template);
+      // The source node IS the MU template. The source stays visible as its
+      // own real-material visual; we just add translucent white overlay shells
+      // on top of its meshes so it reads as a "ghost"/template preview. No
+      // clone, no hide — avoids the Three.js visibility cascade that would hide
+      // a child-ghost when the source node is itself a Mesh. Spawned clones
+      // strip the overlay shells (see `_buildRealClone`) so MUs render clean.
+      this._addOverlayShells(this.node);
     } else {
-      // Separate template: hide it and show an always-visible white ghost clone
-      // under the source — a clickable, draggable 3D preview even before the
-      // first MU spawns.
+      // Separate template: hide it and show an always-visible CLONE of the MU
+      // (real materials) with white overlay shells, parented to the source so
+      // it tracks the source's movement. Plus the floor marker.
+      this._buildGhostClone(template);
       template.visible = false;
-      this._buildGhost(template);
-      // Always-visible floor marker (ring + label) under the source.
       this._buildMarker();
     }
   }
 
   /**
-   * Render the source node itself as a white-transparent ghost (used when the
-   * source IS its own MU template). Keeps the node visible and stores the
-   * original materials so spawned clones can restore the real look. The
-   * instancing pool (built before this) already captured the real material.
+   * Build the always-visible source ghost CLONE (separate-template case): clone
+   * the MU template (keeping real materials), strip component/layout metadata,
+   * add white overlay shells, and parent it to `this.node`. The real template
+   * materials are never mutated — spawned MUs share them.
    */
-  private _ghostifySelf(node: Object3D): void {
-    if (this._selfGhostOriginalMaterials) return; // idempotent
-    const originals: Array<Material | Material[]> = [];
-    node.traverse((child) => {
-      const mesh = child as Mesh;
-      if (mesh.isMesh) {
-        originals.push(mesh.material);
-        mesh.material = _sourceGhostMaterial;
-      }
-    });
-    this._selfGhostOriginalMaterials = originals;
-    node.visible = true; // keep the source visible as its own ghost preview
-  }
-
-  /**
-   * Clone the template and pin a placeholder at the source's position. The
-   * placeholder is parented to `this.node` so it tracks any movement of the
-   * source (e.g. dragging a placed pallet around in the Layout-Planner).
-   * Materials are NOT cloned — `Object3D.clone()` shares them with the
-   * template, which is fine because we only toggle `.visible`, never opacity.
-   *
-   * Initial visibility is `false` (hidden) because the viewer boots with the
-   * simulation running. Visibility is updated reactively via the
-   * `'simulation-pause-changed'` subscription installed in `init()`.
-   */
-  private _buildGhost(template: Object3D): void {
+  private _buildGhostClone(template: Object3D): void {
     if (this._ghostNode) return; // already built (e.g. setTemplate called twice)
-
-    // Skip when source IS the template — `this.muTemplate === this.node`
-    // means every clone produced by `spawn()` would include the ghost as a
-    // sub-child, so we just skip for that rarer setup.
-    if (this.sourceIsTemplate) return;
 
     const ghost = template.clone();
     // The clone inherited the template's rv-extras / layout metadata via
@@ -338,7 +348,6 @@ export class RVSource implements RVComponent {
     // becomes a live (recursively-spawning) Source when the subtree is rescanned.
     stripComponentMetadata(ghost);
     ghost.name = `${template.name}_ghost`;
-    ghost.userData._isSourceGhost = true;
     // Reset transform — the clone inherits the template's world position,
     // but we want it anchored at the source's local origin (transform-wise
     // it becomes a direct child of `this.node`).
@@ -346,34 +355,66 @@ export class RVSource implements RVComponent {
     ghost.rotation.set(0, 0, 0);
     ghost.scale.set(1, 1, 1);
 
-    // Force every descendant visible-flag to true (the template was hidden,
-    // and its traversal flags carry over via clone), and swap each mesh to the
-    // shared white-transparent ghost material so the source always shows as a
-    // translucent preview. We reassign the clone's material reference only —
-    // the template (and the materials the real spawned MUs share) are untouched.
+    // Force every descendant visible (the template was hidden, and its
+    // visibility flags carry over via clone()) and tag the subtree.
     ghost.traverse((child) => {
       child.visible = true;
       child.userData._isSourceGhost = true;
-      const mesh = child as Mesh;
-      if (mesh.isMesh) mesh.material = _sourceGhostMaterial;
     });
-
-    // Always visible — the source ghost is a constant preview of the spawned
-    // MU at the source position (during play, pause, and planner placement).
     ghost.visible = true;
+
+    // Overlay shells on top of the clone's meshes.
+    this._addOverlayShells(ghost);
 
     this.node.add(ghost);
     this._ghostNode = ghost;
   }
 
-  /** Toggle the ghost's visibility. Called from the pause-event subscriber. */
+  /**
+   * Add translucent white overlay shells on top of every real mesh under
+   * `root`. Each overlay shares the mesh's geometry by reference (never
+   * disposed here) and the module-lived white material, is parented to the
+   * mesh (identity local transform) so it co-moves exactly, and is tagged
+   * `_isGhostOverlay` + `_isSourceGhost` (so it's excluded from raycasting and
+   * stripped from spawned MU clones). Skips meshes that already carry an
+   * overlay child to stay idempotent.
+   */
+  private _addOverlayShells(root: Object3D): void {
+    // Snapshot the real meshes first — we mutate the tree by adding overlays.
+    // Skip overlay shells themselves and the floor-marker / preview helpers;
+    // ghost-clone meshes (tagged `_isSourceGhost`) DO need a shell.
+    const meshes: Mesh[] = [];
+    root.traverse((child) => {
+      const ud = child.userData;
+      if (ud._isGhostOverlay || ud._isSourceMarker || ud._isSourcePreview) return;
+      const mesh = child as Mesh;
+      if (mesh.isMesh) meshes.push(mesh);
+    });
+
+    for (const mesh of meshes) {
+      // Don't double-shell a mesh that already has an overlay child.
+      if (mesh.children.some((c) => c.userData._isGhostOverlay)) continue;
+      const overlay = new Mesh(mesh.geometry, _sourceGhostOverlayMaterial);
+      overlay.name = `${mesh.name}_ghostOverlay`;
+      overlay.userData._isGhostOverlay = true;
+      overlay.userData._isSourceGhost = true;
+      overlay.renderOrder = (mesh.renderOrder ?? 0) + 1;
+      overlay.castShadow = false;
+      overlay.receiveShadow = false;
+      mesh.add(overlay);
+      this._overlayMeshes.push(overlay);
+    }
+  }
+
+  /** Toggle the ghost-clone's visibility (separate-template case only; no-op
+   *  for self-template sources, whose ghost is in-place overlay shells). */
   setGhostVisible(visible: boolean): void {
     if (this._ghostNode) this._ghostNode.visible = visible;
   }
 
   /**
    * Build the always-visible floor marker (ring + label) under the source.
-   * Same lifecycle rules as `_buildGhost`:
+   * Same lifecycle rules as `_buildGhostClone`:
    *  - Idempotency guard — second call is a no-op.
    *  - Skip when `sourceIsTemplate=true` (would otherwise be cloned into
    *    every spawned MU and pollute the scene).
@@ -434,6 +475,11 @@ export class RVSource implements RVComponent {
       if (this._ghostNode.parent) this._ghostNode.parent.remove(this._ghostNode);
       this._ghostNode = null;
     }
+    // Detach overlay shells (self-template: from the source node; separate-
+    // template clone is already removed with `_ghostNode` above). Shared
+    // geometry + module-lived material are NOT disposed.
+    for (const overlay of this._overlayMeshes) overlay.parent?.remove(overlay);
+    this._overlayMeshes = [];
     // Marker disposal — frees ring geometry/material + label texture/material
     // and detaches the marker node from `this.node`.
     if (this._markerDispose) {
@@ -455,8 +501,11 @@ export class RVSource implements RVComponent {
    *   does not spawn; instead it shows a held "showcase" preview instance at
    *   its origin (alongside the ghost). The frame spawning flips back to true,
    *   the held preview is released as the first real spawn.
+   * @param forceClone  When true, spawn CLONE MUs (real Object3Ds) even if the
+   *   template could be instanced — the Layout-Planner needs a real node per MU
+   *   to register it as a selectable scene object.
    */
-  update(dt: number, spawningEnabled = true): (RVMovingUnit | InstancedMovingUnit) | null {
+  update(dt: number, spawningEnabled = true, forceClone = false): (RVMovingUnit | InstancedMovingUnit) | null {
     if (!this.isOwner) return null; // Server is authority for MU lifecycle
     if (!this.muTemplate || !this.spawnParent) return null;
 
@@ -471,20 +520,20 @@ export class RVSource implements RVComponent {
     if (this._previewInstance) {
       this._disposePreview();
       this.timer = 0;
-      return this.spawn();
+      return this.spawn(forceClone);
     }
 
     if (this.spawnMode === 'Interval') {
       this.timer += dt;
       if (this.timer >= this.spawnInterval) {
         this.timer -= this.spawnInterval;
-        return this.spawn();
+        return this.spawn(forceClone);
       }
     } else if (this.spawnMode === 'Distance') {
       // Distance mode: spawn when previous MU has moved spawnDistance mm away
       // (or immediately if no MU has been spawned yet)
       if (!this.lastSpawnedMU || this.lastSpawnedMU.markedForRemoval) {
-        return this.spawn();
+        return this.spawn(forceClone);
       }
       // Measure distance from source to last spawned MU (in meters)
       this.node.getWorldPosition(_sourcePos);
@@ -492,7 +541,7 @@ export class RVSource implements RVComponent {
       const distM = _sourcePos.distanceTo(_lastMUPos);
       const distMM = distM * MM_TO_METERS;
       if (distMM >= this.spawnDistance) {
-        return this.spawn();
+        return this.spawn(forceClone);
       }
     }
     // OnSignal mode not implemented for PoC
@@ -500,12 +549,14 @@ export class RVSource implements RVComponent {
     return null;
   }
 
-  /** Create a new MU at this source's position (clone or instanced) */
-  private spawn(): (RVMovingUnit | InstancedMovingUnit) | null {
+  /** Create a new MU at this source's position (clone or instanced). When
+   *  `forceClone` is true the instanced path is skipped so the MU has a real
+   *  per-instance node (used by the Layout-Planner for selection). */
+  private spawn(forceClone = false): (RVMovingUnit | InstancedMovingUnit) | null {
     if (!this.muTemplate || !this.spawnParent || !this.templateHalfSize) return null;
 
     // ── Instanced path ──
-    if (this.useInstancing && this.pool) {
+    if (this.useInstancing && this.pool && !forceClone) {
       // Add pool's InstancedMesh to scene if not already added
       if (!this.pool.instancedMesh.parent) {
         this.spawnParent.add(this.pool.instancedMesh);
@@ -536,24 +587,24 @@ export class RVSource implements RVComponent {
   }
 
   /**
-   * Clone the MU template into a fully-visible, real-material subtree. When the
-   * source node is its own white ghost (`sourceIsTemplate`), the captured
-   * original materials are restored (subtree-traversal order matches). Shared
-   * by `spawn()` (clone path) and the showcase preview.
+   * Clone the MU template into a fully-visible, real-material subtree. The real
+   * template materials are never mutated (the ghost is a separate clone with an
+   * overlay shell), so clones simply inherit the real materials by reference —
+   * no restore step is needed. Shared by `spawn()` (clone path) and the
+   * showcase preview.
    */
   private _buildRealClone(): Object3D {
     const clone = this.muTemplate!.clone();
 
-    // Strip any editor-only ghost / showcase-preview subtrees that were cloned
-    // in. This happens when the MU template subtree overlaps the source node
-    // that carries them — e.g. a (placed) source whose `ThisObjectAsMU` path
-    // resolves back to the source node but isn't detected as `sourceIsTemplate`,
-    // so `_buildGhost` attached a `_isSourceGhost` child. A real spawned MU must
-    // never contain a ghost/preview, so remove them BEFORE restoring materials
-    // (keeps the restore index aligned with the captured originals).
+    // Strip any editor-only ghost / overlay / showcase-preview subtrees that
+    // were cloned in. This happens when the MU template subtree overlaps the
+    // source node that carries them (self-template: the ghost + overlay shells
+    // live under `this.node`, which IS the template). A real spawned MU must
+    // never contain a ghost/overlay/preview.
     const strip: Object3D[] = [];
     clone.traverse((child) => {
-      if (child.userData?._isSourceGhost || child.userData?._isSourcePreview) strip.push(child);
+      const ud = child.userData;
+      if (ud?._isSourceGhost || ud?._isGhostOverlay || ud?._isSourcePreview) strip.push(child);
     });
     for (const n of strip) n.parent?.remove(n);
 
@@ -563,19 +614,15 @@ export class RVSource implements RVComponent {
     // definition, or `processExtras` would turn it into a recursive Source.
     stripComponentMetadata(clone);
 
+    // Force everything visible — for self-template sources the real meshes were
+    // hidden (`_hideRealMeshes`) and that flag carries over via clone().
     clone.visible = true;
-    const restore = this.sourceIsTemplate ? this._selfGhostOriginalMaterials : null;
-    let matIdx = 0;
-    clone.traverse((child) => {
-      child.visible = true;
-      if (restore) {
-        const mesh = child as Mesh;
-        if (mesh.isMesh) {
-          const orig = restore[matIdx++];
-          if (orig) mesh.material = orig;
-        }
-      }
-    });
+    clone.traverse((child) => { child.visible = true; });
+
+    // Apply the standard shadow policy so MU clones cast/receive shadows like
+    // the static scene, independent of how the template entered the scene (a
+    // library-placed source template could otherwise carry stale flags).
+    applyShadowFlags(clone);
     return clone;
   }
 

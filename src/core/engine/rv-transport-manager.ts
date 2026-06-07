@@ -2,7 +2,7 @@
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
 import type { Scene } from 'three';
-import type { RVTransportSurface } from './rv-transport-surface';
+import { RVTransportSurface } from './rv-transport-surface';
 import type { RVSensor } from './rv-sensor';
 import type { RVSource } from './rv-source';
 import type { RVSink } from './rv-sink';
@@ -27,14 +27,20 @@ export class RVTransportManager {
   mus: (RVMovingUnit | InstancedMovingUnit)[] = [];
   scene: Scene | null = null;
 
-  /** Whether surface AABBs have been computed at least once (they are static). */
-  private _surfaceAabbInitialized = false;
+  /** Monotonic tick counter shared with RVTransportSurface for per-tick world-direction refresh. */
+  private _tickId = 0;
 
   /** When false, sources do NOT spawn new MUs (the rest of the simulation —
    *  transport, sensors, sinks — keeps running). The Layout-Planner sets this
    *  false while active so editing/dragging sources doesn't scatter spawned
    *  instances; the always-visible source ghost represents the source instead. */
   spawnEnabled = true;
+
+  /** When true, sources spawn CLONE MUs (real Object3Ds) even if their template
+   *  could be instanced. The Layout-Planner sets this while active so spawned
+   *  MUs have a real node to register as a selectable scene object (instanced
+   *  MUs have no per-instance Object3D). Reset to false on planner exit. */
+  preferCloneMU = false;
 
   /**
    * Enable/disable source spawning. When disabling, each source immediately
@@ -67,12 +73,17 @@ export class RVTransportManager {
    * 7. Remove marked MUs (reverse iteration, swap-and-pop)
    */
   update(dt: number): void {
+    // Bump the global transport tick id — RVTransportSurface uses this to
+    // lazily refresh its world-space direction once per tick (so MUs follow
+    // the belt even when a parent drive rotates the platform).
+    RVTransportSurface.beginTick(++this._tickId);
+
     // 1. Sources: spawn new MUs. When spawning is disabled (e.g. the
     //    Layout-Planner is active) the source instead shows a held "showcase"
     //    instance at its origin and does not spawn; the frame spawning
     //    re-enables, the held instance is released as the first real MU.
     for (const source of this.sources) {
-      const mu = source.update(dt, this.spawnEnabled);
+      const mu = source.update(dt, this.spawnEnabled, this.preferCloneMU);
       if (mu) {
         this.mus.push(mu);
         this.totalSpawned++;
@@ -80,29 +91,44 @@ export class RVTransportManager {
       }
     }
 
-    // 2. Update surface AABBs (skip for static surfaces — their mesh never moves)
-    if (!this._surfaceAabbInitialized) {
-      for (const surface of this.surfaces) {
-        surface.updateAABB();
-      }
-      this._surfaceAabbInitialized = true;
+    // 2. Update surface AABBs every tick. Surfaces under a rotating parent
+    //    (e.g. a turntable platform's belt orbiting Drive-Rot-Y) move with
+    //    each fixed step — their AABB centre tracks the parent rotation only
+    //    if `updateAABB` is called per tick. The cost is one getWorldPosition
+    //    + one quaternion multiply per surface per tick — negligible.
+    for (const surface of this.surfaces) {
+      surface.updateAABB();
     }
 
     // 3. Transport: each MU is moved by exactly one surface (currentSurface)
     //    Skip gripped MUs — they move with the grip node via Three.js parent chain
+    const tickId = RVTransportSurface.currentTickId;
     for (const mu of this.mus) {
       if (mu.markedForRemoval) continue;
       if (!mu.isInstanced && (mu as RVMovingUnit).isGripped) continue;
 
-      // Check if currentSurface still overlaps (XZ only — MUs sit ON surfaces)
+      // Check if currentSurface still overlaps (XZ only — MUs sit ON surfaces).
+      // Stay attached as long as the MU spatially overlaps the surface — even
+      // if the belt is currently stopped (drive.speed === 0 → !isActive).
+      // This is critical for turntables: the platform belt is STOPPED during
+      // rotation, but the MU must remain attached so `transportMU` keeps
+      // running its per-tick matrix-delta carry and the part orbits with the
+      // platform. `transportMU` advances by `speed × dt`, so a stopped belt
+      // doesn't move the part — it only carries it through parent rotation.
       if (mu.currentSurface) {
         const curr = mu.currentSurface;
-        if (curr.isActive && curr.aabb.overlapsXZ(mu.aabb)) {
+        if (curr.aabb.overlapsXZ(mu.aabb)) {
           curr.transportMU(mu, dt);
+          // Tag the MU as on-surface for this tick — `transportMU` reads this
+          // on the NEXT tick to decide whether to carry the MU along with a
+          // rotating platform. We tag AFTER the call so the current tick's
+          // check (`=== tickId - 1`) sees the previous tick's value.
+          mu.lastSurfaceTickId = tickId;
           continue;
         }
         // Left the current surface
         mu.currentSurface = null;
+        mu.lastSurfaceTickId = undefined;
       }
 
       // Find a new surface (XZ only — Y is irrelevant for belt conveyors)
@@ -110,7 +136,12 @@ export class RVTransportManager {
         if (!surface.isActive) continue;
         if (surface.aabb.overlapsXZ(mu.aabb)) {
           mu.currentSurface = surface;
+          // Note: `lastSurfaceTickId` is left as-is — usually undefined (first
+          // ever) or stale by ≥2 ticks. Either way `transportMU`'s carry
+          // guard (`=== tickId - 1`) fails on this entry tick, which is what
+          // we want — no phantom rotation snap on the tick the MU lands.
           surface.transportMU(mu, dt);
+          mu.lastSurfaceTickId = tickId;
           debug('transport', `MU "${mu.getName()}" entered surface "${surface.node.name}"`);
           break;
         }
@@ -169,6 +200,38 @@ export class RVTransportManager {
     this.updatePoolMatrices();
   }
 
+  /**
+   * Immediately remove a single MU from the simulation (full cleanup: grip
+   * notification, gripTarget release, dispose, list removal). Unlike setting
+   * `markedForRemoval`, this works even when the sim is PAUSED (the removal
+   * loop in `update()` never runs while paused) — used by the Layout-Planner
+   * to delete a selected MU on demand. Idempotent: a no-op if the MU isn't
+   * currently tracked.
+   */
+  removeMU(mu: RVMovingUnit | InstancedMovingUnit): void {
+    const idx = this.mus.indexOf(mu);
+    if (idx < 0) return;
+
+    if (!mu.isInstanced) {
+      for (const grip of this.grips) {
+        grip.onMUDisposed(mu as RVMovingUnit);
+      }
+    }
+    for (const target of this.gripTargets) {
+      if (target.occupiedBy === mu) target.clearOccupied();
+    }
+    mu.dispose();
+    this.totalConsumed++;
+
+    // Swap-and-pop (matches the update() removal loop).
+    this.mus[idx] = this.mus[this.mus.length - 1];
+    this.mus.pop();
+
+    // Refresh instanced pool matrices so a released slot stops rendering at
+    // its stale position right away (clone removal already detached the node).
+    if (mu.isInstanced) this.updatePoolMatrices();
+  }
+
   /** Get counts for stats display */
   get stats() {
     let occupiedSensors = 0;
@@ -224,7 +287,6 @@ export class RVTransportManager {
     this.mus.length = 0;
     this.totalSpawned = 0;
     this.totalConsumed = 0;
-    this._surfaceAabbInitialized = false;
     for (const sensor of this.sensors) {
       sensor.occupied = false;
       sensor.occupiedMU = null;

@@ -2,8 +2,8 @@
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
 import { describe, it, expect } from 'vitest';
-import { Mesh, BoxGeometry, MeshStandardMaterial } from 'three';
-import { classifyShadows } from '../src/core/engine/rv-mesh-classifier';
+import { Mesh, Group, Object3D, BoxGeometry, MeshStandardMaterial } from 'three';
+import { classifyShadows, applyShadowFlags } from '../src/core/engine/rv-mesh-classifier';
 
 /**
  * Build a Mesh whose material we can mutate before classification.
@@ -80,5 +80,47 @@ describe('classifyShadows', () => {
   it('handles emissive opaque material as cast-shadow (emissive does not imply alpha)', () => {
     const mesh = makeMesh({ emissiveIntensity: 1 });
     expect(classifyShadows(mesh)).toBe(true);
+  });
+});
+
+describe('applyShadowFlags', () => {
+  it('sets castShadow per classifyShadows and receiveShadow=true on opaque meshes', () => {
+    const root = new Group();
+    const opaque = makeMesh();
+    opaque.castShadow = false;   // start wrong (e.g. cloned library object)
+    opaque.receiveShadow = false;
+    root.add(opaque);
+
+    applyShadowFlags(root);
+
+    expect(opaque.castShadow).toBe(true);
+    expect(opaque.receiveShadow).toBe(true);
+  });
+
+  it('keeps castShadow=false for transparent meshes but still sets receiveShadow=true', () => {
+    const root = new Group();
+    const glass = makeMesh({ transparent: true });
+    glass.castShadow = true; // would be wrong for a transparent mesh
+    root.add(glass);
+
+    applyShadowFlags(root);
+
+    expect(glass.castShadow).toBe(false);
+    expect(glass.receiveShadow).toBe(true);
+  });
+
+  it('applies recursively to nested meshes and ignores non-mesh nodes', () => {
+    const root = new Group();
+    const empty = new Object3D(); // non-mesh — must be skipped without error
+    const childMesh = makeMesh();
+    childMesh.castShadow = false;
+    childMesh.receiveShadow = false;
+    empty.add(childMesh);
+    root.add(empty);
+
+    applyShadowFlags(root);
+
+    expect(childMesh.castShadow).toBe(true);
+    expect(childMesh.receiveShadow).toBe(true);
   });
 });

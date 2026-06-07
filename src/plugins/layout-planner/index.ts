@@ -81,8 +81,9 @@ import {
   placeAtSnapPoint as smPlaceAtSnapPoint,
   type SceneMutationDeps,
 } from './scene-mutations';
-import type { SnapPoint } from '../../core/engine/rv-snap-point-registry';
+import type { SnapPoint, PlacedComponentId } from '../../core/engine/rv-snap-point-registry';
 import type { SnapPointPlugin } from '../snap-point';
+import { computeProximityPairings, type RebuildSnapInput } from '../snap-point/snap-pairing-rebuild';
 import {
   loadBundledLibrary as plLoadBundledLibrary,
   findCatalogEntryById as plFindCatalogEntryById,
@@ -95,6 +96,7 @@ import { LAYOUT_PANEL_WIDTH } from '../../core/hmi/layout-constants';
 import { disposeSubtree } from './three-utils';
 import { setContext } from '../../core/hmi/ui-context-store';
 import { CanvasInteractionManager, type CanvasInteractionDeps } from './canvas-interaction';
+import { MuReconciler } from './mu-reconciler';
 import { MultiSelectPivot, type MultiSelectPivotDeps } from './multi-select-pivot';
 import { BoxSelectController } from './box-select-controller';
 
@@ -128,7 +130,7 @@ function emitPlannerOp(viewer: RVViewer | null, op: PrimitiveEditOp): void {
 // hierarchy at a glance. Both `inspectorVisible` defaults to true, so the
 // Inspector renders them as regular ComponentSections automatically.
 import { registerCapabilities } from '../../core/engine/rv-component-registry';
-import { USER_PAUSE_REASON } from '../../core/engine/rv-constants';
+import { LAYOUT_EDIT_PAUSE_REASON } from '../../core/engine/rv-constants';
 import { componentActionRegistry, type ComponentActionContext } from '../../core/hmi/rv-component-action-registry';
 import { SwapHoriz, SwapVert } from '@mui/icons-material';
 registerCapabilities('Splat', { badgeColor: '#ab47bc' });
@@ -394,7 +396,11 @@ export type {
 
 // ─── Layout-instance predicates (re-exported from leaf module) ────────
 export { isLayoutInstance, isLockedLayoutInstance, findLayoutAncestor } from './layout-predicates';
-import { isLayoutInstance, isLockedLayoutInstance, findLayoutAncestor } from './layout-predicates';
+import {
+  isLayoutInstance, isLockedLayoutInstance,
+  isMuSelectable, isPlannerSelectable, findPlannerSelectableAncestor,
+} from './layout-predicates';
+import type { RVMovingUnit } from '../../core/engine/rv-mu';
 
 // ─── Planner-mode highlight styles ─────────────────────────────────────
 
@@ -453,6 +459,12 @@ const DEFAULT_LIBRARY_URLS = [
 export interface LayoutPlannerOptions {
   catalogUrls?: string[];
 }
+
+/** Max world-space distance (metres) at which two restored snaps count as
+ *  mated. Mated snaps are placed exactly coincident, so this only needs to
+ *  absorb float drift from the pivot/align recompute — kept small to avoid
+ *  pairing genuinely separate (but nearby) compatible ports. */
+const SNAP_PAIR_REBUILD_EPS_M = 0.005;
 
 export class LayoutPlannerPlugin implements RVViewerPlugin {
   readonly id = 'layout-planner';
@@ -531,6 +543,12 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
   private _idByObject = new WeakMap<Object3D, string>();
   /** Extracted canvas event handler (pointer, keyboard, D&D, blur). */
   private _canvasInteraction: CanvasInteractionManager | null = null;
+  /** Keeps spawned clone-MU scene nodes registered as selectable (registry +
+   *  aux raycast targets + `_muSelectable` marker) so they flow through the
+   *  shared hover/click/box/multi/outline/delete pipeline. NOT persisted. */
+  private _muReconciler: MuReconciler | null = null;
+  /** Coalesces snap-pairing rebuilds across a burst of op-replay placements. */
+  private _pairingRebuildTimer: ReturnType<typeof setTimeout> | null = null;
   /** Extracted multi-select pivot logic. */
   private _multiSelectPivot: MultiSelectPivot | null = null;
   /** Magnetic bbox snap controller — armed at drag-start, disarmed at end. */
@@ -656,7 +674,7 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     // Entering / being in planner mode no longer stops the simulation — it
     // keeps running (sources spawn) until the user actively edits. So we do NOT
     // pause or disable spawning here; the auto-stop happens on edit gestures
-    // (placement / move / change) via `_autoStopForEdit()`.
+    // (placement / move / transform) via `_beginEditPause()`/`_endEditPause()`.
   }
 
   /**
@@ -740,17 +758,16 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
       );
 
       // Register ancestor override: when planner is active, hover/click resolves
-      // to the full placed layout object instead of individual sub-components.
-      // (The allow filter set in setActive() also blocks non-layout hits, but
-      // this override ensures sub-mesh hits within a layout instance still
-      // resolve to the instance root.)
+      // to the full placed object instead of individual sub-components — for
+      // BOTH layout instances and spawned MUs (sub-mesh hits resolve to the MU
+      // root). The allow filter set in setActive() also gates non-selectable hits.
       if (!this._ancestorOverrideFn) {
         this._ancestorOverrideFn = (node: Object3D): Object3D | null => {
           if (!this._active) return null;
-          const layoutRoot = findLayoutAncestor(node);
-          if (!layoutRoot) return null;
-          if (isLockedLayoutInstance(layoutRoot)) return null;
-          return layoutRoot;
+          const root = findPlannerSelectableAncestor(node);
+          if (!root) return null;
+          if (isLockedLayoutInstance(root)) return null;
+          return root;
         };
         viewer.raycastManager.addAncestorOverride(this._ancestorOverrideFn);
       }
@@ -803,9 +820,10 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
             v.raycastManager?.setEnabled?.(true);
           }
           // Auto-stop the simulation when the user starts moving a placed
-          // object via the gizmo. We do NOT auto-resume on drag-end — the user
-          // resumes via the toolbar Play button when finished editing.
-          if (dragging) this._autoStopForEdit();
+          // object (or MU) via the gizmo, and auto-resume on drag-end if the
+          // sim was running before the edit (refcounted; manual pause kept).
+          if (dragging) this._beginEditPause();
+          else this._endEditPause();
         }
         if (dragging) {
           // Arm magnetic bbox snap — captures the moving root's AABB and
@@ -892,6 +910,14 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
         // render. Listeners must NOT keep allocations alive across calls.
         const tickRoot = this._transformControls?.target ?? null;
         if (tickRoot) v.emit('layout-drag-tick', { node: tickRoot });
+        // Auto-drop on snap-point engage: the moment the magnetic snap mates a
+        // pair (set synchronously by the tick above), finish the drag so the
+        // object stays in the connection — the user re-grabs it to move again.
+        // (Only snap-point connections drop; bbox/grid alignment snaps don't.)
+        const snapPlugin = v.getPlugin<SnapPointPlugin>('snap-point');
+        if (snapPlugin?.getMagnetic?.()?.getLastPair?.()) {
+          this._transformControls?.endDrag();
+        }
         v.markRenderDirty();
         // Store write + autoSave deferred to onDraggingChanged(false)
         // to avoid O(placed) allocations + JSON.stringify on every frame.
@@ -939,8 +965,21 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
         // after the first model switch.
         getRegistry: () => viewer.registry,
         getActive: () => this._active,
+        // Spawned MUs participate in the marquee too (read lazily — the
+        // reconciler is built just below and its map mutates as MUs spawn).
+        getMuMap: () => this._muReconciler?.objectMap.values() ?? null,
       });
       this._boxSelect.attach();
+
+      // Reconciler that registers spawned clone-MU nodes as selectable scene
+      // nodes (registry + aux raycast targets + `_muSelectable` marker), so MUs
+      // flow through the SAME hover/click/box/multi/outline/delete pipeline as
+      // layout objects — without `_layoutId`, `_objectMap`, or persistence.
+      this._muReconciler = new MuReconciler({
+        viewer,
+        getMUs: () => viewer.transportManager?.mus ?? [],
+        onSelectionDropped: () => this._refreshOutline(),
+      });
 
       const canvasDeps: CanvasInteractionDeps = {
         viewer,
@@ -1006,6 +1045,13 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
   }
 
   onModelCleared(_viewer: RVViewer): void {
+    // The previous scene's MUs are disposed on model clear — unregister all
+    // MU selectable nodes so we don't hold dangling registry/aux entries.
+    this._muReconciler?.disposeAll();
+    if (this._pairingRebuildTimer !== null) {
+      clearTimeout(this._pairingRebuildTimer);
+      this._pairingRebuildTimer = null;
+    }
     // Layout state survives model clear — _layoutRoot is in sceneFixtures
     // Drop the always-on persistence listener; onModelLoaded re-installs it
     // for the next scene.
@@ -1070,6 +1116,9 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
 
   /** Per-frame hook: keep the FloorGizmo positioned and scale-invariant. */
   onRender(_frameDt: number): void {
+    // Keep spawned-MU selectable registration in sync with the sim (register
+    // new clone MUs, unregister consumed ones + drop their selection).
+    if (this._active) this._muReconciler?.reconcile();
     this._transformControls?.update();
   }
 
@@ -1082,6 +1131,16 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     // Canvas interaction next — removes all event listeners before teardown
     this._canvasInteraction?.dispose();
     this._canvasInteraction = null;
+
+    // MU reconciler — unregister all MU selectable nodes (registry + aux).
+    this._muReconciler?.disposeAll();
+    this._muReconciler = null;
+    if (this._viewer?.transportManager) this._viewer.transportManager.preferCloneMU = false;
+
+    if (this._pairingRebuildTimer !== null) {
+      clearTimeout(this._pairingRebuildTimer);
+      this._pairingRebuildTimer = null;
+    }
 
     // Multi-select pivot next — restores parenting before gizmo detach
     this._multiSelectPivot?.tearDown();
@@ -1149,6 +1208,10 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     this._viewer?.setSimulationPaused?.('layout-drag', false);
     this._viewer?.setSimulationPaused?.('layout-placement', false);
     this._viewer?.setSimulationPaused?.('layout-edit', false);
+    // Reset edit-pause bookkeeping so a fresh attach starts clean.
+    this._editPauseDepth = 0;
+    this._editWasRunning = false;
+    this._dragEntryEditActive = false;
     this._viewer = null;
   }
 
@@ -1156,15 +1219,42 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
 
   get active(): boolean { return this._active; }
 
+  /** Refcount of in-flight 3D edit gestures (drag / transform / placement). */
+  private _editPauseDepth = 0;
+  /** Whether the sim was running when the FIRST overlapping edit gesture began. */
+  private _editWasRunning = false;
+
   /**
-   * Auto-stop the simulation because the user started an edit gesture: dragging
-   * in an asset, moving a placed object, or changing one (inspector / dialog /
-   * snap-flip). Engages the user-owned pause reason so the user resumes the
-   * normal way — the toolbar Play button or the Space key. Idempotent: a no-op
-   * when the sim is already paused, so it never fights a manual resume.
+   * Begin an edit-gesture pause: dragging in an asset, moving a placed object,
+   * or transforming one via the gizmo. Uses a DEDICATED pause reason (distinct
+   * from the user's manual pause) and refcounts overlapping gestures. The
+   * "was running" state is captured on the first (0→1) acquisition so the
+   * matching `_endEditPause()` can auto-resume — but only when no other reason
+   * (e.g. a manual user pause engaged mid-edit) still holds the sim.
    */
-  private _autoStopForEdit(): void {
-    this._viewer?.setSimulationPaused?.(USER_PAUSE_REASON, true);
+  private _beginEditPause(): void {
+    const v = this._viewer;
+    if (!v) return;
+    if (this._editPauseDepth === 0) {
+      this._editWasRunning = !v.isSimulationPaused;
+      v.setSimulationPaused?.(LAYOUT_EDIT_PAUSE_REASON, true);
+    }
+    this._editPauseDepth++;
+  }
+
+  /**
+   * End an edit-gesture pause. When the last overlapping gesture finishes,
+   * release the edit reason. The sim then resumes ONLY if it was running before
+   * the edit AND nothing else holds it paused — `setSimulationPaused` keys are
+   * independent, so a manual `USER_PAUSE_REASON` engaged during the edit keeps
+   * the sim paused.
+   */
+  private _endEditPause(): void {
+    if (this._editPauseDepth === 0) return;
+    this._editPauseDepth--;
+    if (this._editPauseDepth === 0 && this._editWasRunning) {
+      this._viewer?.setSimulationPaused?.(LAYOUT_EDIT_PAUSE_REASON, false);
+    }
   }
 
   setActive(active: boolean): void {
@@ -1180,8 +1270,8 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
 
     // Planner mode no longer stops the simulation on enter — it keeps running
     // so the user sees live behaviour while laying out. The sim is auto-stopped
-    // only when the user actively edits (place / move / change), via
-    // `_autoStopForEdit()`, and the user resumes via the toolbar Play button.
+    // only when the user actively edits (place / move / transform), via
+    // `_beginEditPause()`, and auto-resumes on gesture end if it was running.
 
     if (!active) {
       // Drop modifier listeners installed when entering planner mode.
@@ -1207,11 +1297,16 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
       // now-unreachable selection in place visually until the next click.
       viewer.selectionManager.clear();
 
-      // 1. Restrict raycast hits to layout instances. Save prior filter for
-      //    coexistence with other plugins that may set their own filter.
+      // 1. Restrict raycast hits to planner-selectable nodes (layout instances
+      //    AND spawned MUs). Save prior filter for coexistence with other plugins.
       this._priorAllowFilter = viewer.raycastManager?.getAllowFilter?.() ?? null;
       viewer.raycastManager?.setAllowFilter((node) =>
-        isLayoutInstance(node) && !isLockedLayoutInstance(node));
+        isPlannerSelectable(node) && !isLockedLayoutInstance(node));
+
+      // Spawn MUs as clones (real Object3Ds) while planner is active so they can
+      // be registered as selectable scene nodes (instanced MUs have no per-
+      // instance node). Reset on exit.
+      if (viewer.transportManager) viewer.transportManager.preferCloneMU = true;
 
       // 2. Mute the default selection overlay — OutlinePass takes over the
       //    selection visual via outlineManager. Hover stays as overlay-mesh
@@ -1246,10 +1341,11 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
         const placing = this.store.getSnapshot().placementMode !== null;
         if (placing !== lastPlacing) {
           lastPlacing = placing;
-          // Auto-stop when the user starts dragging in an asset (the ghost
-          // begins following the cursor). Not auto-resumed when placement ends
-          // — the user resumes via the toolbar Play button.
-          if (placing) this._autoStopForEdit();
+          // Auto-stop while a click-to-place gesture is active (the ghost
+          // follows the cursor), auto-resume when it ends if the sim was
+          // running before — balanced begin/end via the edit-pause refcount.
+          if (placing) this._beginEditPause();
+          else this._endEditPause();
         }
       });
 
@@ -1264,6 +1360,9 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
       // overlay meshes / outline are removed before we restore styles.
       viewer.selectionManager.clear();
       viewer.outlineManager.clear();
+      // Unregister MU selectable nodes + stop forcing clone-mode spawning.
+      this._muReconciler?.disposeAll();
+      if (viewer.transportManager) viewer.transportManager.preferCloneMU = false;
 
       this._multiSelectPivot?.tearDown();
       this._transformControls?.detach();
@@ -1293,6 +1392,10 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
    */
   private _onSelectionChanged = (snap: SelectionSnapshot): void => {
     if (!this._active || !this._viewer) return;
+    // MUs and layout objects share ONE selection (SelectionManager paths). The
+    // gizmo + store sync below filter to `isLayoutInstance`, so MUs are
+    // naturally excluded from the gizmo and persistence; the outline includes
+    // both (see _refreshOutline).
     this._syncTransformControlsToSelection(snap);
     this._syncLayoutStoreToSelection(snap);
     this._refreshOutline();
@@ -1389,11 +1492,13 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
 
     const objs: Object3D[] = [];
 
-    // Selection: resolve each selected path to a layout-instance root.
+    // Selection: resolve each selected path to a planner-selectable node. This
+    // covers BOTH layout instances AND spawned MUs (registered selectable
+    // scene nodes), so MUs get the same green outline as layout objects.
     const snap = viewer.selectionManager.getSnapshot();
     for (const path of snap.selectedPaths) {
       const node = viewer.registry?.getNode(path);
-      if (node && isLayoutInstance(node)) objs.push(node);
+      if (node && isPlannerSelectable(node)) objs.push(node);
     }
 
     // Ghost: only when visible (and not the same object as selection).
@@ -1452,16 +1557,27 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     if (this.store.selectedId !== id) this.store.selectComponent(id);
   }
 
+  /** Whether a library drag-in gesture currently holds an edit-pause. */
+  private _dragEntryEditActive = false;
+
   /** Set the entry being dragged from the library panel (for drag ghost). */
   setDragEntry(entry: LibraryCatalogEntry | null): void {
     this._dragEntry = entry;
     if (entry) {
       // Dragging an asset in from the library is an edit gesture — auto-stop
-      // the simulation (user resumes via the toolbar Play button).
-      this._autoStopForEdit();
+      // the simulation; auto-resume on drop/cancel if it was running before.
+      // Guarded so begin/end balance exactly once per drag-in gesture.
+      if (!this._dragEntryEditActive) {
+        this._dragEntryEditActive = true;
+        this._beginEditPause();
+      }
       this._ghost.ensureForEntry(entry);
     } else {
       this._ghost.hide();
+      if (this._dragEntryEditActive) {
+        this._dragEntryEditActive = false;
+        this._endEditPause();
+      }
     }
   }
 
@@ -1603,15 +1719,33 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     const viewer = this._viewer;
     if (!viewer) return;
 
+    const selectionPaths = viewer.selectionManager.getSnapshot().selectedPaths;
+
+    // Spawned MUs are sim-owned (not layout placements) — delete them via the
+    // transport manager (works while paused). One Delete press removes a mixed
+    // layout + MU selection: MUs here, layout placements below.
+    const muPaths: string[] = [];
+    for (const path of selectionPaths) {
+      const node = viewer.registry?.getNode(path);
+      const mu = node && isMuSelectable(node)
+        ? (node.userData._muRef as RVMovingUnit | undefined)
+        : undefined;
+      if (mu) { viewer.transportManager?.removeMU(mu); muPaths.push(path); }
+    }
+    if (muPaths.length > 0) {
+      const remaining = selectionPaths.filter(p => !muPaths.includes(p));
+      viewer.selectionManager.selectPaths(remaining);
+      this._refreshOutline();
+    }
+
     // Resolve the set of placement IDs to remove. Prefer SelectionManager
     // (multi-aware); fall back to LayoutStore.selectedId for any code path
     // that still drives single-select without going through SelectionManager.
-    const selectionPaths = viewer.selectionManager.getSnapshot().selectedPaths;
     const ids = this._pathsToPlacementIds(selectionPaths);
-    if (ids.length === 0 && this.store.selectedId) {
+    if (ids.length === 0 && muPaths.length === 0 && this.store.selectedId) {
       ids.push(this.store.selectedId);
     }
-    await this._removeByPlacementIds(ids);
+    if (ids.length > 0) await this._removeByPlacementIds(ids);
   }
 
   /**
@@ -2041,6 +2175,10 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     // the legacy add path. We've already verified above that no entry
     // with this id exists, so addComponent is safe here.
     this.store.addComponent({ ...p });
+    // Op-replay (redo / multiuser / scene load) adds placements one at a time
+    // and does not pair snaps. Coalesce a rebuild so a chained assembly's
+    // connections are reconstructed once the whole burst has landed.
+    this._scheduleSnapPairingRebuild();
     if (this._viewer) this._viewer.markRenderDirty();
   }
 
@@ -2122,6 +2260,9 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     if (!this._viewer) return;
     const orphans: Object3D[] = [];
     this._viewer.scene.traverse((node) => {
+      // Skip spawned MUs — they carry `_muSelectable` (never `_layoutId`) and
+      // are sim-owned; the sweep must never remove them as layout orphans.
+      if (node.userData?._muSelectable) return;
       if (node.userData?._layoutId) orphans.push(node);
     });
     for (const o of orphans) o.parent?.remove(o);
@@ -2275,6 +2416,11 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
 
     this.store.setComponents(snap.placements);
     if (snap.gridSizeMm > 0) this.store.setGridSize(snap.gridSizeMm);
+
+    // All placements are now in the scene with their saved transforms and their
+    // snap points re-scanned — reconstruct the snap-point connection graph from
+    // geometry so chained assemblies survive reload.
+    this._rebuildSnapPairings();
 
     this.store.autoSave();
     // Hierarchy browser caches the editable-node list; bulk restore mutates
@@ -2701,6 +2847,91 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
       cur = cur.parent;
     }
     return null;
+  }
+
+  /**
+   * Reconstruct snap-point connections from geometry after a restore.
+   *
+   * Restore replays each placement's saved transform but does NOT recreate the
+   * runtime snap-registry state (`pairedSnapId` / `occupied`) — so chained
+   * assemblies lose their connections on reload (no chain-mode drag, no
+   * occupancy, no reverse-direction). Because mated snaps are placed exactly
+   * coincident in world space, we pair any two compatible, currently-unoccupied
+   * snaps from different owners whose world positions coincide.
+   *
+   * Safe to call repeatedly: it only adds pairings for unoccupied coincident
+   * snaps and never disturbs connections already established live.
+   */
+  private _rebuildSnapPairings(): void {
+    const v = this._viewer;
+    if (!v) return;
+    const snapPlugin = v.getPlugin<SnapPointPlugin>('snap-point');
+    const reg = snapPlugin?.getRegistry();
+    if (!reg) return;
+
+    // Some snaps ride on a drive-controlled node (e.g. a turntable's rotating
+    // platform `Drive-Rot-Y` owns its connection ports). Two snaps were mated
+    // at the drive's HOME pose, so we must sample at that pose — otherwise a
+    // rotated/translated drive moves the port far from its (static) partner and
+    // the coincidence test fails. Snapshot each drive node, move it to home,
+    // sample all snap world positions, then restore.
+    const drives = v.drives ?? [];
+    const restore: { node: Object3D; pos: Vector3; quat: Quaternion }[] = [];
+    for (const d of drives) {
+      restore.push({ node: d.node, pos: d.node.position.clone(), quat: d.node.quaternion.clone() });
+      d.getHomeLocalPosition(d.node.position);
+      d.getHomeLocalQuaternion(d.node.quaternion);
+    }
+    v.scene.updateMatrixWorld(true);
+
+    const wp = new Vector3();
+    const inputs: RebuildSnapInput[] = [];
+    for (const sp of reg.getAll()) {
+      if (sp.occupied) continue; // keep any pairing already established live
+      sp.object3D.getWorldPosition(wp);
+      inputs.push({
+        id: sp.id, typeId: sp.typeId, flow: sp.flow,
+        owner: sp.ownerRoot, x: wp.x, y: wp.y, z: wp.z,
+      });
+    }
+
+    // Restore the live drive poses before we apply pairings / return.
+    for (const r of restore) {
+      r.node.position.copy(r.pos);
+      r.node.quaternion.copy(r.quat);
+    }
+    if (restore.length > 0) v.scene.updateMatrixWorld(true);
+
+    if (inputs.length < 2) return;
+
+    const pairs = computeProximityPairings(inputs, SNAP_PAIR_REBUILD_EPS_M);
+    for (const { aId, bId } of pairs) {
+      const a = reg.getById(aId);
+      const b = reg.getById(bId);
+      if (!a || !b) continue;
+      // Each snap is occupied BY the asset on the OPPOSITE side — mirrors the
+      // convention used by placeAtSnapPoint and the magnetic drag controller.
+      const aPlaced = (this.findPlacedIdByRoot(a.ownerRoot) ?? `snap:${a.id}`) as PlacedComponentId;
+      const bPlaced = (this.findPlacedIdByRoot(b.ownerRoot) ?? `snap:${b.id}`) as PlacedComponentId;
+      reg.markOccupied(a.id, bPlaced);
+      reg.markOccupied(b.id, aPlaced);
+      reg.pair(a.id, b.id);
+    }
+    if (pairs.length > 0) v.markRenderDirty();
+  }
+
+  /**
+   * Coalesce snap-pairing rebuilds. Op-replay (redo / multiuser / scene load)
+   * adds placements one at a time via `placeFromRecord`; a trailing-edge timer
+   * runs a single rebuild once the burst settles and both ends of each
+   * connection are present.
+   */
+  private _scheduleSnapPairingRebuild(): void {
+    if (this._pairingRebuildTimer !== null) return;
+    this._pairingRebuildTimer = setTimeout(() => {
+      this._pairingRebuildTimer = null;
+      this._rebuildSnapPairings();
+    }, 0);
   }
 
   /**

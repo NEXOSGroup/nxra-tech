@@ -14,7 +14,7 @@
  * registered scene snap. Returns the closest pair within `radius` or null.
  */
 
-import { Vector3 } from 'three';
+import { Matrix4, Vector3 } from 'three';
 import type { Object3D } from 'three';
 import type {
   SnapPoint,
@@ -43,6 +43,7 @@ interface ParsedGhostSnap {
 
 const _ghostPos = new Vector3();
 const _targetPos = new Vector3();
+const _ghostLocalM = new Matrix4();
 
 /** userData key under which we cache the ghost's parsed snap list. The ghost
  *  subtree is structurally stable while a single library entry is shown, so
@@ -120,9 +121,16 @@ export function applyGhostSnapAlignment(
     match.targetSnap.dir,
     match.ghostDir,
   );
+  // `M` is a WORLD matrix; `ghostRoot.matrix` is LOCAL. Convert through the
+  // ghost's parent (if any) so a transformed parent doesn't offset the snap.
+  let local: Matrix4 = M;
+  if (ghostRoot.parent) {
+    ghostRoot.parent.updateWorldMatrix(true, false);
+    local = _ghostLocalM.copy(ghostRoot.parent.matrixWorld).invert().multiply(M);
+  }
   ghostRoot.matrixAutoUpdate = false;
-  ghostRoot.matrix.copy(M);
-  M.decompose(ghostRoot.position, ghostRoot.quaternion, ghostRoot.scale);
+  ghostRoot.matrix.copy(local);
+  local.decompose(ghostRoot.position, ghostRoot.quaternion, ghostRoot.scale);
   ghostRoot.matrixAutoUpdate = true;
   ghostRoot.updateMatrixWorld(true);
 }

@@ -37,6 +37,12 @@ import { canFlipPlacedComponent, flipPlacedComponent } from './snap-flip-service
 import { findLayoutAncestor } from '../layout-planner/layout-predicates';
 import type { ComponentType } from 'react';
 
+/** World-space distance at which an approaching moving snap lights up its
+ *  compatible match during a drag. Much larger than the magnet pull radius
+ *  (DEFAULT_MAGNET_RADIUS_M = 0.4) so nearby compatible ports are previewed
+ *  early — only those within the pull radius actually snap. */
+const SNAP_APPROACH_RADIUS_M = 5;
+
 export class SnapPointPlugin implements RVViewerPlugin {
   readonly id = 'snap-point';
 
@@ -102,6 +108,10 @@ export class SnapPointPlugin implements RVViewerPlugin {
         (root) => this._resolvePlacedId(root),
         { chainEnabled },
       );
+      // Faintly show the moving asset's own (GLB-defined) snap points for the
+      // whole drag, so the user sees where it can connect.
+      const movingIds = (this.magnetic?.getMovingSnaps() ?? []).map(s => s.id);
+      this.markerRenderer?.setDragHints(movingIds, []);
       // Outline everyone that will follow this drag so the user can see the
       // chain BEFORE moving the mouse. Solo / ALT drags sever connections, so
       // there is no chain to preview.
@@ -113,6 +123,12 @@ export class SnapPointPlugin implements RVViewerPlugin {
       // Rigid follow of chained members + break-on-stretch — runs even when
       // no snap engaged this tick (members must still follow the gizmo).
       this.magnetic?.applyChainFollow();
+      // Snap-point hints: keep the moving snaps faint and light up any compatible
+      // match an approaching moving snap can mate with (gold). When unarmed
+      // (magnet off) getMovingSnaps() is empty → setDragHints clears nothing.
+      const movingIds = (this.magnetic?.getMovingSnaps() ?? []).map(s => s.id);
+      const targets = this.magnetic?.collectApproaching(SNAP_APPROACH_RADIUS_M).targets;
+      this.markerRenderer?.setDragHints(movingIds, targets ? [...targets] : []);
       // Chain membership can change mid-drag (snap engaged / stretch broke an
       // edge); re-evaluate. Cached by member-set, so this is a no-op when the
       // chain is unchanged.
@@ -120,8 +136,11 @@ export class SnapPointPlugin implements RVViewerPlugin {
     };
     const onEnd = (_d: { node: Object3D }): void => {
       this.magnetic?.disarm(true);
-      // Refresh markers so newly-occupied snaps disappear; drop the drag focus
-      // (selection focus, if any, keeps its chain preview alive).
+      // Clear drag hints first (disarm has updated occupancy, so cleared snaps
+      // resolve to their correct post-drop visibility), then refresh markers so
+      // newly-occupied snaps disappear; drop the drag focus (selection focus,
+      // if any, keeps its chain preview alive).
+      this.markerRenderer?.clearDragHints();
       this.markerRenderer?.refreshAll();
       this._hoverFocus = null;
       this._updateChainPreview();
@@ -218,6 +237,11 @@ export class SnapPointPlugin implements RVViewerPlugin {
     this.registry?.clear();
     snapHoverStore.reset();
     this.markerRenderer?.rebuild(0);
+  }
+
+  /** Per-frame: keep snap markers a constant on-screen size (like the gizmo). */
+  onRender(): void {
+    this.markerRenderer?.updateScreenSize();
   }
 
   dispose(): void {

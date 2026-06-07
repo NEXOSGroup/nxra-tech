@@ -23,7 +23,7 @@
 
 import type { Object3D } from 'three';
 import type { RVViewer } from '../../core/rv-viewer';
-import type { BoxSelectRegistryLike, ClientRect } from './box-select-hit';
+import type { BoxSelectRegistryLike, BoxSelectMuEntry, ClientRect } from './box-select-hit';
 import { computeBoxSelectPaths, combineSelection } from './box-select-hit';
 
 const MIN_RECT_SIDE_PX = 4;
@@ -41,6 +41,8 @@ export interface BoxSelectControllerDeps {
   getRegistry: () => BoxSelectRegistryLike | null;
   /** Returns true when planner mode is active (else `start` is a no-op). */
   getActive: () => boolean;
+  /** Spawned-MU entries to include in the marquee (`{ node, path }`), or null. */
+  getMuMap: () => Iterable<BoxSelectMuEntry> | null;
 }
 
 export class BoxSelectController {
@@ -186,6 +188,7 @@ export class BoxSelectController {
         rect,
         this.deps.objectMap,
         registry,
+        this.deps.getMuMap(),
       );
       const current = this.deps.viewer.selectionManager.getSnapshot().selectedPaths;
       const next = combineSelection(current, marquee, {

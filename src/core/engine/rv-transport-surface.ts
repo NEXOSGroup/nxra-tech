@@ -16,6 +16,25 @@ import type { GizmoOverlayManager } from './rv-gizmo-manager';
 // Pre-allocated temp vectors (no GC in hot path)
 const _movement = new Vector3();
 const _offset = new Vector3();
+// Pre-allocated scratch for the per-tick matrix-delta refresh.
+const _scratchInv = new Matrix4();
+const _quatCarry = new Quaternion();
+// Scratch for the parent-local↔world carry conversion in transportMU.
+const _scratchVecA = new Vector3();
+const _scratchQuatA = new Quaternion();
+const _scratchQuatB = new Quaternion();
+
+/** Identity-matrix element pattern (column-major), used by `matrixIsIdentity`. */
+const _identityElements = new Matrix4().elements;
+const MATRIX_EPS = 1e-6;
+/** True when every element of `m` is within ε of the identity matrix. */
+function matrixIsIdentity(m: Matrix4): boolean {
+  const e = m.elements;
+  for (let i = 0; i < 16; i++) {
+    if (Math.abs(e[i] - _identityElements[i]) > MATRIX_EPS) return false;
+  }
+  return true;
+}
 
 // Shared geometry/material for transport-surface drop planes. These transient
 // planes are NEVER added to the scene (never rendered, never selectable) — they
@@ -59,10 +78,38 @@ export class RVTransportSurface implements RVComponent {
   /** Associated drive (provides speed). Found during scene loading. */
   drive: RVDrive | null = null;
 
-  /** Normalized transport direction in world space */
+  /**
+   * Local transport axis — source of truth. Captured at `init()` from the
+   * authored `TransportDirection` (Unity-coords) and NEVER mutated afterwards.
+   * The current world direction is derived from this every tick.
+   */
+  private localDirection = new Vector3(1, 0, 0);
+  /**
+   * Normalized transport direction in WORLD space — derived from
+   * `localDirection × node.getWorldQuaternion()`, refreshed once per tick (or
+   * on demand). Stale between `init()` and the first `_refreshWorldDirection()`
+   * call within a tick — callers must go through `transportMU()` which
+   * refreshes lazily, or call `_refreshWorldDirection()` explicitly.
+   */
   private direction = new Vector3();
+  /** Last tickId for which `direction` was refreshed (manager bumps this). */
+  private _directionTickId = -1;
   /** Rotation axis for radial transport */
   private rotationAxis = new Vector3();
+
+  // ── Per-tick world-matrix delta — carries MUs along with a rotating platform.
+  /** Snapshot of `node.matrixWorld` at the end of the previous tick. */
+  private _lastWorldMatrix = new Matrix4();
+  /** `currentWorldMatrix * _lastWorldMatrix^-1` — the world transform applied
+   *  to the surface between the previous and current tick. Identity when the
+   *  surface didn't move (the common case for static conveyors). */
+  private _matrixDelta = new Matrix4();
+  /** Quaternion extracted from `_matrixDelta` — applied to MU orientation. */
+  private _deltaQuat = new Quaternion();
+  /** Whether `_matrixDelta` is non-identity within ε (i.e. carry the MU). */
+  private _hasTransformDelta = false;
+  /** True once we have a previous-tick matrix to diff against. */
+  private _lastMatrixCaptured = false;
 
   /** Cloned textures for independent conveyor belt animation */
   private _texMaps: Texture[] = [];
@@ -101,12 +148,18 @@ export class RVTransportSurface implements RVComponent {
    * Called after applySchema + resolveComponentRefs.
    */
   init(context: ComponentContext): void {
-    // TransportDirection is stored in local space by Unity (InverseTransformDirection).
-    // Transform to world space using the node's world quaternion.
-    this.node.getWorldQuaternion(RVTransportSurface._worldQuat);
-    this.TransportDirection.applyQuaternion(RVTransportSurface._worldQuat).normalize();
+    // Capture the LOCAL transport axis as the source of truth — never mutated
+    // again. The world direction is derived per tick from this × the node's
+    // CURRENT world quaternion, so MUs keep moving along the belt even when
+    // a parent drive (e.g. a turntable's Drive-Rot-Y) rotates the platform.
+    this.localDirection.copy(this.TransportDirection).normalize();
+    if (this.localDirection.lengthSq() === 0) this.localDirection.set(1, 0, 0);
 
-    // Initialize transport internals (direction, radial, texture animation)
+    // Seed `this.direction` (world) immediately so consumers that don't go
+    // through `transportMU` (gizmo, debug logs) see a sensible value at init.
+    this._refreshWorldDirection();
+
+    // Initialize transport internals (radial, texture animation)
     this.initTransport();
 
     // Find associated drive: DriveReference first (explicit ref resolved by resolveComponentRefs),
@@ -125,6 +178,19 @@ export class RVTransportSurface implements RVComponent {
     // This is used by multiuser sync to distinguish conveyor drives from positioning drives.
     if (this.drive) {
       this.drive.isTransportSurface = true;
+    }
+
+    // Belt drives (conveyor + turntable platform) default to 200 mm/s — twice
+    // the generic Drive default (100 mm/s in `RVDrive` schema). We only bump
+    // when the drive's `TargetSpeed` is still at the generic default, so a GLB
+    // that authored a different value (e.g. 150 or 50) is respected. `applySchema`
+    // runs before `init`, so this check fires after any explicit value has
+    // already been written by the loader.
+    const BELT_DEFAULT_SPEED = 200;
+    const DRIVE_SCHEMA_DEFAULT = 100;
+    if (this.drive && this.drive.TargetSpeed === DRIVE_SCHEMA_DEFAULT) {
+      this.drive.TargetSpeed = BELT_DEFAULT_SPEED;
+      this.drive.targetSpeed = BELT_DEFAULT_SPEED;
     }
 
     // Auto-start: if the drive has a target speed but isn't jogging (Forward signal was false/missing),
@@ -255,19 +321,14 @@ export class RVTransportSurface implements RVComponent {
     if (!Number.isFinite(size.x) || size.lengthSq() === 0) return;
     const localOrigin = this.node.worldToLocal(center.clone());
 
-    // Use the runtime `direction` (world-space resolved) — but the arrow
-    // sits in the surface's LOCAL frame so we transform back to local.
-    const worldDir = this.direction.clone();
-    if (worldDir.lengthSq() === 0) worldDir.copy(this.TransportDirection);
-    if (worldDir.lengthSq() === 0) return;
-    worldDir.normalize();
-
-    // worldToLocal works on POINTS — to convert a DIRECTION we apply the
-    // inverse rotation (the world quaternion's conjugate) since translation
-    // doesn't affect direction vectors.
-    const invQuat = new Quaternion();
-    this.node.getWorldQuaternion(invQuat).invert();
-    const localDir = worldDir.applyQuaternion(invQuat);
+    // Use the surface's LOCAL transport axis directly — the arrow sits under
+    // `this.node` and inherits its world transform, so the local axis is
+    // exactly the right input. This is what keeps the gizmo glued to the
+    // belt's true direction even after a parent drive rotates the platform.
+    const localDir = this.localDirection.clone();
+    if (localDir.lengthSq() === 0) localDir.copy(this.TransportDirection);
+    if (localDir.lengthSq() === 0) return;
+    localDir.normalize();
 
     // Fixed 0.5 m arrow in WORLD space. The arrow is parented to `this.node`,
     // so its length is interpreted in node-local units — divide by the node's
@@ -367,11 +428,13 @@ export class RVTransportSurface implements RVComponent {
    * Called by the loader after applySchema + quaternion transform.
    */
   initTransport(): void {
-    // Normalize the transport direction
-    this.direction.copy(this.TransportDirection).normalize();
-
+    // Note: `this.direction` (world) is already seeded by `init()` via
+    // `_refreshWorldDirection()`. We DO NOT mutate it from
+    // `TransportDirection` here — `TransportDirection` is the LOCAL axis
+    // (Unity-coords) and overwriting `direction` from it would clobber the
+    // world-space derivation. The radial axis stays in WORLD space for
+    // consistency with `transportMURadial`'s coordinate frame.
     if (this.Radial) {
-      // For radial transport, the direction IS the rotation axis
       this.rotationAxis.copy(this.direction);
     }
 
@@ -403,12 +466,65 @@ export class RVTransportSurface implements RVComponent {
 
   /**
    * Move a MU along the transport direction.
-   * Linear transport: direct position offset.
+   * Linear transport: direct position offset (+ optional carry by the surface's
+   * own world-transform delta when the platform itself moved between ticks —
+   * e.g. a turntable rotating under the MU).
    */
   transportMU(mu: RVMovingUnit | InstancedMovingUnit, dt: number): void {
+    // Refresh per-tick state (world direction + world-matrix delta) once per
+    // tick. Multiple MUs on the same surface share one compute.
+    this._refreshWorldDirectionLazy();
+
     if (this.Radial) {
+      // Radial surfaces explicitly rotate MUs around the surface centre —
+      // don't ALSO carry by `_matrixDelta` here or we'd double-rotate.
       this.transportMURadial(mu, dt);
       return;
+    }
+
+    // Carry the MU along with the surface's own world transform when:
+    //   1. The surface actually moved this tick (`_hasTransformDelta`), AND
+    //   2. The MU was already on THIS surface in the immediately previous tick
+    //      (`lastSurfaceTickId === currentTickId - 1` AND `mu.currentSurface === this`)
+    //      — so a freshly-entered MU isn't snapped by a phantom delta.
+    if (
+      this._hasTransformDelta &&
+      mu.currentSurface === this &&
+      mu.lastSurfaceTickId === RVTransportSurface._currentTickId - 1
+    ) {
+      // `mu.getPosition()` / `mu.getQuaternion()` return values in the MU's
+      // PARENT-local frame for clone MUs (Source spawns under `spawnParent`,
+      // which can itself be a transformed LayoutObject). For instanced MUs
+      // the position is world-space, and `getPosition()` returns a temp —
+      // we must round-trip via `setPosition` for the write to land in the
+      // pool's Float32Array. Either way we drive both via the IMUAccessor's
+      // explicit setters: read into scratch, transform, write back.
+      const muNode: Object3D | null = (mu as RVMovingUnit).node ?? null;
+      const muParent: Object3D | null = (muNode && !(mu as { isInstanced?: boolean }).isInstanced)
+        ? muNode.parent
+        : null;
+      if (muParent) {
+        // Clone MU under a (possibly transformed) parent. Convert local→world,
+        // apply world-space delta, convert world→local, write via setPosition.
+        _scratchVecA.copy(mu.getPosition());
+        muParent.localToWorld(_scratchVecA);
+        _scratchVecA.applyMatrix4(this._matrixDelta);
+        muParent.worldToLocal(_scratchVecA);
+        mu.setPosition(_scratchVecA);
+
+        // ORIENTATION: world = parentWorld * local. After carry:
+        //   newWorld = delta * world  →  newLocal = parentWorld^-1 * delta * parentWorld * local
+        muParent.getWorldQuaternion(_scratchQuatA);             // parentWorld
+        _scratchQuatB.copy(_scratchQuatA).invert();             // parentWorld^-1
+        _scratchQuatB.multiply(this._deltaQuat).multiply(_scratchQuatA).multiply(mu.getQuaternion());
+        mu.setQuaternion(_scratchQuatB);
+      } else {
+        // Scene-root parented (clone with no parent set yet, or instanced MU
+        // whose pool positions are already in world space). Carry in world.
+        _scratchVecA.copy(mu.getPosition()).applyMatrix4(this._matrixDelta);
+        mu.setPosition(_scratchVecA);
+        mu.setQuaternion(_quatCarry.copy(this._deltaQuat).multiply(mu.getQuaternion()));
+      }
     }
 
     // Linear transport: position += direction * speed * dt
@@ -417,6 +533,65 @@ export class RVTransportSurface implements RVComponent {
     _movement.copy(this.direction).multiplyScalar(speedM * dt);
     mu.getPosition().add(_movement);
   }
+
+  /** Recompute `this.direction` (world) from `this.localDirection` × current world quaternion. */
+  private _refreshWorldDirection(): void {
+    this.node.getWorldQuaternion(RVTransportSurface._worldQuat);
+    this.direction.copy(this.localDirection).applyQuaternion(RVTransportSurface._worldQuat).normalize();
+  }
+
+  /**
+   * World-space transport direction (unit vector), recomputed on demand from the
+   * authored local axis × the node's current world orientation. Used by topology
+   * consumers (e.g. the Turntable classifying connected conveyors as in/out).
+   */
+  getWorldDirection(out: Vector3 = new Vector3()): Vector3 {
+    this._refreshWorldDirection();
+    return out.copy(this.direction);
+  }
+
+  /**
+   * Refresh once per tick (manager bumps `RVTransportSurface._currentTickId`):
+   *   • the world transport direction (used by every MU advance), and
+   *   • the world-matrix delta vs. the previous tick (used to carry MUs along
+   *     with a rotating/translating platform — e.g. a turntable).
+   */
+  private _refreshWorldDirectionLazy(): void {
+    if (this._directionTickId === RVTransportSurface._currentTickId) return;
+    this._directionTickId = RVTransportSurface._currentTickId;
+
+    // Make sure the ancestor chain's matrices are current before snapshotting.
+    this.node.updateWorldMatrix(true, false);
+
+    // Refresh world direction from local axis × current world quaternion.
+    this._refreshWorldDirection();
+
+    // Compute matrix delta = currentWorldMatrix * lastWorldMatrix^-1.
+    if (this._lastMatrixCaptured) {
+      _scratchInv.copy(this._lastWorldMatrix).invert();
+      this._matrixDelta.multiplyMatrices(this.node.matrixWorld, _scratchInv);
+      this._hasTransformDelta = !matrixIsIdentity(this._matrixDelta);
+      if (this._hasTransformDelta) {
+        // Extract rotation part for orientation carry.
+        this._deltaQuat.setFromRotationMatrix(this._matrixDelta);
+      } else {
+        this._deltaQuat.identity();
+      }
+    } else {
+      this._matrixDelta.identity();
+      this._deltaQuat.identity();
+      this._hasTransformDelta = false;
+      this._lastMatrixCaptured = true;
+    }
+    this._lastWorldMatrix.copy(this.node.matrixWorld);
+  }
+
+  /** Called by `RVTransportManager.update()` at the top of each tick. */
+  static beginTick(tickId: number): void {
+    RVTransportSurface._currentTickId = tickId;
+  }
+  static get currentTickId(): number { return RVTransportSurface._currentTickId; }
+  private static _currentTickId = 0;
 
   /**
    * Rotate a MU around the surface center (turntable).

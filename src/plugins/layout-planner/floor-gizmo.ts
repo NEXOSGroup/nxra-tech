@@ -40,6 +40,7 @@ import {
   Quaternion,
   Raycaster,
   MathUtils,
+  Color,
 } from 'three';
 import type { Object3D, PerspectiveCamera, OrthographicCamera, WebGLRenderer } from 'three';
 import { pointerToNDC } from '../../core/engine/rv-pointer-utils';
@@ -97,6 +98,22 @@ const OUTLINE_OPACITY_IDLE = 0.95;
 const OUTLINE_OPACITY_HOVER = 1.00;
 const OUTLINE_OPACITY_DRAG = 1.00;
 
+// ─── Minimize / expand-on-proximity ───────────────────────────────────
+/** Minimized disk size as a fraction of the full gizmo (≈ 6 px radius). */
+const COLLAPSED_SCALE = 0.21;
+/** Cursor within this many px of the gizmo centre → expand. */
+const EXPAND_RADIUS_PX = 10.5;
+/** Cursor beyond this many px → collapse (hysteresis band avoids flicker). */
+const COLLAPSE_RADIUS_PX = 19.5;
+/** Per-frame smoothing factor for the expansion animation. */
+const EXPANSION_LERP = 0.22;
+/** Below this expansion the gizmo is non-interactive (indicator only). */
+const INTERACT_EXPANSION_MIN = 0.6;
+/** Disc fill opacity when fully collapsed — reads as a solid green dot. */
+const COLLAPSED_FILL_OPACITY = 0.85;
+/** Snap epsilon — within this of 0/1 the expansion lock to the endpoint. */
+const EXPANSION_SNAP_EPS = 0.01;
+
 
 /**
  * CSS cursors per handle. `move` is the standard 4-way arrow used for
@@ -127,6 +144,11 @@ const _raycaster = new Raycaster();
 const _v3a = new Vector3();
 const _v3b = new Vector3();
 const _projHelper = new Vector3();
+/** Last known cursor position in NDC — drives proximity-based expansion. */
+const _lastPointerNdc = new Vector2();
+/** Collapsed/expanded disc-fill colors (green dot ↔ smoked-glass black). */
+const _colGreen = new Color(COLOR_OUTLINE);
+const _colBlack = new Color(COLOR_FILL);
 
 /** Floor plane (Y up, offset set per drag from target.y). */
 const _floorPlane = new Plane(new Vector3(0, 1, 0), 0);
@@ -137,6 +159,29 @@ const _camDir = new Vector3();
 // ─── Types ────────────────────────────────────────────────────────────
 
 type Handle = 'disc' | 'ring' | 'axis-x' | 'axis-y' | 'axis-z';
+
+/**
+ * Resolve the gizmo's expansion target (0 = minimized disk, 1 = full gizmo)
+ * from cursor proximity, with hysteresis. Pure — unit-tested without DOM/Three.
+ *
+ *  - `!enabled`            → 1 (minimize feature off → always full).
+ *  - `dragging`            → 0 (stay minimal for the whole drag).
+ *  - `!hasPointer`         → 0 (no hover device / cursor left canvas).
+ *  - `distPx < EXPAND`     → 1.
+ *  - `distPx > COLLAPSE`   → 0.
+ *  - otherwise             → keep `prevTarget` (the hysteresis band).
+ */
+export function resolveExpansionTarget(
+  distPx: number,
+  prevTarget: number,
+  opts: { dragging: boolean; hasPointer: boolean; enabled: boolean },
+): 0 | 1 {
+  if (!opts.enabled) return 1;
+  if (opts.dragging || !opts.hasPointer) return 0;
+  if (distPx < EXPAND_RADIUS_PX) return 1;
+  if (distPx > COLLAPSE_RADIUS_PX) return 0;
+  return prevTarget >= 1 ? 1 : 0;
+}
 
 // ─── FloorGizmo ───────────────────────────────────────────────────────
 
@@ -186,6 +231,18 @@ export class FloorGizmo {
   private _hovered: Handle | null = null;
   private _dragging: Handle | null = null;
 
+  // ── Minimize / expand-on-proximity state ──────────────────────────────
+  /** When true the gizmo collapses to a small green disk and expands on hover. */
+  private _minimizeEnabled = true;
+  /** Animated expansion: 0 = minimized disk, 1 = full gizmo. */
+  private _expansion = 0;
+  /** Discrete target the expansion lerps toward (0 or 1). */
+  private _expansionTarget: 0 | 1 = 0;
+  /** Whether a cursor is currently over the canvas (set via pointer events). */
+  private _hasPointer = false;
+  /** Last expansion value whose disc-fill look was applied (change-detection). */
+  private _lastExpansionApplied = -1;
+
   /** Set per-drag from the target's Y so translation stays in the same plane. */
   private _dragStartTargetPos = new Vector3();
   private _dragStartTargetQuat = new Quaternion();
@@ -205,6 +262,8 @@ export class FloorGizmo {
   private readonly _onPointerDown: (e: PointerEvent) => void;
   private readonly _onPointerMove: (e: PointerEvent) => void;
   private readonly _onPointerUp: (e: PointerEvent) => void;
+  private readonly _onPointerEnter = (): void => { this._hasPointer = true; };
+  private readonly _onPointerLeave = (): void => { this._hasPointer = false; };
 
   constructor(
     camera: (PerspectiveCamera | OrthographicCamera) | (() => PerspectiveCamera | OrthographicCamera),
@@ -336,6 +395,10 @@ export class FloorGizmo {
 
     this._domElement.addEventListener('pointerdown', this._onPointerDown);
     this._domElement.addEventListener('pointermove', this._onPointerMove);
+    // Track whether the cursor is over the canvas at all — drives whether the
+    // gizmo may expand (no pointer → stays the minimized disk).
+    this._domElement.addEventListener('pointerenter', this._onPointerEnter);
+    this._domElement.addEventListener('pointerleave', this._onPointerLeave);
     // pointerup on window so we still get the release if cursor leaves canvas
     window.addEventListener('pointerup', this._onPointerUp);
   }
@@ -346,6 +409,13 @@ export class FloorGizmo {
   attach(target: Object3D): void {
     this._target = target;
     this.root.visible = true;
+    // Start collapsed — a freshly-selected object shows the small green disk and
+    // expands once the cursor approaches. `_sync` re-derives the appearance.
+    if (this._minimizeEnabled) {
+      this._expansion = 0;
+      this._expansionTarget = 0;
+      this._lastExpansionApplied = -1;
+    }
     this._sync();
   }
 
@@ -383,6 +453,19 @@ export class FloorGizmo {
     if (!enabled) this._setHovered(null);
   }
 
+  /**
+   * Enable/disable the minimize-to-disk behaviour. When disabled the gizmo is
+   * always shown at full size (legacy behaviour). Defaults to enabled.
+   */
+  setMinimizeEnabled(enabled: boolean): void {
+    this._minimizeEnabled = enabled;
+    if (!enabled) {
+      // Snap to full so it's immediately usable.
+      this._expansion = 1;
+      this._expansionTarget = 1;
+    }
+  }
+
   /** Show/hide the vertical Y-axis handle (hidden by default — floor planning is XZ). */
   setYAxisEnabled(enabled: boolean): void {
     this._yAxisEnabled = enabled;
@@ -408,6 +491,15 @@ export class FloorGizmo {
   }
 
   /**
+   * Programmatically finish the current drag (commits like a mouse release).
+   * Used to auto-drop the object the moment a magnetic snap engages, so the
+   * user must re-grab it to keep moving. No-op when not dragging.
+   */
+  endDrag(): void {
+    if (this._dragging) this._endDrag();
+  }
+
+  /**
    * Per-frame update — called from the plugin's onRender hook.
    * Keeps the gizmo at the target's position and scaled to constant
    * screen-space pixel size.
@@ -421,6 +513,8 @@ export class FloorGizmo {
   dispose(): void {
     this._domElement.removeEventListener('pointerdown', this._onPointerDown);
     this._domElement.removeEventListener('pointermove', this._onPointerMove);
+    this._domElement.removeEventListener('pointerenter', this._onPointerEnter);
+    this._domElement.removeEventListener('pointerleave', this._onPointerLeave);
     window.removeEventListener('pointerup', this._onPointerUp);
     this._removeReadout();
     // Dispose fill geometries + materials
@@ -475,8 +569,65 @@ export class FloorGizmo {
       worldPerPx = (ortho.top - ortho.bottom) / ortho.zoom / canvasH;
     }
     const radius = DISC_SCREEN_RADIUS_PX * worldPerPx;
-    this.root.scale.setScalar(radius);
+
+    // ── Minimize / expand-on-proximity ──────────────────────────────────
+    // Distance (px) from the cursor to the gizmo's projected screen centre.
+    _projHelper.copy(_v3a).project(cam);
+    const canvasW = this._renderer.domElement.clientWidth;
+    const dxPx = (_lastPointerNdc.x - _projHelper.x) * 0.5 * canvasW;
+    const dyPx = (_lastPointerNdc.y - _projHelper.y) * 0.5 * canvasH;
+    const distPx = Math.hypot(dxPx, dyPx);
+
+    this._expansionTarget = resolveExpansionTarget(distPx, this._expansionTarget, {
+      dragging: this._dragging !== null,
+      hasPointer: this._hasPointer,
+      enabled: this._minimizeEnabled,
+    });
+    // Smoothly approach the target; snap to the endpoint within an epsilon.
+    this._expansion += (this._expansionTarget - this._expansion) * EXPANSION_LERP;
+    if (Math.abs(this._expansionTarget - this._expansion) < EXPANSION_SNAP_EPS) {
+      this._expansion = this._expansionTarget;
+    }
+    this._applyExpansionAppearance();
+
+    const scale = radius * MathUtils.lerp(COLLAPSED_SCALE, 1, this._expansion);
+    this.root.scale.setScalar(scale);
     this.root.updateMatrixWorld(true);
+  }
+
+  /**
+   * Apply the current `_expansion` to handle visibility + disc-fill look.
+   * Handles (ring/axes) grow out of the disk as the root scales; they are
+   * hidden entirely when collapsed. The disc-fill tint is change-detected so
+   * it doesn't fight `_refreshOpacity` once fully expanded (see plan §4.6).
+   */
+  private _applyExpansionAppearance(): void {
+    // Ring + axis handles only exist while expanding/expanded; disc is always on.
+    const showHandles = this._expansion > 0.02;
+    this._ring.visible = showHandles;
+    this._axisX.visible = showHandles;
+    this._axisXPicker.visible = showHandles;
+    this._axisZ.visible = showHandles;
+    this._axisZPicker.visible = showHandles;
+    if (this._yAxisEnabled) {
+      this._axisY.visible = showHandles;
+      this._axisYPicker.visible = showHandles;
+    }
+
+    if (this._expansion === this._lastExpansionApplied) return;
+    this._lastExpansionApplied = this._expansion;
+
+    const discFill = this._disc.material as MeshBasicMaterial;
+    if (this._expansion >= 1) {
+      // Fully expanded → restore the true fill color and hand opacity control
+      // back to the hover/drag machine.
+      discFill.color.copy(_colBlack);
+      this._refreshOpacity();
+    } else {
+      // Collapsed / animating → green dot fading toward the smoked-glass black.
+      discFill.color.lerpColors(_colGreen, _colBlack, this._expansion);
+      discFill.opacity = MathUtils.lerp(COLLAPSED_FILL_OPACITY, FILL_OPACITY_IDLE, this._expansion);
+    }
   }
 
   // ─── Pointer handling ────────────────────────────────────────────────
@@ -492,6 +643,12 @@ export class FloorGizmo {
 
   private _handlePointerMove(e: PointerEvent): void {
     if (!this._enabled || !this._target) return;
+
+    // Always record the cursor position — `_sync` re-reads it every frame to
+    // drive proximity-based expansion, even when the cursor is stationary and
+    // the gizmo moves under it (camera orbit / target moving).
+    pointerToNDC(e.clientX, e.clientY, this._domElement, _lastPointerNdc);
+    this._hasPointer = true;
 
     if (this._dragging) {
       this._updateDrag(e);
@@ -513,6 +670,10 @@ export class FloorGizmo {
    */
   private _raycastHandle(e: PointerEvent): Handle | null {
     if (!this.root.visible) return null;
+    // While minimized the disk is a pure indicator — no hover, no drag. Returning
+    // null here lets `_handlePointerDown` fall through (no preventDefault), so the
+    // normal object-selection raycast underneath still runs.
+    if (this._minimizeEnabled && this._expansion < INTERACT_EXPANSION_MIN) return null;
     pointerToNDC(e.clientX, e.clientY, this._domElement, _ndcPointer);
     _raycaster.setFromCamera(_ndcPointer, this._camera);
 

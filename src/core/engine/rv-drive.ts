@@ -118,6 +118,18 @@ export class RVDrive implements RVComponent {
     this.name = node.name;
   }
 
+  /** Home (authored) local position captured at `initDrive` — the node's pose
+   *  before any motion. Writes into `out` (or a new Vector3) and returns it. */
+  getHomeLocalPosition(out: Vector3 = new Vector3()): Vector3 {
+    return out.copy(this.basePosition);
+  }
+
+  /** Home (authored) local orientation captured at `initDrive`. Writes into
+   *  `out` (or a new Quaternion) and returns it. */
+  getHomeLocalQuaternion(out: Quaternion = new Quaternion()): Quaternion {
+    return out.copy(this.baseQuaternion);
+  }
+
   init(_context: ComponentContext): void {
     // Drive behavior wiring is handled by the loader (Drive_Simple, Drive_Cylinder, etc.)
   }

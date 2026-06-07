@@ -13,6 +13,8 @@ import {
   LineBasicMaterial,
   Vector3,
   Quaternion,
+  Box3,
+  Matrix4,
 } from 'three';
 import { AABB } from './rv-aabb';
 import type { RVMovingUnit, InstancedMovingUnit, IMUAccessor } from './rv-mu';
@@ -20,6 +22,7 @@ import type { ComponentSchema, ComponentContext, RVComponent } from './rv-compon
 import { registerComponent } from './rv-component-registry';
 import { NodeRegistry } from './rv-node-registry';
 import { unityPositionToGltf } from './rv-coordinate-utils';
+import { instanceScope, scopeSignalName } from './rv-instance-scope';
 import { debug } from './rv-debug';
 
 // Shared materials (reused across all sensors to save GPU resources)
@@ -106,6 +109,61 @@ function rayIntersectsAABB(
   return tmin;
 }
 
+// ─── Auto-ray beam from bounding box (for convention sensors) ─────────
+
+export interface SensorBeam {
+  /** Ray start in the sensor node's LOCAL space — centre of the min face along the longest axis. */
+  originOffset: Vector3;
+  /** Ray direction in local space — unit vector along the longest box axis. */
+  direction: { x: number; y: number; z: number };
+  /** Beam length in millimetres — the longest box extent. */
+  lengthMm: number;
+}
+
+/** Node-local AABB enclosing all mesh geometry under `node` (empty Box3 if none). */
+function localGeometryBounds(node: Object3D): Box3 {
+  node.updateWorldMatrix(true, true);
+  const inv = new Matrix4().copy(node.matrixWorld).invert();
+  const box = new Box3();
+  const childBox = new Box3();
+  const m = new Matrix4();
+  node.traverse((child) => {
+    const mesh = child as Mesh;
+    if (!mesh.isMesh || !mesh.geometry) return;
+    if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+    const gb = mesh.geometry.boundingBox;
+    if (!gb) return;
+    m.multiplyMatrices(inv, mesh.matrixWorld);   // child geometry → node-local
+    childBox.copy(gb).applyMatrix4(m);
+    box.union(childBox);
+  });
+  return box;
+}
+
+/**
+ * Derive a raycast beam spanning the LONGEST edge of the node's bounding box —
+ * from the centre of one end face to the centre of the opposite face. Returns
+ * null when the node has no geometry. Assumes ~unit world scale (placed library
+ * objects use scale 1); the beam length is the local extent.
+ */
+export function computeBeamFromBounds(node: Object3D): SensorBeam | null {
+  const box = localGeometryBounds(node);
+  if (box.isEmpty()) return null;
+  const size = box.getSize(new Vector3());
+  const center = box.getCenter(new Vector3());
+
+  let axis: 'x' | 'y' | 'z' = 'x';
+  let extent = size.x;
+  if (size.y > extent) { axis = 'y'; extent = size.y; }
+  if (size.z > extent) { axis = 'z'; extent = size.z; }
+  if (extent < 1e-5) return null;
+
+  const originOffset = center.clone();
+  originOffset[axis] = box.min[axis];   // centre of the min-face along the longest axis
+  const direction = { x: axis === 'x' ? 1 : 0, y: axis === 'y' ? 1 : 0, z: axis === 'z' ? 1 : 0 };
+  return { originOffset, direction, lengthMm: extent * 1000 };
+}
+
 /**
  * RVSensor - Detects MU presence via AABB overlap or raycast.
  *
@@ -124,6 +182,9 @@ export class RVSensor implements RVComponent {
     RayCastLength: { type: 'number', default: 1000 },
     SensorOccupied: { type: 'componentRef' },
     SensorNotOccupied: { type: 'componentRef' },
+    // Set by the naming-convention scan for bare Sensor/Sensor-* nodes: derive a
+    // raycast beam along the longest bounding-box edge (centre face → centre face).
+    AutoRay: { type: 'boolean', default: false },
   };
 
   readonly node: Object3D;
@@ -134,6 +195,10 @@ export class RVSensor implements RVComponent {
   UseRaycast = false;
   RayCastDirection: Vector3 | { x: number; y: number; z: number } = { x: -1, y: 0, z: 0 };
   RayCastLength = 1000;
+  /** When true, the ray beam is auto-derived from the node bounding box (convention sensors). */
+  AutoRay = false;
+  /** Ray start in node-local space. (0,0,0) = node origin; set by AutoRay to a box-face centre. */
+  private rayOriginOffset = new Vector3();
 
   // Derived mode for backward compat with callers checking mode
   get mode(): 'Raycast' | 'Collision' { return this.UseRaycast ? 'Raycast' : 'Collision'; }
@@ -170,6 +235,13 @@ export class RVSensor implements RVComponent {
   /** BoxCollider data from GLB extras, stored during construction for use in init() */
   boxColliderData: { center: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } } | null = null;
 
+  /** Unsub for 'layout-transform-update' — refreshes AABB when an ancestor moves. */
+  private _layoutUnsub: (() => void) | null = null;
+
+  /** Node path captured at init — used to match `layout-transform-update` events
+   *  against ancestors of this sensor's node. */
+  private _nodePath = '';
+
   constructor(node: Object3D, aabb: AABB) {
     this.node = node;
     this.aabb = aabb;
@@ -197,7 +269,12 @@ export class RVSensor implements RVComponent {
     }
 
     const sensorPath = NodeRegistry.computeNodePath(this.node);
-    const sensorName = this.node.name;
+    this._nodePath = sensorPath;
+    // Per-instance scope: a sensor inside a placed LayoutObject registers under
+    // `<RootName>/<NodeName>` so copies of the same asset don't share one signal.
+    // Standalone (no LayoutObject ancestor) → bare node name. Mirrors the bind
+    // context's scoping so behaviors and the sensor agree on the name.
+    const sensorName = scopeSignalName(instanceScope(this.node), this.node.name);
 
     // Register sensor signal in SignalStore
     context.signalStore.register(sensorName, sensorPath, false);
@@ -217,6 +294,12 @@ export class RVSensor implements RVComponent {
       }
     };
 
+    // Convention sensors (bare Sensor/Sensor-* nodes, no authored BoxCollider):
+    // derive a raycast beam along the longest bounding-box edge.
+    if (this.AutoRay && !this.boxColliderData) {
+      this.autoConfigureRay();
+    }
+
     // Create sensor visualization
     if (this.UseRaycast) {
       this.createRayVisualization();
@@ -234,7 +317,33 @@ export class RVSensor implements RVComponent {
     // Register in transport manager
     context.transportManager.sensors.push(this);
 
+    // Refresh the AABB whenever an ancestor LayoutObject is moved/rotated by
+    // the planner, inspector, snap-flip, etc. The fixed-loop already refreshes
+    // it during sim, but in paused/edit mode the AABB would otherwise stay
+    // frozen at its last-tick centre — the visMesh follows via the scene graph,
+    // so the visual and detection volume would drift apart.
+    if (context.events) {
+      this._layoutUnsub = context.events.on('layout-transform-update', (data: { path: string }) => {
+        if (!data || typeof data.path !== 'string') return;
+        // Match self OR an ancestor: sensor at path "Root/A/B" must react to
+        // moves of "Root", "Root/A", and "Root/A/B".
+        if (this._nodePath === data.path || this._nodePath.startsWith(`${data.path}/`)) {
+          // World matrices may not be up-to-date yet — refresh ancestors first.
+          this.node.updateWorldMatrix(true, false);
+          this.updateAABB();
+        }
+      });
+    }
+
     debug('sensor', `Sensor: ${this.node.name} mode=${this.mode} dir=${this.UseRaycast ? JSON.stringify(this.RayCastDirection) : 'N/A'} len=${this.RayCastLength}mm${sensorOccupiedAddr ? ` → ${sensorOccupiedAddr}` : ''}`);
+  }
+
+  /** Run subscriptions cleanup. The scene loader calls this when reloading. */
+  dispose(): void {
+    if (this._layoutUnsub) {
+      this._layoutUnsub();
+      this._layoutUnsub = null;
+    }
   }
 
   // ─── Collision-mode visualization (box) ────────────────────────────
@@ -282,7 +391,9 @@ export class RVSensor implements RVComponent {
     const maxDist = this.RayCastLength / 1000;
     const radius = 0.002; // 2mm radius — visible but not obtrusive
     const indexedGeo = new CylinderGeometry(radius, radius, maxDist, 6, 1);
-    // CylinderGeometry is along Y by default; we'll orient it per-frame
+    // CylinderGeometry is along Y by default; we orient it along the
+    // sensor's LOCAL +Z forward (the geometry's intrinsic direction after
+    // the rotation below) and let Three.js' scene graph carry the rest.
     indexedGeo.translate(0, maxDist / 2, 0); // pivot at bottom (origin = ray start)
     indexedGeo.rotateX(Math.PI / 2); // point along +Z as default forward
 
@@ -295,13 +406,22 @@ export class RVSensor implements RVComponent {
     this.rayTube.frustumCulled = false;
     this.rayTube.name = `${this.node.name}_sensorRay`;
 
-    // Add to scene root (world-space transform)
-    let root: Object3D = this.node;
-    while (root.parent && root.parent.parent) root = root.parent;
-    root.add(this.rayTube);
-
-    // Initialize position/orientation
-    this.updateRayTube();
+    // Parent the tube to `this.node` and set its pose in LOCAL space. The
+    // scene graph then carries any ancestor translation/rotation — no per-tick
+    // world-space refresh needed. Mirrors the TransportSurface arrow gizmo
+    // which uses the same local-parented pattern.
+    const d = this.RayCastDirection;
+    const localDir = new Vector3(d.x, d.y, d.z);
+    if (localDir.lengthSq() < 1e-12) {
+      localDir.set(0, 0, 1); // safe fallback: forward
+    } else {
+      localDir.normalize();
+    }
+    this.rayTube.position.copy(this.rayOriginOffset);
+    _forward.set(0, 0, 1);
+    _quat.setFromUnitVectors(_forward, localDir);
+    this.rayTube.quaternion.copy(_quat);
+    this.node.add(this.rayTube);
   }
 
   /** Compute world-space ray origin and direction. */
@@ -310,28 +430,27 @@ export class RVSensor implements RVComponent {
     const maxDist = this.RayCastLength / 1000; // mm → meters
 
     this.node.updateWorldMatrix(true, false);
-    _origin.setFromMatrixPosition(this.node.matrixWorld);
+    // Ray start = local origin offset transformed to world (offset (0,0,0) → node origin).
+    _origin.copy(this.rayOriginOffset).applyMatrix4(this.node.matrixWorld);
     _dir.set(d.x, d.y, d.z).transformDirection(this.node.matrixWorld).normalize();
 
     return { origin: _origin, dir: _dir, maxDist };
   }
 
-  /** Update the ray tube position, orientation, and color. Always full length. */
+  /** Derive the raycast beam from the node's bounding box (longest edge, face → face). */
+  private autoConfigureRay(): void {
+    const beam = computeBeamFromBounds(this.node);
+    if (!beam) return;
+    this.rayOriginOffset.copy(beam.originOffset);
+    this.RayCastDirection = beam.direction;
+    this.RayCastLength = beam.lengthMm;
+    this.UseRaycast = true;
+  }
+
+  /** Update only the ray tube color — position/orientation are baked into the
+   *  node-parented local transform at construction (carried by the scene graph). */
   private updateRayTube(): void {
     if (!this.rayTube) return;
-
-    const { origin, dir } = this.computeRay();
-
-    // Position at ray origin
-    this.rayTube.position.copy(origin);
-
-    // Orient tube to point along ray direction
-    // The tube geometry points along +Z after our rotateX(PI/2)
-    _forward.set(0, 0, 1);
-    _quat.setFromUnitVectors(_forward, dir);
-    this.rayTube.quaternion.copy(_quat);
-
-    // Color: yellow=idle, red=occupied
     this.rayTube.material = this.occupied ? RVSensor.rayMatRed : RVSensor.rayMatYellow;
   }
 

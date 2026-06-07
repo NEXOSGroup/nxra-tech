@@ -20,6 +20,15 @@ export const MM_TO_METERS = 1000;
  */
 export const USER_PAUSE_REASON = 'user';
 
+/**
+ * Pause reason used by the Layout-Planner while a 3D edit gesture is in flight
+ * (gizmo transform, direct object drag, library drag-in placement). Kept
+ * DISTINCT from `USER_PAUSE_REASON` so the planner can auto-resume the sim when
+ * the gesture finishes WITHOUT ever clobbering a manual user pause — releasing
+ * this reason only resumes when no other reason still holds the sim paused.
+ */
+export const LAYOUT_EDIT_PAUSE_REASON = 'layout-edit';
+
 /** Minimum pixel distance before a pointerdown→pointermove sequence is treated as a drag (not a click). */
 export const DRAG_THRESHOLD_PX = 8;
 

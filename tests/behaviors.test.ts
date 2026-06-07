@@ -215,6 +215,168 @@ describe('BehaviorManager — lifecycle via events', () => {
   });
 });
 
+describe('BehaviorManager — per placed LayoutObject dispatch', () => {
+  function placedObject(name: string): Object3D {
+    const o = new Object3D();
+    o.name = name;
+    o.userData._layoutObject = true;
+    o.userData._layoutId = `lid-${name}`;
+    o.userData.realvirtual = { LayoutObject: { Label: name, CatalogId: 'cat', Locked: false } };
+    return o;
+  }
+
+  it('binds a placed LayoutObject matched by its asset name (scoped to its subtree)', () => {
+    const manager = new BehaviorManager();
+    const boundRoots: Object3D[] = [];
+    manager.register('conv', defineBehavior({ models: ['*Conveyor*'], bind: (rv) => { boundRoots.push(rv.root); } }));
+    const { host, events } = makeHost();
+    const sceneRoot = new Object3D(); sceneRoot.name = 'MyScene';
+    const conv = placedObject('RollConveyor2m'); sceneRoot.add(conv);
+    const other = placedObject('SteelRack');     sceneRoot.add(other);
+    manager.attach(host, () => sceneRoot, () => '/models/MyScene.glb');
+
+    events.emit('model-loaded', { result: {} });
+
+    // Scene filename 'MyScene' matches nothing; only the placed conveyor binds,
+    // scoped to its own subtree (not the scene root).
+    expect(boundRoots).toHaveLength(1);
+    expect(boundRoots[0]).toBe(conv);
+  });
+
+  it('dispatchPlaced binds an asset added after load, idempotently', () => {
+    const manager = new BehaviorManager();
+    let count = 0;
+    manager.register('conv', defineBehavior({ models: ['*Conveyor*'], bind: () => { count++; } }));
+    const { host, events } = makeHost();
+    const sceneRoot = new Object3D();
+    manager.attach(host, () => sceneRoot, () => '/models/MyScene.glb');
+    events.emit('model-loaded', { result: {} });
+    expect(count).toBe(0);
+
+    const conv = placedObject('ChainConveyor3m'); sceneRoot.add(conv);
+    manager.dispatchPlaced(conv);
+    expect(count).toBe(1);
+    manager.dispatchPlaced(conv);           // idempotent — already dispatched
+    expect(count).toBe(1);
+    expect(manager.activeCount).toBe(1);
+  });
+
+  it('strips the _N duplicate suffix when matching the asset name', () => {
+    const manager = new BehaviorManager();
+    let count = 0;
+    manager.register('t', defineBehavior({ models: ['Turntable'], bind: () => { count++; } }));
+    const { host } = makeHost();
+    manager.attach(host, () => null, () => '/models/Scene.glb');
+    manager.dispatchPlaced(placedObject('Turntable_2'));  // exact-match behavior, deduped name
+    expect(count).toBe(1);
+  });
+
+  it('disposeObject disposes only that object\'s binds', () => {
+    const manager = new BehaviorManager();
+    const tick = vi.fn();
+    manager.register('conv', defineBehavior({ models: ['*Conveyor*'], bind: (rv) => { rv.onFixedUpdate(tick); } }));
+    const { host } = makeHost();
+    manager.attach(host, () => null, () => '/x.glb');
+    const conv = placedObject('RollConveyor2m');
+    manager.dispatchPlaced(conv);
+    expect(manager.activeCount).toBe(1);
+    manager.tick(0.016);
+    expect(tick).toHaveBeenCalledTimes(1);
+
+    manager.disposeObject(conv);
+    expect(manager.activeCount).toBe(0);
+    manager.tick(0.016);
+    expect(tick).toHaveBeenCalledTimes(1);   // no further ticks after dispose
+  });
+});
+
+describe('BehaviorManager — behavior signal initialValue registration', () => {
+  function makeHostWithStore() {
+    const events = new EventEmitter<Record<string, unknown>>();
+    const values = new Map<string, boolean | number>();
+    const registered: Array<{ name: string; initial: boolean | number; type?: string }> = [];
+    const signalStore = {
+      get: (n: string) => values.get(n),
+      set: (n: string, v: boolean | number) => { values.set(n, v); },
+      subscribe: () => () => {},
+      register: (name: string, _path: string, initial: boolean | number, plcType?: string) => {
+        registered.push({ name, initial, type: plcType });
+        if (!values.has(name)) values.set(name, initial);
+      },
+    };
+    const host: BindContextHost = {
+      signalStore,
+      on: (e, cb) => events.on(e, cb as never),
+      contextMenu: new ContextMenuStore(),
+      drives: [],
+      registry: null,
+    };
+    return { host, events, values, registered };
+  }
+
+  it('seeds the SignalStore with initialValue after bind (so the first tick reads true)', () => {
+    const manager = new BehaviorManager();
+    manager.register('m', defineBehavior({
+      models: ['Foo'],
+      bind: (rv) => {
+        rv.signal('My.Run',  { type: 'PLCInputBool',  initialValue: true });
+        rv.signal('My.Idle', { type: 'PLCOutputBool', initialValue: false });
+        rv.signal('My.Pos',  { type: 'PLCOutputFloat' });   // no initialValue → not seeded
+      },
+    }));
+    const { host, events, values, registered } = makeHostWithStore();
+    let currentRoot: Object3D | null = new Object3D();
+    manager.attach(host, () => currentRoot, () => '/models/Foo.glb');
+    events.emit('model-loaded', { result: {} });
+
+    expect(values.get('My.Run')).toBe(true);    // initialValue applied
+    expect(values.get('My.Idle')).toBe(false);
+    expect(values.has('My.Pos')).toBe(false);   // undeclared initialValue → no seed
+    expect(registered.map(r => r.name)).toEqual(['My.Run', 'My.Idle']);
+    expect(registered[0].type).toBe('PLCInputBool');
+  });
+
+  it('does not clobber a value already in the store (PLC/saved scene wins)', () => {
+    const manager = new BehaviorManager();
+    manager.register('m', defineBehavior({
+      models: ['Foo'],
+      bind: (rv) => { rv.signal('My.Run', { type: 'PLCInputBool', initialValue: true }); },
+    }));
+    const { host, events, values } = makeHostWithStore();
+    values.set('My.Run', false);                 // already set (e.g. by a PLC / saved scene)
+    let currentRoot: Object3D | null = new Object3D();
+    manager.attach(host, () => currentRoot, () => '/models/Foo.glb');
+    events.emit('model-loaded', { result: {} });
+    expect(values.get('My.Run')).toBe(false);    // preserved
+  });
+
+  it('falls back to set() on hosts without register (test-only stores)', () => {
+    const manager = new BehaviorManager();
+    manager.register('m', defineBehavior({
+      models: ['Foo'],
+      bind: (rv) => { rv.signal('My.Run', { type: 'PLCInputBool', initialValue: true }); },
+    }));
+    const events = new EventEmitter<Record<string, unknown>>();
+    const values = new Map<string, boolean | number>();
+    const host: BindContextHost = {
+      signalStore: {
+        get: (n: string) => values.get(n),
+        set: (n: string, v: boolean | number) => { values.set(n, v); },
+        subscribe: () => () => {},
+        // no register
+      },
+      on: (e, cb) => events.on(e, cb as never),
+      contextMenu: new ContextMenuStore(),
+      drives: [],
+      registry: null,
+    };
+    let currentRoot: Object3D | null = new Object3D();
+    manager.attach(host, () => currentRoot, () => '/models/Foo.glb');
+    events.emit('model-loaded', { result: {} });
+    expect(values.get('My.Run')).toBe(true);   // seeded via set() fallback
+  });
+});
+
 describe('registerAllBehaviors — Vite glob discovery', () => {
   it('runs without error and registers any modules present in src/behaviors/', () => {
     const manager = new BehaviorManager();

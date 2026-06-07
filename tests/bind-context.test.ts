@@ -161,6 +161,53 @@ describe('createBindContext — auto-dispose (F12)', () => {
   });
 });
 
+describe('createBindContext — per-instance signal scoping', () => {
+  function placedRoot(name: string): Object3D {
+    const o = new Object3D(); o.name = name;
+    o.userData.realvirtual = { LayoutObject: { Label: name, CatalogId: 'c', Locked: false } };
+    return o;
+  }
+
+  it('isolates signals of two placed instances of the same asset', () => {
+    const { host } = makeHost();
+    const { ctx: a } = createBindContext(placedRoot('Conv'), host, {});
+    const { ctx: b } = createBindContext(placedRoot('Conv_2'), host, {});
+    a.signals.set('Run', true);
+    b.signals.set('Run', false);
+    expect(a.signals.get('Run')).toBe(true);
+    expect(b.signals.get('Run')).toBe(false);   // independent — no collision
+  });
+
+  it('declares scoped signal names in the spec', () => {
+    const { host } = makeHost();
+    const accum: KinematicsSpec = {};
+    const { ctx } = createBindContext(placedRoot('Conv'), host, accum);
+    ctx.signal('Conveyor.Run', { type: 'PLCInputBool' });
+    expect(accum.signals![0].name).toBe('Conv/Conveyor.Run');
+  });
+
+  it('leaves names unscoped for a standalone (non-LayoutObject) root', () => {
+    const { host } = makeHost();
+    const { ctx } = createBindContext(new Object3D(), host, {});
+    ctx.signals.set('Run', true);
+    const { ctx: other } = createBindContext(new Object3D(), host, {});
+    expect(other.signals.get('Run')).toBe(true);   // same global name
+  });
+
+  it('on() subscribes to the scoped name only', () => {
+    const { host } = makeHost();
+    const { ctx: a } = createBindContext(placedRoot('A'), host, {});
+    const cb = vi.fn();
+    a.signals.on('Run', cb);
+    a.signals.set('Run', true);
+    expect(cb).toHaveBeenCalledWith(true);
+    // A different instance's same logical name must not fire A's listener.
+    const { ctx: b } = createBindContext(placedRoot('B'), host, {});
+    b.signals.set('Run', false);
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('createBindContext — navigation helpers', () => {
   it('find() resolves by name', () => {
     const root = new Object3D(); root.name = 'R';

@@ -19,7 +19,7 @@ import { getLayoutDragData } from './drag-types';
 import { type LibraryCatalogEntry, type LayoutStore } from './rv-layout-store';
 import type { GhostManager } from './ghost-manager';
 import type { FloorGizmo } from './floor-gizmo';
-import { findLayoutAncestor, isLockedLayoutInstance } from './layout-predicates';
+import { findLayoutAncestor, isLockedLayoutInstance, isMuSelectable } from './layout-predicates';
 import type { BoxSelectController } from './box-select-controller';
 import type { BboxSnapController } from './bbox-snap';
 import type { SnapPointPlugin } from '../snap-point';
@@ -221,7 +221,15 @@ export class CanvasInteractionManager {
         return;
       }
 
-      // No layout hit → empty canvas → marquee.
+      // Over a spawned MU (registered selectable scene node)? Do NOT start a
+      // marquee — let the global click pipeline select it (MUs are select +
+      // outline + delete, not movable, so no direct-drag is armed). Without
+      // this, a zero-size marquee on pointer-up could clear the MU selection.
+      // Hover already ran via the global RaycastManager this frame.
+      const hovered = viewer.raycastManager?.hoveredNode;
+      if (hovered && isMuSelectable(hovered)) return;
+
+      // Nothing hit → empty canvas → start marquee.
       this.deps.boxSelect.start(e);
     };
 
@@ -346,6 +354,8 @@ export class CanvasInteractionManager {
           break;
         case 'Delete':
         case 'Backspace':
+          // removeSelected handles both layout placements and spawned MUs
+          // (mixed selections delete together).
           this.deps.removeSelected();
           break;
         case 'Escape':

@@ -1098,9 +1098,9 @@ export async function loadGLB(url: string, scene: Scene, options?: LoadGLBOption
   // `hasLibraryMarker` is still available for diagnostics/logging.
   {
     const spec = scanLibraryComponent(root);
-    if ((spec.drives?.length ?? 0) > 0 || (spec.transports?.length ?? 0) > 0) {
+    if ((spec.drives?.length ?? 0) > 0 || (spec.transports?.length ?? 0) > 0 || (spec.sensors?.length ?? 0) > 0) {
       applyKinematicsSpec(root, spec);
-      debug('loader', `Naming-convention scan: drives=${spec.drives!.length} transports=${spec.transports!.length}`);
+      debug('loader', `Naming-convention scan: drives=${spec.drives!.length} transports=${spec.transports!.length} sensors=${spec.sensors!.length}`);
     }
   }
 

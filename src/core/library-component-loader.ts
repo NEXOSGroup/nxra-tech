@@ -11,6 +11,7 @@
  *   - `Drive-Rot-X/Y/Z`           → RVDrive, Direction = Rotation{X,Y,Z}
  *   - `Transport-X/Y/Z`           → RVTransportSurface, +X/+Y/+Z axis,
  *                                   parent Drive-* (if any) is auto-linked
+ *   - `Sensor` / `Sensor-<id>`    → RVSensor (e.g. `Sensor`, `Sensor-1`, `Sensor-Infeed`)
  *   - `DriveMesh`, `Base`         → hierarchy tags (no component emitted)
  *   - `Snap-<DIR>-<TYPEID>`       → handled by snap-point plugin, untouched
  *
@@ -47,6 +48,44 @@ export function parseTransportName(name: string): AxisCode | null {
   return ('+' + m[1]) as AxisCode;
 }
 
+/** Sensor — bare `Sensor` or `Sensor-<id>` (e.g. `Sensor-1`, `Sensor-Infeed`). */
+export function isSensorName(name: string): boolean {
+  return /^Sensor(-.*)?$/.test(name);
+}
+
+// ─── Node finders (for behavior files) ──────────────────────────────────
+// Behavior files use these to locate kinematics by the same conventions the
+// scanner wires up, instead of hardcoded node names. They live here (not in
+// src/behaviors/) because the behavior auto-discovery glob requires every
+// src/behaviors/*.ts to have a default export.
+
+/** First node in the subtree (root included) for which `test` returns true, or null. */
+export function findFirst(root: Object3D, test: (node: Object3D) => boolean): Object3D | null {
+  let found: Object3D | null = null;
+  root.traverse((o) => { if (!found && test(o)) found = o; });
+  return found;
+}
+
+/** First `Transport-X/Y/Z` node — a belt surface (carries a co-located Drive). */
+export function findTransport(root: Object3D): Object3D | null {
+  return findFirst(root, (n) => parseTransportName(n.name) !== null);
+}
+
+/** First `Drive-Rot-X/Y/Z` node — a rotary axis. */
+export function findRotaryDrive(root: Object3D): Object3D | null {
+  return findFirst(root, (n) => (parseDriveName(n.name) ?? '').startsWith('Rotation'));
+}
+
+/** First `Drive-Lin-X/Y/Z` node — a linear axis. */
+export function findLinearDrive(root: Object3D): Object3D | null {
+  return findFirst(root, (n) => (parseDriveName(n.name) ?? '').startsWith('Linear'));
+}
+
+/** First `Sensor-…` node. */
+export function findSensor(root: Object3D): Object3D | null {
+  return findFirst(root, (n) => isSensorName(n.name));
+}
+
 /** True when name is a structural tag with no associated component. */
 export function isStructuralTag(name: string): boolean {
   return name === 'DriveMesh' || name === 'Base';
@@ -71,12 +110,17 @@ export function isStructuralTag(name: string): boolean {
  * via `RVTransportSurface.init`'s `findInParent('Drive')` fallback.
  */
 export function scanLibraryComponent(root: Object3D): KinematicsSpec {
-  const spec: KinematicsSpec = { drives: [], transports: [] };
+  const spec: KinematicsSpec = { drives: [], transports: [], sensors: [] };
 
   const traverse = (node: Object3D): void => {
     const driveDir = parseDriveName(node.name);
     if (driveDir) {
       spec.drives!.push({ target: node, direction: driveDir });
+    } else if (isSensorName(node.name)) {
+      // Sensor / Sensor-<id> → RVSensor. AutoRay derives a raycast beam along the
+      // node's longest bounding-box edge (centre face → centre face) for both the
+      // colored line visualization and detection.
+      spec.sensors!.push({ target: node, extra: { AutoRay: true } });
     } else {
       const transportDir = parseTransportName(node.name);
       if (transportDir) {

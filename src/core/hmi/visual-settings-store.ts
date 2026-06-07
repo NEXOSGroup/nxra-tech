@@ -100,6 +100,12 @@ export interface VisualSettings {
   backgroundBrightness: number;
   /** Floor checker pattern contrast multiplier (0 = flat midgray, 1 = default, 2 = doubled). */
   checkerContrast: number;
+  /** Whether the optional floor reflection is enabled (WebGL only). */
+  reflectionEnabled: boolean;
+  /** Floor reflection strength (0 = none, 1 = full mirror). */
+  reflectionStrength: number;
+  /** Floor reflection blur / gloss (0 = sharp mirror, 1 = soft frosted gloss). */
+  reflectionBlur: number;
   /** Zoom factor for the React HMI overlay (0.5–2.0, default 1.0). */
   uiZoom: number;
   /** OrbitControls rotate speed multiplier (0.1–3.0, default 1.0). */
@@ -172,6 +178,9 @@ const DEFAULTS: VisualSettings = {
   groundColor: '#ffffff',
   backgroundBrightness: 1.0,
   checkerContrast: 1.0,
+  reflectionEnabled: false,
+  reflectionStrength: 0.8,
+  reflectionBlur: 1.0,
   uiZoom: 1.0,
   orbitRotateSpeed: 1.0,
   orbitPanSpeed: 1.0,
@@ -244,6 +253,9 @@ export function loadVisualSettings(): VisualSettings {
     groundColor: fromStorage.groundColor,
     backgroundBrightness: fromStorage.backgroundBrightness,
     checkerContrast: fromStorage.checkerContrast,
+    reflectionEnabled: fromStorage.reflectionEnabled,
+    reflectionStrength: fromStorage.reflectionStrength,
+    reflectionBlur: fromStorage.reflectionBlur,
     uiZoom: fromStorage.uiZoom,
     orbitRotateSpeed: clampNavNumber(
       override.orbitRotateSpeed,
@@ -346,6 +358,14 @@ function loadFromLocalStorage(): VisualSettings {
     const checkerContrastRaw = (parsed as Record<string, unknown>).checkerContrast;
     const checkerContrast = (typeof checkerContrastRaw === 'number' && checkerContrastRaw >= 0 && checkerContrastRaw <= 2)
       ? checkerContrastRaw : DEFAULTS.checkerContrast;
+    const reflectionEnabledRaw = (parsed as Record<string, unknown>).reflectionEnabled;
+    const reflectionEnabled = typeof reflectionEnabledRaw === 'boolean' ? reflectionEnabledRaw : DEFAULTS.reflectionEnabled;
+    const reflectionStrengthRaw = (parsed as Record<string, unknown>).reflectionStrength;
+    const reflectionStrength = (typeof reflectionStrengthRaw === 'number' && reflectionStrengthRaw >= 0 && reflectionStrengthRaw <= 1)
+      ? reflectionStrengthRaw : DEFAULTS.reflectionStrength;
+    const reflectionBlurRaw = (parsed as Record<string, unknown>).reflectionBlur;
+    const reflectionBlur = (typeof reflectionBlurRaw === 'number' && reflectionBlurRaw >= 0 && reflectionBlurRaw <= 1)
+      ? reflectionBlurRaw : DEFAULTS.reflectionBlur;
     const uiZoomRaw = (parsed as Record<string, unknown>).uiZoom;
     const uiZoom = (typeof uiZoomRaw === 'number' && uiZoomRaw >= 0.5 && uiZoomRaw <= 2)
       ? uiZoomRaw : DEFAULTS.uiZoom;
@@ -395,6 +415,9 @@ function loadFromLocalStorage(): VisualSettings {
       groundColor,
       backgroundBrightness,
       checkerContrast,
+      reflectionEnabled,
+      reflectionStrength,
+      reflectionBlur,
       uiZoom,
       orbitRotateSpeed,
       orbitPanSpeed,

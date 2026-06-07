@@ -16,6 +16,9 @@ export function EnvironmentTab() {
   const [groundBright, setGroundBright] = useState<number>(settingsRef.current.groundBrightness);
   const [groundColor, setGroundColor] = useState<string>(settingsRef.current.groundColor);
   const [contrast, setContrast] = useState<number>(settingsRef.current.checkerContrast);
+  const [reflectionOn, setReflectionOn] = useState<boolean>(settingsRef.current.reflectionEnabled);
+  const [reflectionStrength, setReflectionStrength] = useState<number>(settingsRef.current.reflectionStrength);
+  const [reflectionBlur, setReflectionBlur] = useState<number>(settingsRef.current.reflectionBlur);
 
   const persist = (patch: Partial<VisualSettings>) => {
     Object.assign(settingsRef.current, patch);
@@ -82,6 +85,29 @@ export function EnvironmentTab() {
     viewer.checkerContrast = val;
     setContrast(val);
     persist({ checkerContrast: val });
+    markEnvironmentUserModified();
+  };
+
+  const updateReflectionOn = (_: unknown, v: boolean) => {
+    viewer.reflectionEnabled = v;
+    setReflectionOn(v);
+    persist({ reflectionEnabled: v });
+    markEnvironmentUserModified();
+  };
+
+  const updateReflectionStrength = (_: unknown, v: number | number[]) => {
+    const val = v as number;
+    viewer.reflectionStrength = val;
+    setReflectionStrength(val);
+    persist({ reflectionStrength: val });
+    markEnvironmentUserModified();
+  };
+
+  const updateReflectionBlur = (_: unknown, v: number | number[]) => {
+    const val = v as number;
+    viewer.reflectionBlur = val;
+    setReflectionBlur(val);
+    persist({ reflectionBlur: val });
     markEnvironmentUserModified();
   };
 
@@ -178,6 +204,34 @@ export function EnvironmentTab() {
                 </Typography>
               </Box>
             </Box>
+            <Box sx={{ mt: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
+                Reflection
+              </Typography>
+              <Switch size="small" checked={reflectionOn} onChange={updateReflectionOn} />
+            </Box>
+            {reflectionOn && (
+              <Box sx={{ mt: 1 }}>
+                <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
+                  Reflection Strength
+                </Typography>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 0.5 }}>
+                  <Slider size="small" min={0} max={1} step={0.05} value={reflectionStrength} onChange={updateReflectionStrength} sx={{ flex: 1 }} />
+                  <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace', minWidth: 32, textAlign: 'right' }}>
+                    {reflectionStrength.toFixed(2)}
+                  </Typography>
+                </Box>
+                <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1, mt: 1, display: 'block' }}>
+                  Reflection Blur
+                </Typography>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 0.5 }}>
+                  <Slider size="small" min={0} max={1} step={0.05} value={reflectionBlur} onChange={updateReflectionBlur} sx={{ flex: 1 }} />
+                  <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace', minWidth: 32, textAlign: 'right' }}>
+                    {reflectionBlur.toFixed(2)}
+                  </Typography>
+                </Box>
+              </Box>
+            )}
           </>
         )}
       </Box>

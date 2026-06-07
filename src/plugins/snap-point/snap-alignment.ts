@@ -287,3 +287,146 @@ export function computeSnapAlignedWorldMatrix(
   // Matrix4 (decompose mutates components from it). Single per-call alloc.
   return new Matrix4().multiplyMatrices(_mT2, _mResult);
 }
+
+const _2a = new Vector3();
+const _2b = new Vector3();
+const _2ap = new Vector3();
+const _2bp = new Vector3();
+const _2u = new Vector3();
+const _2v = new Vector3();
+const _2q = new Quaternion();
+const _2R = new Matrix4();
+const _2T1 = new Matrix4();
+const _2T2 = new Matrix4();
+const _2tmp = new Matrix4();
+
+/**
+ * Two-snap (auto-rotating) alignment for a two-port connection.
+ *
+ * Rotates + translates `movingRoot` so that BOTH `snapA→targetA` and the
+ * direction `snapA→snapB` align with `targetA→targetB`. snapA lands exactly on
+ * targetA; snapB lands on targetB when the snap spacing matches the port
+ * spacing (the normal case for a part designed to bridge two ports). Unlike the
+ * single-pair `computeSnapAlignedWorldMatrix` — whose leftover roll is resolved
+ * to world-up — the orientation here is fully constrained by the two ports, so
+ * a part inserted between two neighbours auto-rotates to mate both.
+ *
+ * The roll about the connection axis is inherited from `movingRoot`'s current
+ * orientation (kept upright for floor parts), as the two points leave that one
+ * rotational DOF free.
+ *
+ * Returns the new world matrix for `movingRoot`; caller decomposes + applies.
+ */
+export function computeTwoSnapAlignedWorldMatrix(
+  targetA: Object3D,
+  snapA: Object3D,
+  targetB: Object3D,
+  snapB: Object3D,
+  movingRoot: Object3D,
+): Matrix4 {
+  movingRoot.updateMatrixWorld(true);
+  snapA.updateWorldMatrix(true, false);
+  snapB.updateWorldMatrix(true, false);
+  targetA.updateWorldMatrix(true, false);
+  targetB.updateWorldMatrix(true, false);
+  _2a.setFromMatrixPosition(snapA.matrixWorld);
+  _2b.setFromMatrixPosition(snapB.matrixWorld);
+  _2ap.setFromMatrixPosition(targetA.matrixWorld);
+  _2bp.setFromMatrixPosition(targetB.matrixWorld);
+
+  _2u.subVectors(_2b, _2a);
+  _2v.subVectors(_2bp, _2ap);
+  if (_2u.lengthSq() < 1e-10 || _2v.lengthSq() < 1e-10) {
+    // Degenerate (coincident snaps) → translate snapA onto targetA, keep rotation.
+    const M = movingRoot.matrixWorld.clone();
+    M.elements[12] += _2ap.x - _2a.x;
+    M.elements[13] += _2ap.y - _2a.y;
+    M.elements[14] += _2ap.z - _2a.z;
+    return M;
+  }
+  _2u.normalize();
+  _2v.normalize();
+  _2q.setFromUnitVectors(_2u, _2v);              // swing that aligns the A→B axes
+  _2R.makeRotationFromQuaternion(_2q);
+
+  // M = T(targetA) · R · T(-snapA) · currentWorld
+  //   → rotate the object about snapA by the swing, then move snapA onto targetA.
+  _2T1.makeTranslation(-_2a.x, -_2a.y, -_2a.z);
+  _2T2.makeTranslation(_2ap.x, _2ap.y, _2ap.z);
+  _2tmp.multiplyMatrices(_2T1, movingRoot.matrixWorld); // T(-a) · world
+  _2tmp.premultiply(_2R);                                 // R · T(-a) · world
+  _2tmp.premultiply(_2T2);                                // T(a') · R · T(-a) · world
+  return _2tmp.clone();
+}
+
+const _pvPivot = new Vector3();
+const _pvTarget = new Vector3();
+const _pvMovOut = new Vector3();
+const _pvTgtOut = new Vector3();
+const _pvDesired = new Vector3();
+const _pvQ = new Quaternion();
+const _pvOwnerQ = new Quaternion();
+const _pvR = new Matrix4();
+const _pvT1 = new Matrix4();
+const _pvT2 = new Matrix4();
+const _pvTmp = new Matrix4();
+
+/**
+ * Single-pair snap that rotates the asset around ITS OWN snap point.
+ *
+ * Unlike `computeSnapAlignedWorldMatrix` — which re-orients the asset to the
+ * target's frame (a full reorientation that pivots the body to a new pose) —
+ * this keeps the asset's current orientation and applies only the MINIMAL swing
+ * needed to make its outward axis anti-parallel to the target's, pivoting about
+ * the moving snap point so that point stays put while the body rotates around
+ * it. The moving snap then translates onto the target. This matches the user's
+ * expectation when dragging an already-oriented part onto a port: it rotates
+ * around its snap, it doesn't flip to the target's frame.
+ *
+ * Used by the drag-time magnetic snap; the snap PICKER still uses the
+ * frame-reorienting variant (a fresh pick has no meaningful prior orientation).
+ *
+ * Returns the new world matrix for `movingRoot`; caller decomposes + applies.
+ */
+export function computeSnapPivotAlignedWorldMatrix(
+  targetSnap: Object3D,
+  movingRoot: Object3D,
+  movingSnap: Object3D,
+  targetDir: SnapDirection,
+  movingDir: SnapDirection,
+): Matrix4 {
+  movingRoot.updateMatrixWorld(true);
+  targetSnap.updateWorldMatrix(true, false);
+  movingSnap.updateWorldMatrix(true, false);
+
+  _pvPivot.setFromMatrixPosition(movingSnap.matrixWorld);
+  _pvTarget.setFromMatrixPosition(targetSnap.matrixWorld);
+
+  // Moving snap outward in WORLD = its local-frame outward rotated by the
+  // asset's current world orientation.
+  outwardLocalByPosition(movingSnap, movingRoot, movingDir.axis, movingDir.sign, _pvMovOut);
+  _pvOwnerQ.setFromRotationMatrix(movingRoot.matrixWorld);
+  _pvMovOut.applyQuaternion(_pvOwnerQ).normalize();
+
+  // Target snap outward in WORLD (resolve its owning placed root).
+  const targetOwner = _resolveOwnerRoot(targetSnap);
+  targetOwner.updateWorldMatrix(true, false);
+  outwardLocalByPosition(targetSnap, targetOwner, targetDir.axis, targetDir.sign, _pvTgtOut);
+  _pvOwnerQ.setFromRotationMatrix(targetOwner.matrixWorld);
+  _pvTgtOut.applyQuaternion(_pvOwnerQ).normalize();
+
+  // Minimal swing so the asset's outward becomes anti-parallel to the target's.
+  _pvDesired.copy(_pvTgtOut).multiplyScalar(-1);
+  _pvQ.setFromUnitVectors(_pvMovOut, _pvDesired);
+  _pvR.makeRotationFromQuaternion(_pvQ);
+
+  // M = T(target) · R · T(-pivot) · currentWorld
+  //   → rotate the asset about its own snap (pivot), then move that snap onto
+  //     the target. Orientation otherwise preserved (no roll reset).
+  _pvT1.makeTranslation(-_pvPivot.x, -_pvPivot.y, -_pvPivot.z);
+  _pvT2.makeTranslation(_pvTarget.x, _pvTarget.y, _pvTarget.z);
+  _pvTmp.multiplyMatrices(_pvT1, movingRoot.matrixWorld);
+  _pvTmp.premultiply(_pvR);
+  _pvTmp.premultiply(_pvT2);
+  return _pvTmp.clone();
+}

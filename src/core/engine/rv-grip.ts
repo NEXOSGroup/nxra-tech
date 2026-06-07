@@ -139,6 +139,7 @@ export class RVGrip implements RVComponent {
 
     mu.isGripped = true;
     mu.currentSurface = null;
+    mu.lastSurfaceTickId = undefined;
     this.grippedMUs.push(mu);
 
     debug('grip', `Grip "${this.node.name}" picked MU "${mu.getName()}"`);

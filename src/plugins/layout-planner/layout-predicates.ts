@@ -15,6 +15,30 @@ export function isLayoutInstance(obj: Object3D): boolean {
   return typeof obj.userData?._layoutId === 'string' && !obj.userData?._isGhost;
 }
 
+/**
+ * True if the Object3D is a spawned MU registered as a selectable scene node
+ * (transient, sim-owned — NOT a persisted layout placement). Marked by the
+ * MU reconciler with `_muSelectable`; never carries `_layoutId`.
+ */
+export function isMuSelectable(obj: Object3D): boolean {
+  return obj.userData?._muSelectable === true;
+}
+
+/** True if the Object3D can be selected in the planner (layout OR spawned MU). */
+export function isPlannerSelectable(obj: Object3D): boolean {
+  return isLayoutInstance(obj) || isMuSelectable(obj);
+}
+
+/** Walk parent chain to the nearest planner-selectable ancestor (layout or MU). */
+export function findPlannerSelectableAncestor(obj: Object3D): Object3D | null {
+  let cur: Object3D | null = obj;
+  while (cur) {
+    if (isPlannerSelectable(cur)) return cur;
+    cur = cur.parent;
+  }
+  return null;
+}
+
 /** True if the layout instance has been locked against editing. */
 export function isLockedLayoutInstance(obj: Object3D): boolean {
   const rv = obj.userData?.realvirtual as Record<string, unknown> | undefined;

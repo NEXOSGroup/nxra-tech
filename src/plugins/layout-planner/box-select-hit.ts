@@ -23,6 +23,12 @@ export interface BoxSelectRegistryLike {
   getPathForNode(node: Object3D): string | null;
 }
 
+/** Minimal MU-entry surface — the reconciler entry's node + pre-stored path. */
+export interface BoxSelectMuEntry {
+  node: Object3D;
+  path: string;
+}
+
 /** Rectangle in canvas-client coordinates (CSS pixels relative to the canvas). */
 export interface ClientRect {
   /** Left edge in canvas-client x. */
@@ -55,7 +61,10 @@ const _projected = new Vector3();
  * @param rectClient Rectangle in canvas-client space.
  * @param objectMap Map of placement-id → Three.js root (the planner's `_objectMap`).
  * @param registry Provides `getPathForNode(root)` to resolve roots to scene paths.
- * @returns Deduplicated array of paths, in `objectMap` iteration order.
+ * @param muMap Optional map of spawned-MU entries (`{ node, path }`) — included
+ *   in the marquee so MUs box-select like layout objects. The entry's stored
+ *   synthetic path is used directly (no `getPathForNode`, no lock check).
+ * @returns Deduplicated array of paths.
  */
 export function computeBoxSelectPaths(
   camera: PerspectiveCamera | OrthographicCamera,
@@ -63,6 +72,7 @@ export function computeBoxSelectPaths(
   rectClient: ClientRect,
   objectMap: ReadonlyMap<string, Object3D>,
   registry: BoxSelectRegistryLike,
+  muMap?: Iterable<BoxSelectMuEntry> | null,
 ): string[] {
   const ndc = clientRectToNdc(rectClient, canvas);
   const out: string[] = [];
@@ -77,6 +87,14 @@ export function computeBoxSelectPaths(
       out.push(path);
     }
   }
+
+  if (muMap) {
+    for (const { node, path } of muMap) {
+      if (!aabbIntersectsMarquee(node, camera, ndc)) continue;
+      if (!seen.has(path)) { seen.add(path); out.push(path); }
+    }
+  }
+
   return out;
 }
 

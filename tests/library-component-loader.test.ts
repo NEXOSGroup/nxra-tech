@@ -7,6 +7,7 @@ import {
   parseDriveName,
   parseTransportName,
   isStructuralTag,
+  isSensorName,
   scanLibraryComponent,
   hasLibraryMarker,
 } from '../src/core/library-component-loader';
@@ -40,6 +41,34 @@ describe('isStructuralTag', () => {
     expect(isStructuralTag('DriveMesh')).toBe(true);
     expect(isStructuralTag('Base')).toBe(true);
     expect(isStructuralTag('Something')).toBe(false);
+  });
+});
+
+describe('isSensorName', () => {
+  it('matches bare Sensor and Sensor-<id>', () => {
+    expect(isSensorName('Sensor')).toBe(true);        // library assets use bare "Sensor"
+    expect(isSensorName('Sensor-1')).toBe(true);
+    expect(isSensorName('Sensor-Infeed')).toBe(true);
+  });
+  it('rejects non-sensor names', () => {
+    expect(isSensorName('Sensor_1')).toBe(false);     // underscore, not hyphen
+    expect(isSensorName('SensorMount')).toBe(false);  // no separator
+    expect(isSensorName('MySensor-1')).toBe(false);   // prefix only
+  });
+});
+
+describe('scanLibraryComponent — Sensor-* nodes', () => {
+  it('emits a sensor entry for a Sensor-* node (and not for plain names)', () => {
+    const root = new Object3D(); root.name = 'Cell';
+    const s = new Object3D(); s.name = 'Sensor-Infeed';
+    const plain = new Object3D(); plain.name = 'Housing';
+    root.add(s, plain);
+    const spec = scanLibraryComponent(root);
+    expect(spec.sensors).toHaveLength(1);
+    expect(spec.sensors![0].target).toBe(s);
+    expect(spec.sensors![0].extra).toMatchObject({ AutoRay: true });  // beam from bounding box
+    expect(spec.drives).toHaveLength(0);
+    expect(spec.transports).toHaveLength(0);
   });
 });
 

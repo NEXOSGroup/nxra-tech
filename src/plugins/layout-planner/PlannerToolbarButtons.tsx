@@ -325,6 +325,8 @@ export function PlannerDeleteButton() {
   const selection = useSelection();
   if (!plugin) return null;
 
+  // Spawned MUs are registered selectable scene nodes, so they appear in
+  // SelectionManager paths just like layout objects — no special-casing here.
   const count = selection.selectedPaths.length;
   const disabled = count === 0;
   const tooltip = disabled

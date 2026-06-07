@@ -64,6 +64,9 @@ import {
 import { getPrimaryDisplayValue, applyLiveEdit, getLiveStateFor, formatValue } from './rv-value-resolver';
 import { navigateToRef } from './rv-reference-display';
 import { ComponentSection } from './rv-component-section';
+import { BehaviorLiveStateSections } from './inspector-behavior-section';
+import { findLayoutRoot } from './layout-root-utils';
+import { getCapabilities } from '../engine/rv-component-registry';
 import { Vector3Editor } from './rv-field-editors';
 import { StepState } from '../engine/rv-logic-step';
 import type { StepStateInfo } from '../engine/rv-logic-engine';
@@ -795,6 +798,16 @@ export function PropertyInspector({ viewer }: PropertyInspectorProps) {
             // below — never as an editable/overridable field.
             // Header value: a compact live glance (signal value or drive pos).
             const headerValue = getPrimaryDisplayValue(viewer, selectedPath, type, data).text;
+            // For behavior markers (Conveyor/Turntable/ChainTransfer/…) append a
+            // live signals + hardware + snaps section scoped to the owning
+            // LayoutObject. Detected by capability filterLabel — no per-behavior
+            // wiring needed.
+            const isBehavior = getCapabilities(type).filterLabel === 'Behavior';
+            const selectedNode = viewer.registry?.getNode(selectedPath) ?? null;
+            const layoutRoot = isBehavior ? findLayoutRoot(selectedNode) : null;
+            const behaviorExtra = layoutRoot
+              ? <BehaviorLiveStateSections viewer={viewer} layoutRoot={layoutRoot} />
+              : undefined;
             return (
               <ComponentSection
                 key={type}
@@ -805,6 +818,7 @@ export function PropertyInspector({ viewer }: PropertyInspectorProps) {
                 consumedOnly={consumedOnly}
                 signalValue={headerValue}
                 headerAction={type === 'AASLink' ? <AasDetailHeaderAction data={data} /> : undefined}
+                extraContent={behaviorExtra}
                 onFieldEdit={(fieldName, value) => handleFieldEdit(type, fieldName, value)}
                 onFieldReset={(fieldName) => handleFieldReset(type, fieldName)}
                 onResetComponent={() => handleComponentReset(type)}

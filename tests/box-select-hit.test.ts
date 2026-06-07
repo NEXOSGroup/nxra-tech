@@ -173,6 +173,44 @@ describe('computeBoxSelectPaths', () => {
     );
     expect(paths).toEqual(['a', 'b', 'c']);
   });
+
+  // ─── MU map (spawned MUs participate in the marquee) ──────────────────
+
+  /** Build a non-layout MU-style node (a plain 1×1×1 box) at a position. */
+  function makeMuNode(pos?: [number, number, number]): Object3D {
+    const mesh = new Mesh(new BoxGeometry(1, 1, 1), new MeshBasicMaterial());
+    if (pos) mesh.position.set(...pos);
+    mesh.updateMatrixWorld(true);
+    return mesh;
+  }
+
+  it('includes MU entries (by stored path) when inside the marquee', () => {
+    const rect: ClientRect = { l: 400, t: 400, w: 200, h: 200 };
+    const muMap = [{ node: makeMuNode(), path: '__mu#0' }];
+    const paths = computeBoxSelectPaths(
+      makeCamera(), makeCanvas(), rect, new Map(), fakeRegistry, muMap,
+    );
+    expect(paths).toEqual(['__mu#0']);
+  });
+
+  it('selects both layout objects AND MUs in one marquee', () => {
+    const map = new Map<string, Object3D>([['a', makePlacement({ id: 'a' })]]);
+    const muMap = [{ node: makeMuNode([0.3, 0, 0]), path: '__mu#1' }];
+    const rect: ClientRect = { l: 0, t: 0, w: 1000, h: 1000 };
+    const paths = computeBoxSelectPaths(
+      makeCamera(), makeCanvas(), rect, map, fakeRegistry, muMap,
+    );
+    expect(paths).toEqual(['a', '__mu#1']);
+  });
+
+  it('excludes an MU entirely outside the marquee', () => {
+    const muMap = [{ node: makeMuNode([-5, 0, 0]), path: '__mu#2' }];
+    const rect: ClientRect = { l: 400, t: 400, w: 200, h: 200 };
+    const paths = computeBoxSelectPaths(
+      makeCamera(), makeCanvas(), rect, new Map(), fakeRegistry, muMap,
+    );
+    expect(paths).toEqual([]);
+  });
 });
 
 // ─── Combiner tests ─────────────────────────────────────────────────────

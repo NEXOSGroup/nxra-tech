@@ -6,7 +6,9 @@ import {
   InstancedMesh, DynamicDrawUsage,
 } from 'three';
 import type { BufferGeometry, Material } from 'three';
+import type { Mesh } from 'three';
 import { AABB } from './rv-aabb';
+import { classifyShadows } from './rv-mesh-classifier';
 import { registerCapabilities } from './rv-component-registry';
 import type { RVTransportSurface } from './rv-transport-surface';
 
@@ -56,6 +58,14 @@ export class RVMovingUnit implements IMUAccessor {
 
   /** Whether this MU uses InstancedMesh rendering (false = clone-based) */
   readonly isInstanced = false;
+
+  /** Tick id (RVTransportSurface._currentTickId) of the most recent successful
+   *  `surface.transportMU(this, …)` call. Used by `RVTransportSurface` to
+   *  decide whether to carry the MU along with a rotating parent: rotation is
+   *  only applied when the MU was on the same surface in the immediately
+   *  previous tick (`lastSurfaceTickId === currentTickId - 1`), so a freshly
+   *  entered MU is not snapped by a phantom one-tick rotation. */
+  lastSurfaceTickId?: number;
 
   constructor(node: Object3D, sourceName: string, halfSize?: Vector3, localCenter?: Vector3) {
     this.node = node;
@@ -186,6 +196,9 @@ export class InstancedMovingUnit implements IMUAccessor {
 
   /** Marked for removal by Sink */
   markedForRemoval = false;
+
+  /** See `RVMovingUnit.lastSurfaceTickId`. */
+  lastSurfaceTickId?: number;
 
   /** Pool that owns this instance */
   private pool: MUInstancePool;
@@ -361,6 +374,12 @@ export class MUInstancePool {
     this.instancedMesh.instanceMatrix.setUsage(DynamicDrawUsage);
     this.instancedMesh.count = 0; // Start with no visible instances
     this.instancedMesh.frustumCulled = true; // Per-pool frustum culling via computed bounding sphere
+    // Shadows: opaque pools cast (per material alpha), all receive — matches
+    // the static-scene policy so spawned MUs cast/receive like everything else.
+    // No extra shadow-map dirtying needed: the sim loop already sets
+    // _shadowsDirty on MU movement (transport drive isRunning) and spawn/despawn.
+    this.instancedMesh.castShadow = classifyShadows(this.instancedMesh as unknown as Mesh);
+    this.instancedMesh.receiveShadow = true;
     this.instancedMesh.name = `__muPool_${templateName}`;
     // Tag for raycast manager identification
     this.instancedMesh.userData._muPool = this;
@@ -557,6 +576,8 @@ export class MUInstancePool {
     newMesh.instanceMatrix.setUsage(DynamicDrawUsage);
     newMesh.count = this.activeCount;
     newMesh.frustumCulled = true;
+    newMesh.castShadow = this.instancedMesh.castShadow; // preserve across the swap
+    newMesh.receiveShadow = this.instancedMesh.receiveShadow;
     newMesh.name = this.instancedMesh.name;
     newMesh.userData._muPool = this;
 

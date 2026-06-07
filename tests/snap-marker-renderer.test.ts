@@ -136,4 +136,78 @@ describe('SnapMarkerRenderer', () => {
     expect(renderer.getIdleHandleCount()).toBe(0);
     expect(renderer.getActiveSnapId()).toBeNull();
   });
+
+  // ── Drag hints ───────────────────────────────────────────────────────
+
+  /** Read the SpriteMaterial color hex + opacity of a snap's idle marker. */
+  function spriteStyle(id: string): { hex: number; opacity: number; visible: boolean } {
+    const node = reg.getById(id)!.object3D;
+    const sprite = node.children.find(c => c.userData._rvGizmo)! as
+      import('three').Sprite;
+    const mat = sprite.material as import('three').SpriteMaterial;
+    return { hex: mat.color.getHex(), opacity: mat.opacity, visible: sprite.visible };
+  }
+
+  const GOLD = 0xffd24a;
+  const GREEN = 0x4fc34f;
+
+  it('setDragHints shows moving snaps faint and target snaps gold', () => {
+    makeSnap(reg, scene, 'm', [0, 0, 0]);
+    makeSnap(reg, scene, 't', [1, 0, 0]);
+    makeSnap(reg, scene, 'x', [2, 0, 0]); // untouched
+    renderer.rebuild(reg.size);
+
+    renderer.setDragHints(['m'], ['t']);
+
+    const m = spriteStyle('m');
+    expect(m.visible).toBe(true);
+    expect(m.hex).toBe(GREEN);
+    expect(m.opacity).toBeCloseTo(0.4, 5);
+
+    const t = spriteStyle('t');
+    expect(t.visible).toBe(true);
+    expect(t.hex).toBe(GOLD);
+    expect(t.opacity).toBeCloseTo(0.95, 5);
+
+    // Unrelated snap stays hidden.
+    expect(spriteStyle('x').visible).toBe(false);
+  });
+
+  it('clearDragHints restores idle style + hides markers (show-all off)', () => {
+    makeSnap(reg, scene, 'm', [0, 0, 0]);
+    makeSnap(reg, scene, 't', [1, 0, 0]);
+    renderer.rebuild(reg.size);
+
+    renderer.setDragHints(['m'], ['t']);
+    renderer.clearDragHints();
+
+    for (const id of ['m', 't']) {
+      const s = spriteStyle(id);
+      expect(s.visible).toBe(false);   // default hidden when show-all is off
+      expect(s.hex).toBe(GREEN);       // colour restored
+      expect(s.opacity).toBeCloseTo(0.95, 5);
+    }
+  });
+
+  it('clearDragHints keeps markers visible when show-all is on', () => {
+    makeSnap(reg, scene, 'm', [0, 0, 0]);
+    renderer.rebuild(reg.size);
+    renderer.setShowAllIdle(true);
+
+    renderer.setDragHints(['m'], []);
+    renderer.clearDragHints();
+
+    const s = spriteStyle('m');
+    expect(s.visible).toBe(true);      // show-all keeps it on
+    expect(s.hex).toBe(GREEN);
+    expect(s.opacity).toBeCloseTo(0.95, 5);
+  });
+
+  it('setDragHints never emphasises an occupied snap', () => {
+    const t = makeSnap(reg, scene, 't', [0, 0, 0]);
+    renderer.rebuild(reg.size);
+    t.occupied = true;
+    renderer.setDragHints([], ['t']);
+    expect(spriteStyle('t').visible).toBe(false);
+  });
 });

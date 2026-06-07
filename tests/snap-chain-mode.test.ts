@@ -229,3 +229,63 @@ describe('SnapMagneticController chain mode', () => {
     expect(ctrl.getChainMemberCount()).toBe(0);
   });
 });
+
+describe('SnapMagneticController drag-hint helpers', () => {
+  let reg: SnapPointRegistry;
+  let ctrl: SnapMagneticController;
+  let mover: Object3D;   // the dragged asset
+  let other: Object3D;   // a stationary neighbour
+
+  beforeEach(() => {
+    reg = new SnapPointRegistry();
+    ctrl = new SnapMagneticController(reg);
+    mover = makeAsset('mover', [0, 0, 0]);
+    other = makeAsset('other', [0, 0, 0]);
+  });
+
+  it('getMovingSnaps returns the dragged asset\'s free snaps after arm', () => {
+    reg.register(makeSnap('m1', mover, [0, 0, 0]));
+    reg.register(makeSnap('m2', mover, [1, 0, 0]));
+    ctrl.armForDrag(mover, undefined, { chainEnabled: false });
+    const ids = ctrl.getMovingSnaps().map(s => s.id).sort();
+    expect(ids).toEqual(['m1', 'm2']);
+  });
+
+  it('collectApproaching returns a compatible candidate within radius', () => {
+    reg.register(makeSnap('m1', mover, [0, 0, 0]));      // mover snap at world (0,0,0)
+    reg.register(makeSnap('o1', other, [0.1, 0, 0]));     // 0.1 m away → within radius
+    ctrl.armForDrag(mover, undefined, { chainEnabled: false });
+    const { targets, movingActive } = ctrl.collectApproaching(0.6);
+    expect([...targets]).toEqual(['o1']);
+    expect([...movingActive]).toEqual(['m1']);
+  });
+
+  it('excludes a candidate beyond the radius', () => {
+    reg.register(makeSnap('m1', mover, [0, 0, 0]));
+    reg.register(makeSnap('o1', other, [1, 0, 0]));        // 1 m away → outside 0.6 m
+    ctrl.armForDrag(mover, undefined, { chainEnabled: false });
+    expect([...ctrl.collectApproaching(0.6).targets]).toEqual([]);
+  });
+
+  it('excludes incompatible flow (in ↔ in)', () => {
+    // `flow`/`typeId` are readonly on SnapPoint → override via spread.
+    reg.register({ ...makeSnap('m1', mover, [0, 0, 0]), flow: 'in' });
+    reg.register({ ...makeSnap('o1', other, [0.1, 0, 0]), flow: 'in' });
+    ctrl.armForDrag(mover, undefined, { chainEnabled: false });
+    expect([...ctrl.collectApproaching(0.6).targets]).toEqual([]);
+  });
+
+  it('excludes a candidate of a different typeId', () => {
+    reg.register(makeSnap('m1', mover, [0, 0, 0]));        // typeId 'conv'
+    reg.register({ ...makeSnap('o1', other, [0.1, 0, 0]), typeId: 'pipe' });
+    ctrl.armForDrag(mover, undefined, { chainEnabled: false });
+    expect([...ctrl.collectApproaching(0.6).targets]).toEqual([]);
+  });
+
+  it('returns empty sets when not armed', () => {
+    reg.register(makeSnap('m1', mover, [0, 0, 0]));
+    const { targets, movingActive } = ctrl.collectApproaching(0.6);
+    expect(targets.size).toBe(0);
+    expect(movingActive.size).toBe(0);
+  });
+});

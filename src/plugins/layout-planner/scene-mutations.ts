@@ -23,6 +23,7 @@ import type { Group, Object3D } from 'three';
 import type { RVViewer } from '../../core/rv-viewer';
 import { NodeRegistry } from '../../core/engine/rv-node-registry';
 import { processExtras, type ProcessExtrasResult } from '../../core/engine/rv-scene-loader';
+import { applyShadowFlags } from '../../core/engine/rv-mesh-classifier';
 import { scanLibraryComponent } from '../../core/library-component-loader';
 import { applyKinematicsSpec } from '../../core/behavior-runtime';
 import type { SnapPoint, SnapPointRegistry } from '../../core/engine/rv-snap-point-registry';
@@ -88,7 +89,7 @@ export function resolveUniqueName(deps: SceneMutationDeps, clone: Object3D): voi
  */
 function _applyNamingConventionScan(clone: Object3D): void {
   const spec = scanLibraryComponent(clone);
-  if ((spec.drives?.length ?? 0) > 0 || (spec.transports?.length ?? 0) > 0) {
+  if ((spec.drives?.length ?? 0) > 0 || (spec.transports?.length ?? 0) > 0 || (spec.sensors?.length ?? 0) > 0) {
     applyKinematicsSpec(clone, spec);
   }
 }
@@ -114,13 +115,10 @@ export function addPlacedToScene(
   } else {
     clone.userData.realvirtual = { LayoutObject: { Label: label, CatalogId: catalogId, Locked: false } };
   }
-  clone.traverse((child) => {
-    child.userData._layoutObject = true;
-    if ((child as Mesh).isMesh) {
-      child.castShadow = false;
-      child.receiveShadow = false;
-    }
-  });
+  clone.traverse((child) => { child.userData._layoutObject = true; });
+  // Cast/receive shadows using the same opaque-vs-transparent policy as the
+  // static GLB scene (processMeshes) so placed library objects match it.
+  applyShadowFlags(clone);
 
   // Always center pivot to floor
   pivotToFloorCenter(clone as Group);
@@ -137,6 +135,12 @@ export function addPlacedToScene(
   // NOTE: dropToSurface is NOT called here — it runs at drag-end when the
   // user has finished positioning the object at its final XZ location.
   // Calling it here would raycast at XZ=(0,0) before the position is set.
+
+  // Capture the original GLB root name BEFORE the rename. RVSource's
+  // self-template detection compares the authored `ThisObjectAsMU` against this
+  // original name — without it the 2nd placement (renamed `Foo_2`) would be
+  // mis-classified and resolve its template to the first source's node.
+  clone.userData._originalName = clone.name;
 
   // Resolve unique name (uses GLB root name, adds _2, _3 for dupes)
   resolveUniqueName(deps, clone);
@@ -168,6 +172,11 @@ export function addPlacedToScene(
       viewer.drives.push(...result.drives);
       viewer.rebuildGroupedBvh();
     }
+
+    // Dispatch any behavior file matching this placed library asset, scoped to
+    // its subtree (matched by the asset's GLB root name). Runs after components
+    // are constructed + drives registered, so rv.drives.get() resolves them.
+    viewer.behaviors?.dispatchPlaced(clone);
   } else {
     // Fallback: just register root node in registry
     if (viewer?.registry) {
@@ -207,6 +216,10 @@ export function addPlacedToScene(
       snapPlugin?.getMarkerRenderer?.()?.rebuild(snapRegistry.size);
     }
   }
+
+  // The shadow map runs with autoUpdate=false and only rebuilds when dirtied.
+  // Dirty it once so the newly placed object's shadow appears immediately.
+  viewer?.markShadowsDirty?.();
 
   return result;
 }
@@ -319,18 +332,18 @@ export function placeAtSnapPoint(
       LayoutObject: { Label: label, CatalogId: catalogId, Locked: false },
     };
   }
-  clone.traverse((child) => {
-    child.userData._layoutObject = true;
-    if ((child as Mesh).isMesh) {
-      child.castShadow = false;
-      child.receiveShadow = false;
-    }
-  });
+  clone.traverse((child) => { child.userData._layoutObject = true; });
+  // Cast/receive shadows using the same policy as the static scene (see
+  // addPlacedToScene).
+  applyShadowFlags(clone);
 
   // Attach to layout/model root preserving world transform
   const modelRoot = deps.getModelRoot();
   const targetParent = modelRoot ?? deps.getLayoutRoot();
   targetParent.attach(clone);
+
+  // Capture original GLB root name before rename (see addPlacedToScene).
+  clone.userData._originalName = clone.name;
 
   resolveUniqueName(deps, clone);
 
@@ -354,6 +367,11 @@ export function placeAtSnapPoint(
       viewer.drives.push(...result.drives);
       viewer.rebuildGroupedBvh();
     }
+    // Dispatch behaviors for this placement — mirrors addPlacedToScene. Without
+    // this, an asset that snaps to a neighbour during drag never binds its
+    // behaviors (only the floor-dropped first placement did), so a 2nd / 3rd
+    // conveyor in a snapped line had no Conveyor.* signals and no belt control.
+    viewer.behaviors?.dispatchPlaced(clone);
   } else if (viewer?.registry) {
     const path = NodeRegistry.computeNodePath(clone);
     viewer.registry.registerNode(path, clone);
@@ -390,6 +408,10 @@ export function placeAtSnapPoint(
     snapPlugin?.getMarkerRenderer?.()?.rebuild(snapRegistry.size);
   }
 
+  // Dirty the shadow map so the snapped object's shadow appears immediately
+  // (shadowMap.autoUpdate is off — see addPlacedToScene).
+  viewer?.markShadowsDirty?.();
+
   return result;
 }
 
@@ -402,6 +424,9 @@ export function removePlacedFromScene(deps: SceneMutationDeps, id: string): void
   if (gizmo) gizmo.detach();
 
   const viewer = deps.getViewer();
+
+  // Dispose any behavior bound to this placed object (mirrors dispatchPlaced).
+  viewer?.behaviors?.disposeObject(obj);
 
   // Unregister auxiliary raycast targets we added in addPlacedToScene.
   if (viewer?.raycastManager) {

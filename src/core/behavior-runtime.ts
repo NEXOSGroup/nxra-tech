@@ -22,6 +22,7 @@
 import type { Object3D } from 'three';
 import type { ContextMenuItem } from './hmi/context-menu-store';
 import { getSchemaDefaults } from './engine/rv-component-registry';
+import { instanceScope, scopeSignalName } from './engine/rv-instance-scope';
 
 // ─── Public Types ───────────────────────────────────────────────────────
 
@@ -525,6 +526,12 @@ export interface BindContextHost {
     get(name: string): boolean | number | undefined;
     set(name: string, value: boolean | number): void;
     subscribe(name: string, cb: (value: boolean | number) => void): () => void;
+    /** Optional: register a signal with initialValue + PLC type. The BehaviorManager
+     *  calls this after applying a bind's KinematicsSpec so behavior-declared signals
+     *  (which are written to extras AFTER the load-time signal-construction pass)
+     *  are present in the store before the first onFixedUpdate tick. RVViewer.signalStore
+     *  implements it; minimal/test hosts can omit it and the manager falls back to set(). */
+    register?(name: string, path: string, initialValue: boolean | number, plcType?: string): void;
   } | null;
   simulationLoop?: {
     onFixedUpdateExtra?: ((dt: number) => void) | null;
@@ -534,10 +541,13 @@ export interface BindContextHost {
     register(reg: { pluginId: string; items: ContextMenuItem[] }): void;
     unregister(pluginId: string): void;
   };
-  drives: Array<{ name: string; node: Object3D; startMove?: (d?: number) => void; stop?: () => void; jogForward?: boolean; jogBackward?: boolean; TargetSpeed?: number }>;
+  drives: Array<{ name: string; node: Object3D; startMove?: (d?: number) => void; stop?: () => void; jogForward?: boolean; jogBackward?: boolean; TargetSpeed?: number; currentPosition?: number; isAtTarget?: boolean }>;
   registry?: {
     getNode?(path: string): Object3D | null;
   } | null;
+  /** Access another plugin by id (e.g. 'snap-point') — implemented by RVViewer.
+   *  Lets behaviors query cross-cutting registries like the snap-point graph. */
+  getPlugin?(id: string): unknown;
 }
 
 /** Minimal drive interface the context exposes (subset of RVDrive). */
@@ -547,6 +557,10 @@ export interface BindContextDrive {
   TargetSpeed: number;
   jogForward: boolean;
   jogBackward: boolean;
+  /** Live position in mm or deg — populated by the runtime from RVDrive.currentPosition. */
+  readonly currentPosition?: number;
+  /** True when the drive has reached its commanded `targetPosition` (within ε). */
+  readonly isAtTarget?: boolean;
   startMove(destination?: number): void;
   stop(): void;
   moveTo(destination: number): void;
@@ -669,7 +683,11 @@ export function createBindContext(
   const findDrive = (target: NodeRef): BindContextDrive | null => {
     const node = resolveNode(root, target);
     if (!node) return null;
-    const drv = host.drives.find(d => d.node === node || d.name === node.name);
+    // Node identity wins (unique). The name fallback is only for when the
+    // resolved node isn't itself in the drive list — without the node-first
+    // pass, two placed instances whose drives share a name (e.g. 'Transport-X')
+    // would both match the FIRST same-named drive.
+    const drv = host.drives.find(d => d.node === node) ?? host.drives.find(d => d.name === node.name);
     if (!drv) return null;
     const d = drv as BindContextDrive;
     if (typeof d.moveTo !== 'function') {
@@ -683,6 +701,13 @@ export function createBindContext(
     }
     return d;
   };
+
+  // Per-instance signal scoping: behaviors bound to a placed LayoutObject get
+  // their signal names prefixed with the LayoutObject root name, so multiple
+  // placements of the same asset don't collide. Standalone (no LayoutObject
+  // ancestor) → empty scope → names unchanged. See rv-instance-scope.ts.
+  const signalScope = instanceScope(root);
+  const sn = (name: string): string => scopeSignalName(signalScope, name);
 
   const ctx: RVBindContext = {
     root,
@@ -726,21 +751,21 @@ export function createBindContext(
     },
 
     signal(name: string, opts: SignalOpts): RVBindContext {
-      accum.signals!.push({ name, ...opts });
+      accum.signals!.push({ name: sn(name), ...opts });
       return ctx;
     },
 
     signals: {
       get<T = unknown>(name: string): T {
-        const v = host.signalStore?.get(name);
+        const v = host.signalStore?.get(sn(name));
         return v as unknown as T;
       },
       set(name: string, value: boolean | number): void {
-        host.signalStore?.set(name, value);
+        host.signalStore?.set(sn(name), value);
       },
       on(name: string, cb: (value: boolean | number) => void): void {
         if (internals.disposed) return;
-        const off = host.signalStore?.subscribe(name, cb);
+        const off = host.signalStore?.subscribe(sn(name), cb);
         if (off) internals.unsubs.push(off);
       },
     },

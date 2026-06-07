@@ -194,6 +194,7 @@ export class RaycastManager {
       // children of `RVSource.node` and should never block selection of the
       // pallet/layout-object below them — they're purely visual identifiers.
       (obj) => !!obj.userData?._isSourceGhost,
+      (obj) => !!obj.userData?._isGhostOverlay,
       (obj) => !!obj.userData?._isSourceMarker,
     );
 

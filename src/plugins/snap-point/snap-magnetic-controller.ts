@@ -32,13 +32,17 @@ import type {
   SnapPoint,
   SnapPointRegistry,
 } from '../../core/engine/rv-snap-point-registry';
-import { computeSnapAlignedWorldMatrix } from './snap-alignment';
+import { computeSnapPivotAlignedWorldMatrix, computeTwoSnapAlignedWorldMatrix } from './snap-alignment';
 import { parseSnapName, flowsCompatible } from './snap-name-parser';
 
 /** World-meter radius within which a magnetic snap engages. */
 export const DEFAULT_MAGNET_RADIUS_M = 0.4;
 /** Multiplier of the magnet radius at which an already-engaged edge breaks. */
 export const CHAIN_BREAK_FACTOR = 2;
+/** Max mismatch (m) between the moving snap-pair spacing and the target port
+ *  spacing for a SECOND pair to count as a genuine two-port connection. Beyond
+ *  this the part wasn't built to bridge those two ports → single-pair snap. */
+const SECOND_PAIR_SPACING_TOL_M = 0.1;
 
 /** Chain member captured at drag-start. */
 interface ChainMember {
@@ -88,6 +92,12 @@ export class SnapMagneticController {
   private readonly _wpB = new Vector3();
   private readonly _mInv = new Matrix4();
   private readonly _mTmp = new Matrix4();
+  private readonly _localM = new Matrix4();
+  // Second-pair search temps (two-port connection).
+  private readonly _spMa = new Vector3();
+  private readonly _spTa = new Vector3();
+  private readonly _spMb = new Vector3();
+  private readonly _spCb = new Vector3();
 
   constructor(
     registry: SnapPointRegistry,
@@ -202,26 +212,89 @@ export class SnapMagneticController {
       return null;
     }
 
-    // Apply snap-aligned transform. parseSnapName provides the outward
-    // direction needed by the alignment math (cross-axis support).
-    const targetDir = best.targetSnap.dir;
-    const movingDir = parseSnapName(best.movingSnap.object3D.name)?.dir ?? best.movingSnap.dir;
-    movingRoot.updateMatrixWorld(true);
-    const M = computeSnapAlignedWorldMatrix(
-      best.targetSnap.object3D,
-      movingRoot,
-      best.movingSnap.object3D,
-      targetDir,
-      movingDir,
-    );
+    // Look for a SECOND engaged pair (a different moving snap mating a different
+    // target, both within range, with matching spacing) — i.e. the part bridges
+    // two ports. When found, the two pairs FULLY constrain the rotation, so we
+    // auto-rotate to mate both. Otherwise fall back to the single-pair align
+    // (auto-orient one pair + world-up roll).
+    const second = this._findSecondPair(best);
+
+    let M: Matrix4;
+    if (second) {
+      M = computeTwoSnapAlignedWorldMatrix(
+        best.targetSnap.object3D,
+        best.movingSnap.object3D,
+        second.targetSnap.object3D,
+        second.movingSnap.object3D,
+        movingRoot,
+      );
+    } else {
+      // Single-pair: rotate the asset around ITS OWN snap point (minimal swing
+      // to align the outward axes), preserving the user's orientation. parseSnapName
+      // provides the outward direction the alignment math needs.
+      const targetDir = best.targetSnap.dir;
+      const movingDir = parseSnapName(best.movingSnap.object3D.name)?.dir ?? best.movingSnap.dir;
+      M = computeSnapPivotAlignedWorldMatrix(
+        best.targetSnap.object3D,
+        movingRoot,
+        best.movingSnap.object3D,
+        targetDir,
+        movingDir,
+      );
+    }
+    // `M` is a WORLD matrix; `movingRoot.matrix` is LOCAL. When the dragged
+    // object lives under a transformed parent (e.g. the loaded model root),
+    // assigning the world matrix directly mis-places it by the parent's
+    // transform — which fights the gizmo (it positions in world space) and
+    // makes the object jump. Convert world → parent-local first.
+    if (movingRoot.parent) {
+      movingRoot.parent.updateWorldMatrix(true, false);
+      this._localM.copy(movingRoot.parent.matrixWorld).invert().multiply(M);
+    } else {
+      this._localM.copy(M);
+    }
     movingRoot.matrixAutoUpdate = false;
-    movingRoot.matrix.copy(M);
-    M.decompose(movingRoot.position, movingRoot.quaternion, movingRoot.scale);
+    movingRoot.matrix.copy(this._localM);
+    this._localM.decompose(movingRoot.position, movingRoot.quaternion, movingRoot.scale);
     movingRoot.matrixAutoUpdate = true;
     movingRoot.updateMatrixWorld(true);
 
     this.lastPair = best;
     return best;
+  }
+
+  /**
+   * Find a second compatible (moving, target) pair distinct from `best`, with
+   * BOTH ends within the magnet radius and a spacing matching `best`'s (within
+   * SECOND_PAIR_SPACING_TOL_M). Returns the closest-matching such pair, or null.
+   * Its presence means the dragged part bridges two ports, so the rotation can
+   * be fully solved (auto-rotate to mate both) instead of using a world-up roll.
+   */
+  private _findSecondPair(
+    best: MagneticSnapPair,
+  ): { movingSnap: SnapPoint; targetSnap: SnapPoint } | null {
+    best.movingSnap.object3D.getWorldPosition(this._spMa);
+    best.targetSnap.object3D.getWorldPosition(this._spTa);
+    let chosen: { movingSnap: SnapPoint; targetSnap: SnapPoint } | null = null;
+    let bestDiff = SECOND_PAIR_SPACING_TOL_M;
+    for (const m of this.movingSnaps) {
+      if (m === best.movingSnap || !m.object3D.parent) continue;
+      m.object3D.getWorldPosition(this._spMb);
+      const movingSpacing = this._spMb.distanceTo(this._spMa);
+      for (const c of this.candidateSnaps) {
+        if (c === best.targetSnap || !c.object3D.parent) continue;
+        if (m.typeId !== c.typeId) continue;
+        if (!flowsCompatible(m.flow, c.flow)) continue;
+        c.object3D.getWorldPosition(this._spCb);
+        if (this._spMb.distanceTo(this._spCb) > this.radius) continue; // 2nd end must engage too
+        const diff = Math.abs(movingSpacing - this._spCb.distanceTo(this._spTa));
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          chosen = { movingSnap: m, targetSnap: c };
+        }
+      }
+    }
+    return chosen;
   }
 
   /**
@@ -330,6 +403,43 @@ export class SnapMagneticController {
 
   /** Most recent engaged pair (read-only). */
   getLastPair(): MagneticSnapPair | null { return this.lastPair; }
+
+  /** The dragged asset's (or chain's) free, unoccupied snaps captured at arm.
+   *  Read-only — used by the planner to faintly show the moving snaps during a
+   *  drag. Empty when not armed. */
+  getMovingSnaps(): readonly SnapPoint[] { return this.movingSnaps; }
+
+  /**
+   * Drag-time visualization helper: every compatible candidate snap within
+   * `radius` of a moving snap, plus the moving snaps that are near a match.
+   * Same compatibility rules as `tick()` (equal typeId + compatible flow), but
+   * scans the FULL candidate set (not just the single closest pair) so multiple
+   * approaching ports can be highlighted at once. Pure — no state mutation.
+   */
+  collectApproaching(radius: number): { targets: Set<string>; movingActive: Set<string> } {
+    const targets = new Set<string>();
+    const movingActive = new Set<string>();
+    if (this.movingSnaps.length === 0 || this.candidateSnaps.length === 0) {
+      return { targets, movingActive };
+    }
+    for (const m of this.movingSnaps) {
+      if (!m.object3D.parent) continue;
+      m.object3D.updateWorldMatrix(true, false);
+      m.object3D.getWorldPosition(this._wpA);
+      for (const c of this.candidateSnaps) {
+        if (m.typeId !== c.typeId) continue;
+        if (!flowsCompatible(m.flow, c.flow)) continue;
+        if (!c.object3D.parent) continue;
+        c.object3D.updateWorldMatrix(true, false);
+        c.object3D.getWorldPosition(this._wpB);
+        if (this._wpA.distanceTo(this._wpB) <= radius) {
+          targets.add(c.id);
+          movingActive.add(m.id);
+        }
+      }
+    }
+    return { targets, movingActive };
+  }
   /** Current candidate count — test helper. */
   getCandidateCount(): number { return this.candidateSnaps.length; }
   /** Chain member count — test helper. */
