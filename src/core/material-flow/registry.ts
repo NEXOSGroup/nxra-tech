@@ -30,7 +30,7 @@ import {
   getRegisteredFactories,
   type ComponentSchema,
 } from '../engine/rv-component-registry';
-import { matchesAny } from '../behaviors';
+import { matchesAny } from '../glob-match';
 import type { MaterialFlowDefinition } from './define-material-flow';
 
 // ─── Registry state ─────────────────────────────────────────────────────

@@ -38,6 +38,9 @@ import {
   type KinematicsSpec,
   type KinematizeReport,
 } from './behavior-runtime';
+// Glob matcher lives in its own dependency-free module (cycle break — see the
+// re-export note below). Imported here for this module's own internal use.
+import { matchesAny, extractGlbName } from './glob-match';
 
 // ─── Public types ───────────────────────────────────────────────────────
 
@@ -60,38 +63,13 @@ export interface Behavior {
 export function defineBehavior(b: Behavior): Behavior { return b; }
 
 // ─── Glob matcher ───────────────────────────────────────────────────────
-
-const _globCache = new Map<string, RegExp>();
-
-export function compileGlob(pattern: string): RegExp {
-  const cached = _globCache.get(pattern);
-  if (cached) return cached;
-  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*/g, '.*')
-    .replace(/\?/g, '.');
-  const re = new RegExp(`^${escaped}$`);
-  _globCache.set(pattern, re);
-  return re;
-}
-
-export function matchesAny(patterns: string[], name: string): boolean {
-  for (const p of patterns) {
-    if (p === '*') return true;
-    if (p === name) return true;
-    if (p.includes('*') || p.includes('?')) {
-      if (compileGlob(p).test(name)) return true;
-    }
-  }
-  return false;
-}
-
-/** Extract the GLB filename (no extension, no directory, no query string) from a URL. */
-export function extractGlbName(url: string | null | undefined): string {
-  if (!url) return '';
-  const noQuery = url.split('?')[0];
-  const file = noQuery.substring(noQuery.lastIndexOf('/') + 1);
-  return file.replace(/\.glb$/i, '');
-}
+//
+// Re-exported from `glob-match.ts` (the dependency-free home) so every existing
+// `import { matchesAny, compileGlob, extractGlbName } from '…/behaviors'` keeps
+// working, while `registry.ts` can import the matcher WITHOUT importing this
+// module (which carries the eager behavior glob → circular-init TDZ). See
+// glob-match.ts for the full rationale.
+export { compileGlob, matchesAny, extractGlbName } from './glob-match';
 
 // ─── Registry ───────────────────────────────────────────────────────────
 

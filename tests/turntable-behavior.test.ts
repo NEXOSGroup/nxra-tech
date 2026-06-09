@@ -13,7 +13,7 @@ import {
 import { EventEmitter } from '../src/core/rv-events';
 import { ContextMenuStore } from '../src/core/hmi/context-menu-store';
 import { getCapabilities } from '../src/core/engine/rv-component-registry';
-import Turntable, { freeCandidates } from '../src/behaviors/Turntable';
+import Turntable from '../src/behaviors/Turntable';
 import { matchesAny } from '../src/core/behaviors';
 import type { SnapLite } from '../src/behaviors/_shared/snap-graph-helpers';
 
@@ -196,20 +196,11 @@ describe('Turntable behavior — model matching', () => {
   });
 });
 
-describe('freeCandidates — downstream-block trichotomy', () => {
-  it('drops items whose downstream Conveyor.Occupied === true', () => {
-    const A = new Object3D(); A.name = 'A';
-    const B = new Object3D(); B.name = 'B';
-    const C = new Object3D(); C.name = 'C';
-    const items = [A, B, C].map(r => ({ ownerRoot: r }));
-    const sigs = new Map<string, boolean | number>([
-      ['/A/Conveyor.Occupied', false],
-      ['/B/Conveyor.Occupied', true],
-    ]);
-    const free = freeCandidates(items, n => sigs.get(n));
-    expect(free.map(p => p.ownerRoot)).toEqual([A, C]);
-  });
-});
+// NOTE: the `freeCandidates` downstream-block trichotomy that used to live here
+// moved to tests/transport-links.test.ts ("migrated freeCandidates trichotomy")
+// — `freeCandidates` is no longer exported from Turntable (Plan 194 P4/B5). The
+// equivalent root-only freeness rule is exercised inline by the HOLDING and
+// dispatch integration assertions below (parity guard).
 
 describe('Turntable behavior — multi-input cycle', () => {
   beforeEach(() => { vi.spyOn(Math, 'random').mockReturnValue(0); });
