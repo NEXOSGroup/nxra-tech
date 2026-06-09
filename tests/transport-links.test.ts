@@ -1,0 +1,288 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
+
+import { describe, it, expect } from 'vitest';
+import { Object3D } from 'three';
+import {
+  createBindContext,
+  applyKinematicsSpec,
+  type BindContextHost,
+  type KinematicsSpec,
+  type RVBindContext,
+} from '../src/core/behavior-runtime';
+import { EventEmitter } from '../src/core/rv-events';
+import { ContextMenuStore } from '../src/core/hmi/context-menu-store';
+import type { SnapLite, PortConnection } from '../src/behaviors/_shared/snap-graph-helpers';
+import {
+  conveyorShouldRun,
+  declareConveyorSignals,
+  outputLink,
+  outputLinks,
+  linkOf,
+  portIds,
+  type TransportLink,
+} from '../src/behaviors/_shared/transport-links';
+
+// ── Inline mock store (pattern from conveyor-/turntable-behavior.test.ts) ─────
+function makeStore() {
+  const subs = new Map<string, Set<(v: boolean | number) => void>>();
+  const values = new Map<string, boolean | number>();
+  return {
+    get: (n: string) => values.get(n),
+    set: (n: string, v: boolean | number) => {
+      values.set(n, v);
+      subs.get(n)?.forEach((cb) => cb(v));
+    },
+    subscribe: (n: string, cb: (v: boolean | number) => void) => {
+      let s = subs.get(n); if (!s) { s = new Set(); subs.set(n, s); }
+      s.add(cb); return () => { s!.delete(cb); };
+    },
+  };
+}
+type Store = ReturnType<typeof makeStore>;
+
+/** Snap-point plugin from a flat snap list (keyed by ownerRoot identity / id). */
+function snapPluginFrom(snaps: readonly SnapLite[]) {
+  const byOwner = new Map<Object3D, SnapLite[]>();
+  for (const s of snaps) {
+    const list = byOwner.get(s.ownerRoot) ?? []; list.push(s); byOwner.set(s.ownerRoot, list);
+  }
+  const byId = new Map(snaps.map(s => [s.id, s]));
+  return {
+    getRegistry: () => ({
+      getByOwnerRoot: (r: Object3D) => byOwner.get(r) ?? [],
+      getById: (id: string) => byId.get(id),
+    }),
+  };
+}
+
+/**
+ * Build a bind context. `buildSnaps(root)` is invoked AFTER the root exists so
+ * snaps can reference `root` by identity (required for `getByOwnerRoot`). When
+ * `scopeName` is set, a LayoutObject marker scopes the behavior's own signals.
+ */
+function makeRv(opts: {
+  rootName: string;
+  scopeName?: string;
+  store?: Store;
+  buildSnaps?: (root: Object3D) => SnapLite[];
+}): { rv: RVBindContext; root: Object3D; accum: KinematicsSpec; store: Store } {
+  const store = opts.store ?? makeStore();
+  const events = new EventEmitter<Record<string, unknown>>();
+  const root = new Object3D(); root.name = opts.rootName;
+  if (opts.scopeName) {
+    root.userData.realvirtual = { LayoutObject: { Label: opts.scopeName, CatalogId: 'c', Locked: false } };
+  }
+  const snaps = opts.buildSnaps ? opts.buildSnaps(root) : [];
+  const host: BindContextHost = {
+    signalStore: store,
+    on: (e, cb) => events.on(e, cb as never),
+    contextMenu: new ContextMenuStore(),
+    drives: [],
+    registry: null,
+    getPlugin: (id: string) => (id === 'snap-point' ? snapPluginFrom(snaps) : undefined),
+  };
+  const accum: KinematicsSpec = {};
+  const { ctx } = createBindContext(root, host, accum);
+  return { rv: ctx, root, accum, store };
+}
+
+/**
+ * Build a conveyor whose OUTPUT snap (`mySnapId`) mates a partner's snap
+ * (`partnerSnapId`) on a partner root named `partnerName`; returns the resolved
+ * `outputLink` plus the shared store.
+ */
+function makeOutLink(convName: string, partnerName: string, mySnapId: string, partnerSnapId: string) {
+  const store = makeStore();
+  const partner = new Object3D(); partner.name = partnerName;
+  const { rv } = makeRv({
+    rootName: convName,
+    store,
+    buildSnaps: (root) => [
+      { id: mySnapId, object3D: new Object3D(), flow: 'out', pairedSnapId: partnerSnapId, ownerRoot: root },
+      { id: partnerSnapId, object3D: new Object3D(), flow: 'in', pairedSnapId: mySnapId, ownerRoot: partner },
+    ],
+  });
+  const link = outputLink(rv);
+  if (!link) throw new Error('expected an output link');
+  return { link, store, partner };
+}
+
+describe('TransportLink.occupied — per-port then root', () => {
+  // NOTE: the raw mock store holds RESOLVED keys (the `/`-global-escape is applied
+  // by rv.signals before it reaches the store), so seed without the leading slash.
+  it('reads the per-port signal when it is present', () => {
+    const { link, store } = makeOutLink('Conv', 'TT', 'C', 'P');
+    store.set('TT/Conveyor.Occupied', false);      // root says free
+    store.set('TT/Conveyor.Occupied@P', true);     // but the per-port says blocked
+    expect(link.occupied()).toBe(true);
+  });
+
+  it('falls back to the root Occupied when no per-port signal exists', () => {
+    const { link, store } = makeOutLink('Conv', 'TT', 'C', 'P');
+    store.set('TT/Conveyor.Occupied', true);
+    expect(link.occupied()).toBe(true);
+  });
+
+  it('false/undefined → not occupied (optimistic)', () => {
+    const { link, store } = makeOutLink('Conv', 'TT', 'C', 'P');
+    expect(link.occupied()).toBe(false);           // unset → false
+    store.set('TT/Conveyor.Occupied', false);
+    expect(link.occupied()).toBe(false);           // explicit false → false
+  });
+});
+
+describe('outputLink / outputLinks — no successor', () => {
+  it('outputLink returns null at the end of the line (unpaired out snap)', () => {
+    const { rv } = makeRv({
+      rootName: 'Conv',
+      buildSnaps: (root) => [
+        { id: 'a-out', object3D: new Object3D(), flow: 'out', pairedSnapId: undefined, ownerRoot: root },
+      ],
+    });
+    expect(outputLink(rv)).toBeNull();
+  });
+
+  it('outputLinks is empty at the end of the line', () => {
+    const { rv } = makeRv({
+      rootName: 'Conv',
+      buildSnaps: (root) => [
+        { id: 'a-out', object3D: new Object3D(), flow: 'out', pairedSnapId: undefined, ownerRoot: root },
+      ],
+    });
+    expect(outputLinks(rv)).toEqual([]);
+  });
+});
+
+describe('conveyorShouldRun — ZPA release rule', () => {
+  it('runs unless a part is held here AND downstream is occupied', () => {
+    expect(conveyorShouldRun(true, false, false)).toBe(true);
+    expect(conveyorShouldRun(true, true, false)).toBe(true);    // occupied but downstream free → release
+    expect(conveyorShouldRun(true, false, true)).toBe(true);    // downstream full but empty here → feed
+    expect(conveyorShouldRun(true, true, true)).toBe(false);    // held AND downstream full → stop
+  });
+  it('always stops when Run is false', () => {
+    expect(conveyorShouldRun(false, false, false)).toBe(false);
+    expect(conveyorShouldRun(false, true, true)).toBe(false);
+  });
+});
+
+describe('TransportLink.setOccupied — own scope keyed by mySnapId', () => {
+  it('writes Conveyor.Occupied@<mySnapId> in the instance scope', () => {
+    const { rv } = makeRv({ rootName: 'TT', scopeName: 'TT' });
+    const partner = new Object3D(); partner.name = 'Conv';
+    const conn: PortConnection = {
+      role: 'input',
+      ownerRoot: partner,
+      snap: { id: 'P', object3D: new Object3D(), flow: 'in', pairedSnapId: 'C', ownerRoot: rv.root },
+      pairedSnap: { id: 'C', object3D: new Object3D(), flow: 'out', pairedSnapId: 'P', ownerRoot: partner },
+    };
+    const link: TransportLink = linkOf(rv, conn);
+    link.setOccupied(true);
+    // rv.signals.set scopes 'Conveyor.Occupied@P' → 'TT/Conveyor.Occupied@P'.
+    expect(rv.signals.get<boolean>('Conveyor.Occupied@P')).toBe(true);
+  });
+});
+
+describe('TransportLink.upstreamWaiting — partner root Occupied', () => {
+  it('is true when the connected upstream root publishes Occupied=true', () => {
+    const { link, store } = makeOutLink('TT', 'Infeed', 'P', 'I');
+    store.set('Infeed/Conveyor.Occupied', true);   // resolved key (no leading slash)
+    expect(link.upstreamWaiting()).toBe(true);
+  });
+  it('is false when the partner root Occupied is unset/false', () => {
+    const { link, store } = makeOutLink('TT', 'Infeed', 'P', 'I');
+    expect(link.upstreamWaiting()).toBe(false);
+    store.set('Infeed/Conveyor.Occupied', false);
+    expect(link.upstreamWaiting()).toBe(false);
+  });
+});
+
+describe('TransportLink — SYMMETRY: turntable setOccupied ↔ conveyor occupied()', () => {
+  it('both sides resolve to the same signal key', () => {
+    // Shared store so both contexts write/read the same Map.
+    const store = makeStore();
+
+    // ── Turntable side: scoped root 'TT', port snap id 'P' ──
+    const ttCtx = makeRv({ rootName: 'TT', scopeName: 'TT', store });
+    const ttPartner = new Object3D(); ttPartner.name = 'Conv';
+    const ttConn: PortConnection = {
+      role: 'output',
+      ownerRoot: ttPartner,
+      snap: { id: 'P', object3D: new Object3D(), flow: 'out', pairedSnapId: 'C', ownerRoot: ttCtx.root },
+      pairedSnap: { id: 'C', object3D: new Object3D(), flow: 'in', pairedSnapId: 'P', ownerRoot: ttPartner },
+    };
+    const ttLink = linkOf(ttCtx.rv, ttConn);
+
+    // ── Conveyor side: an output link whose partner root is named 'TT', snap id 'P' ──
+    const ttRootForCv = new Object3D(); ttRootForCv.name = 'TT';
+    const cvCtx = makeRv({
+      rootName: 'Conv',
+      store,
+      buildSnaps: (root) => [
+        { id: 'C', object3D: new Object3D(), flow: 'out', pairedSnapId: 'P', ownerRoot: root },
+        { id: 'P', object3D: new Object3D(), flow: 'in', pairedSnapId: 'C', ownerRoot: ttRootForCv },
+      ],
+    });
+    const cvLink = outputLink(cvCtx.rv);
+    if (!cvLink) throw new Error('expected an output link on the conveyor');
+
+    // Turntable blocks its port → conveyor must see it as occupied (same resolved key).
+    ttLink.setOccupied(true);                  // writes TT/Conveyor.Occupied@P
+    expect(cvLink.occupied()).toBe(true);      // reads /TT/Conveyor.Occupied@P → TT/Conveyor.Occupied@P
+
+    ttLink.setOccupied(false);
+    expect(cvLink.occupied()).toBe(false);
+  });
+
+  it('migrated freeCandidates trichotomy: true blocks, false/undefined free', () => {
+    // Replaces the old freeCandidates block from turntable-behavior.test.ts:
+    // three downstream outputs A/B/C; only B is explicitly occupied.
+    const store = makeStore();
+    const ttCtx = makeRv({ rootName: 'TT', store });
+    const A = new Object3D(); A.name = 'A';
+    const B = new Object3D(); B.name = 'B';
+    const C = new Object3D(); C.name = 'C';
+    const conn = (owner: Object3D, snapId: string, partnerId: string): PortConnection => ({
+      role: 'output',
+      ownerRoot: owner,
+      snap: { id: snapId, object3D: new Object3D(), flow: 'out', pairedSnapId: partnerId, ownerRoot: ttCtx.root },
+      pairedSnap: { id: partnerId, object3D: new Object3D(), flow: 'in', pairedSnapId: snapId, ownerRoot: owner },
+    });
+    const conns = [conn(A, 'pA', 'iA'), conn(B, 'pB', 'iB'), conn(C, 'pC', 'iC')];
+    // Resolved keys (the `/`-escape is stripped by rv.signals before the store).
+    store.set('B/Conveyor.Occupied', true);      // B blocked
+    store.set('C/Conveyor.Occupied', false);     // C explicitly free; A unset
+    const free = conns.filter(c => !linkOf(ttCtx.rv, c).occupied());
+    expect(free.map(c => c.ownerRoot)).toEqual([A, C]);
+  });
+});
+
+describe('declareConveyorSignals — registers the 4-signal contract', () => {
+  it('registers Run/Occupied/Running/PartCount with correct PLC types and initial values', () => {
+    const { rv, root, accum } = makeRv({ rootName: 'Conv' });
+    declareConveyorSignals(rv);
+    applyKinematicsSpec(root, accum);
+    const list = (root.userData.realvirtual as { __BehaviorSignals: Array<Record<string, unknown>> }).__BehaviorSignals;
+    const byName = new Map(list.map(s => [s.Name as string, s]));
+
+    expect(byName.size).toBe(4);
+    expect(byName.get('Conveyor.Run')).toMatchObject({ Type: 'PLCInputBool', InitialValue: true });
+    expect(byName.get('Conveyor.Occupied')).toMatchObject({ Type: 'PLCOutputBool', InitialValue: false });
+    expect(byName.get('Conveyor.Running')).toMatchObject({ Type: 'PLCOutputBool', InitialValue: false });
+    expect(byName.get('Conveyor.PartCount')).toMatchObject({ Type: 'PLCOutputInt', InitialValue: 0 });
+  });
+});
+
+describe('portIds — mirror of all own snaps (paired and unpaired)', () => {
+  it('returns the ids of every own snap', () => {
+    const { rv } = makeRv({
+      rootName: 'TT',
+      buildSnaps: (root) => [
+        { id: 's-paired', object3D: new Object3D(), flow: 'in', pairedSnapId: 'x', ownerRoot: root },
+        { id: 's-unpaired', object3D: new Object3D(), flow: 'out', pairedSnapId: undefined, ownerRoot: root },
+      ],
+    });
+    expect(portIds(rv).sort()).toEqual(['s-paired', 's-unpaired']);
+  });
+});

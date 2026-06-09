@@ -1,0 +1,115 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
+
+/**
+ * Transport-link helpers — encapsulate a transport asset's snap connections and
+ * the Occupied-interlock signal convention (per-port `@<id>`, else root).
+ *
+ * Behaviors never build signal names by hand again: they ask a `TransportLink`
+ * for `occupied()` / `upstreamWaiting()` / `setOccupied()`. Under the hood
+ * everything stays signal-backed (Standalone/Live/Direct).
+ *
+ * Separation of concerns: this module is topology + signal-name ADDRESSING of
+ * the interlock. Occupancy DETECTION (is a good physically on the belt) lives in
+ * `_shared/surface-occupancy.ts`; the surface-based PUBLICATION of
+ * `Conveyor.Occupied` stays in the behavior, not here.
+ */
+import type { Object3D } from 'three';
+import type { RVBindContext } from '../../core/behavior-runtime';
+import { findOutputPairings, listOwnSnaps, type OutputPairing, type PortConnection } from './snap-graph-helpers';
+
+const OCCUPIED = 'Conveyor.Occupied';
+
+/** Standard single-sensor ZPA rule: run unless a part sits here AND downstream is occupied. */
+export function conveyorShouldRun(run: boolean, occupied: boolean, downstreamOccupied: boolean): boolean {
+  return run && !(occupied && downstreamOccupied);
+}
+
+export interface TransportLink {
+  /** Stable snap id on my side (Object3D.uuid). */
+  readonly mySnapId: string;
+  /** Stable snap id on the partner side (== Plan-194 Port.id). */
+  readonly partnerSnapId: string;
+  /** Partner LayoutObject root. */
+  readonly partnerRoot: Object3D;
+  /** Forward-compat to Plan-194 Port: the partner's MaterialFlowInstance.
+   *  Always null today (signal path); Plan 194 fills it for the DES handshake. */
+  readonly partnerComponent: unknown | null;
+
+  /** true = downstream cannot accept: partner per-port Occupied (key = partnerSnapId),
+   *  else its root Occupied, is explicitly true. */
+  occupied(): boolean;
+  /** true = a part waits on the connected upstream side (its root Occupied === true). */
+  upstreamWaiting(): boolean;
+  /** Publishes my per-port Occupied for exactly this connection (key = mySnapId). */
+  setOccupied(v: boolean): void;
+}
+
+function makeLink(rv: RVBindContext, mySnapId: string, partnerSnapId: string, partnerRoot: Object3D): TransportLink {
+  const partnerRootSig = `/${partnerRoot.name}/${OCCUPIED}`;
+  return {
+    mySnapId, partnerSnapId, partnerRoot,
+    partnerComponent: null,    // Plan 194 fills this for the DES handshake
+    occupied() {
+      const perPort = `${partnerRootSig}@${partnerSnapId}`;
+      const name = rv.signals.get(perPort) !== undefined ? perPort : partnerRootSig;
+      return rv.signals.get<boolean>(name) === true;
+    },
+    upstreamWaiting() {
+      return rv.signals.get<boolean>(partnerRootSig) === true;
+    },
+    setOccupied(v: boolean) {
+      rv.signals.set(`${OCCUPIED}@${mySnapId}`, v);
+    },
+  };
+}
+
+/** All downstream connections (flow 'out'), fresh from the snap graph. */
+export function outputLinks(rv: RVBindContext): TransportLink[] {
+  return findOutputPairings(rv.viewer, rv.root).map((p: OutputPairing) =>
+    makeLink(rv, p.snap.id, p.pairedSnap.id, p.ownerRoot));
+}
+
+/** The single downstream connection (Conveyor convenience). null at end of line. */
+export function outputLink(rv: RVBindContext): TransportLink | null {
+  return outputLinks(rv)[0] ?? null;
+}
+
+/** Link from a direction-classified turntable port connection. */
+export function linkOf(rv: RVBindContext, conn: PortConnection): TransportLink {
+  return makeLink(rv, conn.snap.id, conn.pairedSnap.id, conn.ownerRoot);
+}
+
+/** Stable snap ids of ALL own ports (paired and unpaired) — mirror of
+ *  listOwnSnaps, for the turntable's initial up-front per-port block. */
+export function portIds(rv: RVBindContext): string[] {
+  return listOwnSnaps(rv.viewer, rv.root).map(s => s.id);
+}
+
+/** Registers the public 4-signal contract (instance-scoped). */
+export function declareConveyorSignals(rv: RVBindContext): void {
+  rv.signal('Conveyor.Run',       { type: 'PLCInputBool',  initialValue: true });
+  rv.signal('Conveyor.Occupied',  { type: 'PLCOutputBool', initialValue: false });
+  rv.signal('Conveyor.Running',   { type: 'PLCOutputBool', initialValue: false });
+  rv.signal('Conveyor.PartCount', { type: 'PLCOutputInt',  initialValue: 0 });
+}
+
+/**
+ * Allocation-free downstream interlock for the hot path (Conveyor).
+ * Build once in bind(); occupied() scans the snap registry INLINE (no .map,
+ * no link objects) and only reads signals → no per-tick allocation.
+ */
+export function createDownstreamInterlock(rv: RVBindContext): { occupied(): boolean } {
+  return {
+    occupied(): boolean {
+      // Inline scan instead of findOutputPairings().map(): take the first out
+      // pairing, read per-port-then-root; no successor → blocked.
+      const pairing = findOutputPairings(rv.viewer, rv.root)[0];   // small/no alloc; 1-4 snaps
+      if (!pairing) return true;
+      const rootSig = `/${pairing.ownerRoot.name}/${OCCUPIED}`;
+      const perPort = `${rootSig}@${pairing.pairedSnap.id}`;
+      const name = rv.signals.get(perPort) !== undefined ? perPort : rootSig;
+      return rv.signals.get<boolean>(name) === true;
+    },
+  };
+}
