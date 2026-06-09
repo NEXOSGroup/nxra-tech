@@ -131,7 +131,12 @@ import { BehaviorManager } from './behaviors';
 import { isUnifiedSimEnabled } from './rv-app-config';
 import { ContinuousRunner } from './material-flow/continuous-runner';
 import { SimulationKernel } from './material-flow/simulation-kernel';
-import { createDesRunner } from '../private-stubs/des-runner-stub';
+// Plan 194 P5 — the DES runner factory is INJECTED, never imported concretely:
+// `@rv-private/plugins/des/register-des-runner` resolves to the private factory
+// when the private folder is present, and to the public stub (`createDesRunner
+// = null`) otherwise. So `hasDesRunner()` is true only in the private build and
+// the public build stays continuous-only with no private import leaked.
+import { createDesRunner } from '@rv-private/plugins/des/register-des-runner';
 import {
   applyKinematicsSpec,
   createBindContext,

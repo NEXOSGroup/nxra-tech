@@ -49,7 +49,7 @@ export type JsonValue =
   | { [key: string]: JsonValue };
 
 export type MaterialFlowKind =
-  | 'conveyor' | 'router' | 'station' | 'source' | 'sink' | 'storage';
+  | 'conveyor' | 'router' | 'station' | 'source' | 'sink' | 'storage' | 'downtime';
 
 export type SimulationMode = 'continuous' | 'des';
 
@@ -284,6 +284,13 @@ export interface CreateSelfOptions<S = Record<string, never>> {
    * to it. Absent (continuous) → `in/at` dev-throw, `now` reads the host loop.
    */
   scheduler?: SelfScheduler | null;
+  /**
+   * DES MU-transfer backend (P5). When present, `self.transfer(mu, fromPort)`
+   * delegates the blocking handshake (canAccept → accept → release / block)
+   * to it. Absent (continuous) → `transfer` is the implicit no-op hand-off
+   * (the transport manager moves MUs surface→surface).
+   */
+  onTransfer?: ((mu: MU, fromPort?: Port) => void) | null;
   /** Per-instance state object exposed as `self.local` (defaults to `{}`). */
   local?: S;
 }
@@ -312,6 +319,7 @@ export function createSelf<S = Record<string, never>>(
   const mode: SimulationMode = opts.mode ?? 'continuous';
   const entityId = opts.entityId ?? -1;
   const scheduler = opts.scheduler ?? null;
+  const onTransfer = opts.onTransfer ?? null;
   const local = (opts.local ?? {}) as S;
 
   const prop: Record<string, JsonValue> = {};
@@ -399,11 +407,11 @@ export function createSelf<S = Record<string, never>>(
       return state;
     },
 
-    transfer(_mu: MU, _fromPort?: Port): void {
-      // Continuous hand-off is implicit (the transport manager moves MUs
-      // surface→surface). The DES blocking handshake is wired by the DESRunner
-      // (P5) which replaces this with the real canAccept→accept→release path.
-      // TODO(P5): DES transfer handshake.
+    transfer(mu: MU, fromPort?: Port): void {
+      // DES: delegate the blocking handshake (canAccept → accept → release /
+      // block) to the runner-injected backend. Continuous: implicit no-op
+      // hand-off (the transport manager moves MUs surface→surface).
+      if (onTransfer) onTransfer(mu, fromPort);
     },
     get mus(): ReadonlyArray<MU> {
       return mus;
