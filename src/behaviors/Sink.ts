@@ -42,10 +42,14 @@ import type { RVBindContext } from '../core/behavior-runtime';
 import { registerCapabilities } from '../core/engine/rv-component-registry';
 import { defineMaterialFlow } from '../core/material-flow/define-material-flow';
 import { createSelf, type MaterialFlowSelf, type MU } from '../core/material-flow/material-flow-self';
-import { BEHAVIOR_BADGE } from './_shared/behavior-badge';
 
 // Hierarchy/inspector badge marker (pure marker — no factory).
-registerCapabilities('SinkBehavior', BEHAVIOR_BADGE);
+registerCapabilities('SinkBehavior', {
+  badgeColor: '#7e57c2',
+  filterLabel: 'Behavior',
+  hierarchyVisible: true,
+  inspectorVisible: true,
+});
 
 const OCCUPIED_SIGNAL = 'Conveyor.Occupied';
 

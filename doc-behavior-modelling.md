@@ -121,7 +121,6 @@ defines *who* the downstream neighbour is; the signal name defines *how* they co
 | `_shared/surface-occupancy.ts` | `isSurfaceOccupied(viewer, node)` |
 | `_shared/snap-graph-helpers.ts` | port topology: `findOutputPairings`, `classifyConnections`, `listOwnSnaps` |
 | `_shared/turntable-angle-math.ts` | rotary alignment / dispatch angles |
-| `_shared/behavior-badge.ts` | the shared hierarchy/inspector badge |
 
 ## Authoring a new component
 

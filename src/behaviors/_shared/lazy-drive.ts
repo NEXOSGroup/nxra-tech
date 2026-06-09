@@ -11,7 +11,25 @@
  * `moveTo`, `isAtTarget` and `stop`. Both cache the drive once resolved.
  */
 import type { Object3D } from 'three';
-import type { RVBindContext, BindContextDrive } from '../../core/behavior-runtime';
+import type { BindContextDrive, NodeRef } from '../../core/behavior-runtime';
+
+/**
+ * Minimal drive-resolver surface: anything exposing `drives.get(node)`.
+ * `rv` (RVBindContext) satisfies it directly; the material-flow `self` adapts
+ * via `selfDrives(self)` (its `drive()` projection wrapped as `drives.get`).
+ */
+export interface DriveResolver {
+  drives: { get(ref: NodeRef): BindContextDrive | null };
+}
+
+/** Wrap a `self`-style `drive()` projection as a `DriveResolver`. */
+export function selfDrives(self: { drive(ref: NodeRef): BindContextDrive | null }): DriveResolver {
+  return { drives: { get: (ref) => self.drive(ref) } };
+}
+
+function resolveOnce(src: DriveResolver, node: Object3D): BindContextDrive | null {
+  return src.drives.get(node);
+}
 
 export interface BeltHandle {
   readonly node: Object3D | null;
@@ -35,10 +53,10 @@ export interface DriveHandle {
  * Belt handle that resolves `rv.drives.get(node)` on first use and no-ops until
  * the drive exists. `run(forward)` jogs the belt in one direction.
  */
-export function attachBelt(rv: RVBindContext, node: Object3D | null): BeltHandle {
-  let drive: BindContextDrive | null = node ? rv.drives.get(node) : null;
+export function attachBelt(src: DriveResolver, node: Object3D | null): BeltHandle {
+  let drive: BindContextDrive | null = node ? resolveOnce(src, node) : null;
   const resolve = (): BindContextDrive | null => {
-    if (!drive && node) drive = rv.drives.get(node);
+    if (!drive && node) drive = resolveOnce(src, node);
     return drive;
   };
   return {
@@ -57,10 +75,10 @@ export function attachBelt(rv: RVBindContext, node: Object3D | null): BeltHandle
  * `attachBelt`, plus `moveTo`/`isAtTarget`/`stop`. Defensive: a handle whose
  * resolved drive is missing a method silently no-ops (and `isAtTarget` → false).
  */
-export function attachDrive(rv: RVBindContext, node: Object3D | null): DriveHandle {
-  let drive: BindContextDrive | null = node ? rv.drives.get(node) : null;
+export function attachDrive(src: DriveResolver, node: Object3D | null): DriveHandle {
+  let drive: BindContextDrive | null = node ? resolveOnce(src, node) : null;
   const resolve = (): BindContextDrive | null => {
-    if (!drive && node) drive = rv.drives.get(node);
+    if (!drive && node) drive = resolveOnce(src, node);
     return drive;
   };
   return {

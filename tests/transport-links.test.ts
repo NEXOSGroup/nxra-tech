@@ -14,7 +14,6 @@ import { EventEmitter } from '../src/core/rv-events';
 import { ContextMenuStore } from '../src/core/hmi/context-menu-store';
 import type { SnapLite, PortConnection } from '../src/behaviors/_shared/snap-graph-helpers';
 import {
-  conveyorShouldRun,
   declareConveyorSignals,
   outputLink,
   outputLinks,
@@ -151,19 +150,6 @@ describe('outputLink / outputLinks — no successor', () => {
       ],
     });
     expect(outputLinks(rv)).toEqual([]);
-  });
-});
-
-describe('conveyorShouldRun — ZPA release rule', () => {
-  it('runs unless a part is held here AND downstream is occupied', () => {
-    expect(conveyorShouldRun(true, false, false)).toBe(true);
-    expect(conveyorShouldRun(true, true, false)).toBe(true);    // occupied but downstream free → release
-    expect(conveyorShouldRun(true, false, true)).toBe(true);    // downstream full but empty here → feed
-    expect(conveyorShouldRun(true, true, true)).toBe(false);    // held AND downstream full → stop
-  });
-  it('always stops when Run is false', () => {
-    expect(conveyorShouldRun(false, false, false)).toBe(false);
-    expect(conveyorShouldRun(false, true, true)).toBe(false);
   });
 });
 

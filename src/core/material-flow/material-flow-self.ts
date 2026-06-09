@@ -104,14 +104,19 @@ export interface Port extends TransportLink {
 
 // ─── self interface ─────────────────────────────────────────────────────
 
-export interface MaterialFlowSelf {
+export interface MaterialFlowSelf<S = Record<string, never>> {
   readonly type: string;
   readonly kind: MaterialFlowKind;
   readonly root: Object3D;
   readonly node: Object3D;
+  /** Opaque viewer handle (== rv.viewer) — the type isSurfaceOccupied accepts. */
+  readonly viewer: unknown;
   /** DES integer entity id; -1 in pure continuous. */
   readonly entityId: number;
   readonly mode: SimulationMode;
+
+  /** Per-instance mutable state slot — behaviours store resolved nodes/handles/flags here. */
+  readonly local: S;
 
   // Signals — instance-scoped, identical surface to rv.signals.
   readonly signals: {
@@ -121,6 +126,8 @@ export interface MaterialFlowSelf {
   };
   /** Declare a signal (setup() only — forwards to rv.signal). */
   signal(name: string, opts: SignalOpts): void;
+  /** Stamp an inspector/badge companion component (forwards to rv.behavior(rv.root,...)). */
+  stamp(type: string, props: Record<string, unknown>): void;
 
   // Scheduling — DES-only. Continuous mode dev-throws.
   in(delay: number, hook: DesHookName, mu?: MU | null, data?: unknown): number;
@@ -267,7 +274,7 @@ export interface SelfDef {
   readonly kind: MaterialFlowKind;
 }
 
-export interface CreateSelfOptions {
+export interface CreateSelfOptions<S = Record<string, never>> {
   /** Simulation mode for this self. Default 'continuous'. */
   mode?: SimulationMode;
   /** DES entity id; -1 in pure continuous (default). */
@@ -277,6 +284,8 @@ export interface CreateSelfOptions {
    * to it. Absent (continuous) → `in/at` dev-throw, `now` reads the host loop.
    */
   scheduler?: SelfScheduler | null;
+  /** Per-instance state object exposed as `self.local` (defaults to `{}`). */
+  local?: S;
 }
 
 /** DES scheduling backend the DESRunner injects (P5). */
@@ -295,20 +304,26 @@ export interface SelfScheduler {
  * behavior. Ports are resolved lazily (the snap-graph mutates as assets are
  * placed); `state`/`prop`/`mus` are local mutable state on the self.
  */
-export function createSelf(
+export function createSelf<S = Record<string, never>>(
   rv: RVBindContext,
   def: SelfDef,
-  opts: CreateSelfOptions = {},
-): MaterialFlowSelf {
+  opts: CreateSelfOptions<S> = {},
+): MaterialFlowSelf<S> {
   const mode: SimulationMode = opts.mode ?? 'continuous';
   const entityId = opts.entityId ?? -1;
   const scheduler = opts.scheduler ?? null;
+  const local = (opts.local ?? {}) as S;
 
   const prop: Record<string, JsonValue> = {};
   const mus: MU[] = [];
   let state = 'idle';
 
-  const interlock = createDownstreamInterlock(rv);
+  // Lazy: only allocate the shared interlock when an instance actually calls
+  // self.downstreamOccupied() without a port (behaviours that build their own
+  // never pay for it).
+  let interlock: { occupied(): boolean } | null = null;
+  const getInterlock = (): { occupied(): boolean } =>
+    (interlock ??= createDownstreamInterlock(rv));
 
   const throwContinuous = (fn: string): never => {
     throw new Error(
@@ -317,17 +332,23 @@ export function createSelf(
     );
   };
 
-  const self: MaterialFlowSelf = {
+  const self: MaterialFlowSelf<S> = {
     type: def.type,
     kind: def.kind,
     root: rv.root,
     node: rv.root,
+    viewer: rv.viewer,
     entityId,
     mode,
+
+    local,
 
     signals: rv.signals,
     signal(name: string, o: SignalOpts): void {
       rv.signal(name, o);
+    },
+    stamp(type: string, props: Record<string, unknown>): void {
+      rv.behavior(rv.root, type, props);
     },
 
     in(delay, hook, mu, data): number {
@@ -367,8 +388,8 @@ export function createSelf(
     },
     downstreamOccupied(port?: Port): boolean {
       // Per-port when given (multi-output routers); else the conveyor's
-      // allocation-free single-successor interlock (Plan 196).
-      return port ? port.occupied() : interlock.occupied();
+      // allocation-free single-successor interlock (Plan 196), resolved lazily.
+      return port ? port.occupied() : getInterlock().occupied();
     },
 
     setState(name: string): void {

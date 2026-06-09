@@ -41,12 +41,15 @@ export type { MaterialFlowKind } from './material-flow-self';
  * Methods are free-form (selectInput, selectOutput, shouldFlow, enter, …);
  * both adapters call into them so routing/state is identical across modes.
  */
-export interface LogicBlock<S extends MaterialFlowSelf = MaterialFlowSelf> {
+// `MaterialFlowSelf<any>` as the bound so a definition can pin a typed
+// `local` slot (e.g. `MaterialFlowSelf<ConveyorLocal>`); the default stays the
+// empty-local `MaterialFlowSelf`.
+export interface LogicBlock<S extends MaterialFlowSelf<any> = MaterialFlowSelf> {
   [name: string]: (self: S, ...args: never[]) => unknown;
 }
 
 /** Continuous adapter — PUBLIC default path (60 Hz, after transport.update). */
-export interface ContinuousBlock<S extends MaterialFlowSelf = MaterialFlowSelf> {
+export interface ContinuousBlock<S extends MaterialFlowSelf<any> = MaterialFlowSelf> {
   /** 1×/load: resolve nodes, declare signals, subscriptions, contextMenu, init self.* */
   setup?(self: S): void;
   /** 60 Hz, AFTER transport.update — triggers via isAtTarget/sensor. */
@@ -60,7 +63,7 @@ export interface ContinuousBlock<S extends MaterialFlowSelf = MaterialFlowSelf> 
 }
 
 /** DES adapter — data record of hooks dispatched by the (private) DESRunner. */
-export interface DesBlock<S extends MaterialFlowSelf = MaterialFlowSelf> {
+export interface DesBlock<S extends MaterialFlowSelf<any> = MaterialFlowSelf> {
   canAccept?(self: S, mu: MU, port?: Port): boolean;
   onAccept?(self: S, mu: MU, port?: Port): boolean;
   onArrival?(self: S, mu: MU): void;
@@ -76,7 +79,7 @@ export interface DesBlock<S extends MaterialFlowSelf = MaterialFlowSelf> {
 
 // ─── Definition ─────────────────────────────────────────────────────────
 
-export interface MaterialFlowDefinition<S extends MaterialFlowSelf = MaterialFlowSelf> {
+export interface MaterialFlowDefinition<S extends MaterialFlowSelf<any> = MaterialFlowSelf> {
   /** Stable id: rv_extras key AND DES action namespace ('Conveyor' → 'Conveyor.Arrival'). */
   readonly type: string;
   readonly kind: MaterialFlowKind;
@@ -97,10 +100,10 @@ export interface MaterialFlowDefinition<S extends MaterialFlowSelf = MaterialFlo
  * discovery and returns the definition (so the module's default export can be
  * both the discovered behavior AND a programmatically-importable definition).
  */
-export function defineMaterialFlow<S extends MaterialFlowSelf = MaterialFlowSelf>(
+export function defineMaterialFlow<S extends MaterialFlowSelf<any> = MaterialFlowSelf>(
   def: MaterialFlowDefinition<S>,
 ): MaterialFlowDefinition<S> {
-  registerMaterialFlow(def as MaterialFlowDefinition);
+  registerMaterialFlow(def as unknown as MaterialFlowDefinition);
   return def;
 }
 
@@ -117,13 +120,22 @@ export function defineMaterialFlow<S extends MaterialFlowSelf = MaterialFlowSelf
  *
  * The `self` is created in continuous mode (no scheduler → `self.in/at` throw,
  * which is correct: a continuous block must not schedule DES events).
+ *
+ * `localFactory` (optional) seeds `self.local` — the per-instance state slot a
+ * behaviour stores its resolved nodes/handles/flags in (replaces a WeakMap).
  */
-export function toBehavior(def: MaterialFlowDefinition): Behavior {
+export function toBehavior<S = Record<string, never>>(
+  def: MaterialFlowDefinition<MaterialFlowSelf<S>>,
+  localFactory?: () => S,
+): Behavior {
   const models = def.models ?? [`*${def.type}*`];
   return {
     models,
     bind(rv: RVBindContext): void {
-      const self = createSelf(rv, def, { mode: 'continuous' });
+      const self = createSelf<S>(rv, def, {
+        mode: 'continuous',
+        local: localFactory ? localFactory() : undefined,
+      });
       const c = def.continuous;
       if (c.setup) c.setup(self);
       const fixed = c.fixedUpdate;

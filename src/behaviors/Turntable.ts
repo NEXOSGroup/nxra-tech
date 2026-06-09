@@ -6,18 +6,21 @@
 import { Vector3, Quaternion } from 'three';
 import type { Object3D } from 'three';
 import type { Behavior } from '../core/behaviors';
-import type { RVBindContext } from '../core/behavior-runtime';
 import { findRotaryDrive, findSensor, findTransport } from '../core/library-component-loader';
 import { registerCapabilities } from '../core/engine/rv-component-registry';
-import { defineMaterialFlow } from '../core/material-flow/define-material-flow';
-import { createSelf, type MaterialFlowSelf, type MU, type Port } from '../core/material-flow/material-flow-self';
+import { defineMaterialFlow, toBehavior } from '../core/material-flow/define-material-flow';
+import type { MaterialFlowSelf, MU, Port } from '../core/material-flow/material-flow-self';
 import { classifyConnections, listOwnSnaps, type PortConnection } from './_shared/snap-graph-helpers';
 import { alignToInputAngle, dispatchToOutputAngle, calibrateBeltNeutralAngle } from './_shared/turntable-angle-math';
-import { attachDrive, attachBelt, type DriveHandle, type BeltHandle } from './_shared/lazy-drive';
-import { BEHAVIOR_BADGE } from './_shared/behavior-badge';
+import { attachDrive, attachBelt, selfDrives, type DriveHandle, type BeltHandle } from './_shared/lazy-drive';
 import { isSurfaceOccupied } from './_shared/surface-occupancy';
 
-registerCapabilities('TurntableBehavior', BEHAVIOR_BADGE);
+registerCapabilities('TurntableBehavior', {
+  badgeColor: '#7e57c2',
+  filterLabel: 'Behavior',
+  hierarchyVisible: true,
+  inspectorVisible: true,
+});
 
 const CONFIG = {
   runSignal:       'Conveyor.Run',
@@ -38,6 +41,31 @@ type State =
   | 'discharge_clearing'
   | 'discharging';
 
+interface TurntableLocal {
+  rotaryNode: Object3D | null;
+  sensorNode: Object3D | null;
+  beltNode: Object3D | null;
+  drive: DriveHandle | null;
+  belt: BeltHandle | null;
+  driveAxis: Vector3;
+
+  sensorOccupied: boolean;
+  partCount: number;
+  lastCommandedAngle: number;
+  clearTimer: number;
+  connections: PortConnection[];
+  selectedInputPort: string | null;
+  beltNeutralAngle: number;
+  beltCalibrated: boolean;
+  refreshTimer: number;
+  emptyFor: number;
+
+  _dir: Vector3;
+  _quat: Quaternion;
+}
+
+type TurntableSelf = MaterialFlowSelf<TurntableLocal>;
+
 function portOccupiedSignal(portId: string): string {
   return `${CONFIG.occupiedSignal}@${portId}`;
 }
@@ -57,176 +85,142 @@ interface TransportSurfaceLike {
   getWorldDirection(out?: Vector3): Vector3;
 }
 
-interface TurntableState {
-  rv: RVBindContext;
-  rootTag: string;
-  rotaryNode: Object3D;
-  sensorNode: Object3D;
-  beltNode: Object3D | null;
-  drive: DriveHandle;
-  belt: BeltHandle | null;
-  driveAxis: Vector3;
-
-  sensorOccupied: boolean;
-  partCount: number;
-  lastCommandedAngle: number;
-  clearTimer: number;
-  connections: PortConnection[];
-  selectedInputPort: string | null;
-  beltNeutralAngle: number;
-  beltCalibrated: boolean;
-  refreshTimer: number;
-  emptyFor: number;
-
-  _dir: Vector3;
-  _quat: Quaternion;
-}
-
-const _state = new WeakMap<MaterialFlowSelf, TurntableState>();
-
-function st(self: MaterialFlowSelf): TurntableState {
-  const s = _state.get(self);
-  if (!s) throw new Error('[Turntable] state missing — setup() did not run');
-  return s;
-}
-
-const setBelt = (s: TurntableState, forward: boolean): void => {
-  if (!s.belt) return;
-  s.belt.run(forward);
+const setBelt = (l: TurntableLocal, forward: boolean): void => {
+  if (l.belt) l.belt.run(forward);
 };
-const blockAllInputs = (s: TurntableState): void => {
-  for (const c of s.connections) s.rv.signals.set(portOccupiedSignal(c.snap.id), true);
+const blockAllInputs = (self: TurntableSelf): void => {
+  for (const c of self.local.connections) self.signals.set(portOccupiedSignal(c.snap.id), true);
 };
-const openInputPort = (s: TurntableState, openId: string | null): void => {
-  for (const c of s.connections) s.rv.signals.set(portOccupiedSignal(c.snap.id), c.snap.id !== openId);
+const openInputPort = (self: TurntableSelf, openId: string | null): void => {
+  for (const c of self.local.connections) self.signals.set(portOccupiedSignal(c.snap.id), c.snap.id !== openId);
 };
 
-const publishOccupied = (self: MaterialFlowSelf): void => {
-  const s = st(self);
-  const platformOccupied = s.beltNode ? isSurfaceOccupied(s.rv.viewer, s.beltNode) : s.sensorOccupied;
-  s.rv.signals.set(CONFIG.occupiedSignal, platformOccupied || self.state !== 'idle');
-};
-const publishRunning = (self: MaterialFlowSelf): void => {
-  st(self).rv.signals.set(CONFIG.runningSignal, self.state !== 'idle');
-};
-const driveAtTarget = (s: TurntableState): boolean => s.drive.isAtTarget();
+const surfaceOccupied = (self: TurntableSelf): boolean =>
+  self.local.beltNode ? isSurfaceOccupied(self.viewer, self.local.beltNode) : self.local.sensorOccupied;
 
-const componentRegistry = (s: TurntableState): ComponentRegistryShape | null => {
-  const r = (s.rv.viewer as { registry?: unknown }).registry as Partial<ComponentRegistryShape> | undefined | null;
+const publishOccupied = (self: TurntableSelf, surf = surfaceOccupied(self)): void => {
+  self.signals.set(CONFIG.occupiedSignal, surf || self.state !== 'idle');
+};
+const publishRunning = (self: TurntableSelf): void => {
+  self.signals.set(CONFIG.runningSignal, self.state !== 'idle');
+};
+
+const componentRegistry = (self: TurntableSelf): ComponentRegistryShape | null => {
+  const r = (self.viewer as { registry?: unknown }).registry as Partial<ComponentRegistryShape> | undefined | null;
   return r && typeof r.findInChildren === 'function' ? (r as ComponentRegistryShape) : null;
 };
 
-const calibrateBelt = (s: TurntableState): void => {
-  if (s.beltCalibrated || !s.beltNode) return;
-  const reg = componentRegistry(s);
+const calibrateBelt = (self: TurntableSelf): void => {
+  const l = self.local;
+  if (l.beltCalibrated || !l.beltNode) return;
+  const reg = componentRegistry(self);
   if (!reg) return;
-  const surface = reg.findInChildren<TransportSurfaceLike>(s.beltNode, 'TransportSurface');
+  const surface = reg.findInChildren<TransportSurfaceLike>(l.beltNode, 'TransportSurface');
   if (!surface) return;
-  surface.getWorldDirection(s._dir);
-  s.rv.root.getWorldQuaternion(s._quat).invert();
-  s._dir.applyQuaternion(s._quat);
-  s.beltNeutralAngle = calibrateBeltNeutralAngle(s.driveAxis, s._dir, s.lastCommandedAngle);
-  s.beltCalibrated = true;
+  surface.getWorldDirection(l._dir);
+  self.root.getWorldQuaternion(l._quat).invert();
+  l._dir.applyQuaternion(l._quat);
+  l.beltNeutralAngle = calibrateBeltNeutralAngle(l.driveAxis, l._dir, l.lastCommandedAngle);
+  l.beltCalibrated = true;
 };
 
-const refreshTopology = (self: MaterialFlowSelf): void => {
-  const s = st(self);
-  s.connections = classifyConnections(s.rv.viewer, s.rv.root);
-  calibrateBelt(s);
-  if (self.state === 'receiving') openInputPort(s, s.selectedInputPort);
-  else blockAllInputs(s);
+const refreshTopology = (self: TurntableSelf): void => {
+  const l = self.local;
+  l.connections = classifyConnections(self.viewer as { getPlugin?(id: string): unknown }, self.root);
+  calibrateBelt(self);
+  if (self.state === 'receiving') openInputPort(self, l.selectedInputPort);
+  else blockAllInputs(self);
 };
 
-const inputs = (s: TurntableState): PortConnection[] => s.connections.filter(c => c.role === 'input');
-const outputs = (s: TurntableState): PortConnection[] => s.connections.filter(c => c.role === 'output');
+const inputs = (l: TurntableLocal): PortConnection[] => l.connections.filter(c => c.role === 'input');
+const outputs = (l: TurntableLocal): PortConnection[] => l.connections.filter(c => c.role === 'output');
 
 // Deliberate root-only free-output read, kept for parity (NOT the per-port linkOf().occupied() lookup).
-const freeOutputs = (s: TurntableState): PortConnection[] => {
+const freeOutputs = (self: TurntableSelf): PortConnection[] => {
   const out: PortConnection[] = [];
-  for (const c of outputs(s)) {
+  for (const c of outputs(self.local)) {
     const sigName = `/${c.ownerRoot.name}/${CONFIG.occupiedSignal}`;
-    if (s.rv.signals.get(sigName) === true) continue;
+    if (self.signals.get(sigName) === true) continue;
     out.push(c);
   }
   return out;
 };
 
-const platformHasPart = (s: TurntableState): boolean =>
-  (s.beltNode ? isSurfaceOccupied(s.rv.viewer, s.beltNode) : false) || s.sensorOccupied;
+const platformHasPart = (self: TurntableSelf, surf = surfaceOccupied(self)): boolean =>
+  surf || self.local.sensorOccupied;
 
-function enter(self: MaterialFlowSelf, next: State): void {
+function enter(self: TurntableSelf, next: State): void {
   self.setState(next);
   publishOccupied(self);
   publishRunning(self);
 }
 
-function tryReceive(self: MaterialFlowSelf): void {
-  const s = st(self);
+function tryReceive(self: TurntableSelf): void {
+  const l = self.local;
   if (self.state !== 'idle') return;
-  if (s.rv.signals.get<boolean>(CONFIG.runSignal) !== true) return;
+  if (self.signals.get<boolean>(CONFIG.runSignal) !== true) return;
 
-  const ready = inputs(s).filter(c =>
-    s.rv.signals.get(`/${c.ownerRoot.name}/${CONFIG.occupiedSignal}`) === true);
+  const ready = inputs(l).filter(c =>
+    self.signals.get(`/${c.ownerRoot.name}/${CONFIG.occupiedSignal}`) === true);
   if (ready.length === 0) return;
   const waiting = ready[Math.floor(Math.random() * ready.length)];
 
-  s.selectedInputPort = waiting.snap.id;
-  const target = alignToInputAngle(s.driveAxis, s.beltNeutralAngle, waiting.snap.object3D, s.lastCommandedAngle);
-  setBelt(s, false);
-  s.drive.moveTo(target);
-  s.lastCommandedAngle = target;
+  l.selectedInputPort = waiting.snap.id;
+  const target = alignToInputAngle(l.driveAxis, l.beltNeutralAngle, waiting.snap.object3D, l.lastCommandedAngle);
+  setBelt(l, false);
+  l.drive!.moveTo(target);
+  l.lastCommandedAngle = target;
   enter(self, 'aligning_in');
 }
 
-function tryDispatch(self: MaterialFlowSelf): void {
-  const s = st(self);
-  if (s.rv.signals.get<boolean>(CONFIG.runSignal) !== true) { setBelt(s, false); enter(self, 'holding'); return; }
-  const candidates = freeOutputs(s);
-  if (candidates.length === 0) { setBelt(s, false); enter(self, 'holding'); return; }
+function tryDispatch(self: TurntableSelf): void {
+  const l = self.local;
+  if (self.signals.get<boolean>(CONFIG.runSignal) !== true) { setBelt(l, false); enter(self, 'holding'); return; }
+  const candidates = freeOutputs(self);
+  if (candidates.length === 0) { setBelt(l, false); enter(self, 'holding'); return; }
 
   const chosen = candidates[Math.floor(Math.random() * candidates.length)];
-  const target = dispatchToOutputAngle(s.driveAxis, s.beltNeutralAngle, chosen.snap.object3D, s.lastCommandedAngle);
-  setBelt(s, false);
-  s.drive.moveTo(target);
-  s.lastCommandedAngle = target;
+  const target = dispatchToOutputAngle(l.driveAxis, l.beltNeutralAngle, chosen.snap.object3D, l.lastCommandedAngle);
+  setBelt(l, false);
+  l.drive!.moveTo(target);
+  l.lastCommandedAngle = target;
   enter(self, 'rotating_out');
 }
 
-function onPartAtCenter(self: MaterialFlowSelf): void {
-  const s = st(self);
-  blockAllInputs(s);
-  s.selectedInputPort = null;
+function onPartAtCenter(self: TurntableSelf): void {
+  blockAllInputs(self);
+  self.local.selectedInputPort = null;
   tryDispatch(self);
 }
 
-function onRotationDone(self: MaterialFlowSelf): void {
-  const s = st(self);
+function onRotationDone(self: TurntableSelf): void {
+  const l = self.local;
   if (self.state === 'aligning_in') {
     enter(self, 'receiving');
-    openInputPort(s, s.selectedInputPort);
-    setBelt(s, true);
+    openInputPort(self, l.selectedInputPort);
+    setBelt(l, true);
   } else if (self.state === 'rotating_out') {
-    setBelt(s, true);
+    setBelt(l, true);
     enter(self, 'discharging');
   }
 }
 
-function finishCycle(self: MaterialFlowSelf): void {
-  setBelt(st(self), false);
+function finishCycle(self: TurntableSelf): void {
+  setBelt(self.local, false);
   enter(self, 'idle');
 }
 
-function abortToIdle(self: MaterialFlowSelf): void {
-  const s = st(self);
-  s.drive.stop();
-  setBelt(s, false);
-  blockAllInputs(s);
-  s.selectedInputPort = null;
-  s.emptyFor = 0;
+function abortToIdle(self: TurntableSelf): void {
+  const l = self.local;
+  l.drive!.stop();
+  setBelt(l, false);
+  blockAllInputs(self);
+  l.selectedInputPort = null;
+  l.emptyFor = 0;
   enter(self, 'idle');
 }
 
-const def = defineMaterialFlow({
+const def = defineMaterialFlow<TurntableSelf>({
   type: 'Turntable',
   kind: 'router',
   models: ['*Turntable*'],
@@ -235,178 +229,167 @@ const def = defineMaterialFlow({
   logic: { enter, tryReceive, tryDispatch, onPartAtCenter, onRotationDone, finishCycle, abortToIdle },
 
   continuous: {
-    setup(self: MaterialFlowSelf): void {
-      const s = st(self);
+    setup(self: TurntableSelf): void {
+      const l = self.local;
+      const rootTag = self.root.name || '<unnamed>';
+      const rotaryNode = findRotaryDrive(self.root);
+      const sensorNode = findSensor(self.root);
+      const beltNode = findTransport(self.root);
+      if (!rotaryNode) { console.warn(`[Turntable:${rootTag}] no Drive-Rot-* node found`); return; }
+      if (!sensorNode) { console.warn(`[Turntable:${rootTag}] no Sensor node found`); return; }
+      if (!beltNode)   console.warn(`[Turntable:${rootTag}] no Transport-* node found — belt stop/start will be a no-op`);
+
+      l.rotaryNode = rotaryNode;
+      l.sensorNode = sensorNode;
+      l.beltNode = beltNode;
+      l.drive = attachDrive(selfDrives(self), rotaryNode);
+      l.belt = beltNode ? attachBelt(selfDrives(self), beltNode) : null;
+      l.driveAxis = axisFromDriveNodeName(rotaryNode.name);
+
+      console.info(`[Turntable:${rootTag}] attached — drive "${rotaryNode.name}", sensor "${sensorNode.name}"${beltNode ? `, belt "${beltNode.name}"` : ''}`);
+      self.stamp('TurntableBehavior', {
+        Drive: rotaryNode.name,
+        Sensor: sensorNode.name,
+        ...(beltNode ? { Belt: beltNode.name } : {}),
+      });
+
+      self.prop['alignedPort'] = null;
+      self.prop['selectedOutput'] = null;
 
       self.signal(CONFIG.runSignal,       { type: 'PLCInputBool',  initialValue: true });
       self.signal(CONFIG.occupiedSignal,  { type: 'PLCOutputBool', initialValue: false });
       self.signal(CONFIG.runningSignal,   { type: 'PLCOutputBool', initialValue: false });
       self.signal(CONFIG.partCountSignal, { type: 'PLCOutputInt',  initialValue: 0 });
-      for (const sp of listOwnSnaps(s.rv.viewer, s.rv.root)) s.rv.signals.set(portOccupiedSignal(sp.id), true);
+      for (const sp of listOwnSnaps(self.viewer as { getPlugin?(id: string): unknown }, self.root)) {
+        self.signals.set(portOccupiedSignal(sp.id), true);
+      }
 
-      s.connections = classifyConnections(s.rv.viewer, s.rv.root);
-      calibrateBelt(s);
+      l.connections = classifyConnections(self.viewer as { getPlugin?(id: string): unknown }, self.root);
+      calibrateBelt(self);
 
-      self.signals.on(s.sensorNode.name, (v) => {
+      self.signals.on(sensorNode.name, (v) => {
         const present = v === true;
-        if (present && !s.sensorOccupied) {
-          s.partCount += 1;
-          self.signals.set(CONFIG.partCountSignal, s.partCount);
+        if (present && !l.sensorOccupied) {
+          l.partCount += 1;
+          self.signals.set(CONFIG.partCountSignal, l.partCount);
         }
-        s.sensorOccupied = present;
+        l.sensorOccupied = present;
         publishOccupied(self);
 
         if (present) {
-          if (self.state === 'receiving') {
-            onPartAtCenter(self);
-          }
+          if (self.state === 'receiving') onPartAtCenter(self);
         } else if (self.state === 'discharging') {
-          s.clearTimer = CONFIG.dischargeClearSec;
+          l.clearTimer = CONFIG.dischargeClearSec;
           enter(self, 'discharge_clearing');
         }
       });
 
-      self.contextMenu(s.rotaryNode, [
+      self.contextMenu(rotaryNode, [
         {
           id: 'reset', label: 'Reset',
           action: () => {
-            s.drive.stop();
-            setBelt(s, false);
-            blockAllInputs(s);
-            s.selectedInputPort = null;
+            l.drive!.stop();
+            setBelt(l, false);
+            blockAllInputs(self);
+            l.selectedInputPort = null;
             enter(self, 'idle');
           },
         },
       ]);
     },
 
-    fixedUpdate(self: MaterialFlowSelf, dt: number): void {
-      const s = st(self);
+    fixedUpdate(self: TurntableSelf, dt: number): void {
+      const l = self.local;
+      if (!l.rotaryNode) return;
 
-      publishOccupied(self);
+      const surf = surfaceOccupied(self);
+      publishOccupied(self, surf);
 
-      s.refreshTimer += dt;
-      if (s.refreshTimer >= CONFIG.neighborRefreshSec) {
-        s.refreshTimer = 0;
+      l.refreshTimer += dt;
+      if (l.refreshTimer >= CONFIG.neighborRefreshSec) {
+        l.refreshTimer = 0;
         refreshTopology(self);
         if (self.state === 'idle') tryReceive(self);
-        else if (self.state === 'holding' && s.sensorOccupied) tryDispatch(self);
+        else if (self.state === 'holding' && l.sensorOccupied) tryDispatch(self);
       }
 
       if (self.state !== 'idle' && self.state !== 'aligning_in') {
-        if (!platformHasPart(s)) {
-          s.emptyFor += dt;
-          if (s.emptyFor >= CONFIG.emptyResetSec) abortToIdle(self);
+        if (!platformHasPart(self, surf)) {
+          l.emptyFor += dt;
+          if (l.emptyFor >= CONFIG.emptyResetSec) abortToIdle(self);
         } else {
-          s.emptyFor = 0;
+          l.emptyFor = 0;
         }
       } else {
-        s.emptyFor = 0;
+        l.emptyFor = 0;
       }
 
       switch (self.state as State) {
         case 'idle':
-          setBelt(s, false);
+          setBelt(l, false);
           break;
         case 'aligning_in':
-          if (driveAtTarget(s)) onRotationDone(self);
+          if (l.drive!.isAtTarget()) onRotationDone(self);
           break;
         case 'receiving':
-          setBelt(s, true);
+          setBelt(l, true);
           break;
         case 'holding':
-          setBelt(s, false);
+          setBelt(l, false);
           break;
         case 'rotating_out':
-          if (driveAtTarget(s)) onRotationDone(self);
+          if (l.drive!.isAtTarget()) onRotationDone(self);
           break;
         case 'discharging':
           break;
         case 'discharge_clearing':
-          setBelt(s, true);
-          s.clearTimer -= dt;
-          if (s.clearTimer <= 0) finishCycle(self);
+          setBelt(l, true);
+          l.clearTimer -= dt;
+          if (l.clearTimer <= 0) finishCycle(self);
           break;
       }
     },
   },
 
   des: {
-    canAccept(self: MaterialFlowSelf, _mu: MU, port?: Port): boolean {
+    canAccept(self: TurntableSelf, _mu: MU, port?: Port): boolean {
       // TODO(P5): port-aligned acceptance — accept only at the currently aligned
       // input port. `alignedPort` is initialised in setup()/the FSM (B2).
       return self.currentLoad < 1 && port?.id === (self.prop['alignedPort'] as string | null);
     },
-    onAccept(_self: MaterialFlowSelf, _mu: MU, _port?: Port): boolean {
-      // TODO(P5): rotate-to-input then receive (time-based, via self.in).
-      return false;
+    onAccept(_self: TurntableSelf, _mu: MU, _port?: Port): boolean {
+      return false; // TODO(P5): rotate-to-input then receive (time-based, via self.in).
     },
-    onRotateComplete(_self: MaterialFlowSelf, _mu: MU): void {
-      // TODO(P5): advance the shared FSM (onRotationDone / onPartAtCenter) and
-      // transfer to the selected output port.
+    onRotateComplete(_self: TurntableSelf, _mu: MU): void {
+      // TODO(P5): advance the shared FSM (onRotationDone / onPartAtCenter) and transfer to the selected output port.
     },
-    onDownstreamReady(_self: MaterialFlowSelf, _from: unknown): void {
+    onDownstreamReady(_self: TurntableSelf, _from: unknown): void {
       // TODO(P5): push a HELD MU once the chosen output frees.
     },
   },
 });
 
-const TurntableBehavior: Behavior = {
-  models: def.models ?? ['*Turntable*'],
-  bind(rv: RVBindContext): void {
-    const rootTag = rv.root.name || '<unnamed>';
-    const rotaryNode = findRotaryDrive(rv.root);
-    const sensorNode = findSensor(rv.root);
-    const beltNode = findTransport(rv.root);
-    if (!rotaryNode) { console.warn(`[Turntable:${rootTag}] no Drive-Rot-* node found`); return; }
-    if (!sensorNode) { console.warn(`[Turntable:${rootTag}] no Sensor node found`); return; }
-    if (!beltNode)   console.warn(`[Turntable:${rootTag}] no Transport-* node found — belt stop/start will be a no-op`);
+const TurntableBehavior: Behavior = toBehavior(def, () => ({
+  rotaryNode: null,
+  sensorNode: null,
+  beltNode: null,
+  drive: null,
+  belt: null,
+  driveAxis: new Vector3(0, 1, 0),
 
-    const drive = attachDrive(rv, rotaryNode);
-    const belt = beltNode ? attachBelt(rv, beltNode) : null;
+  sensorOccupied: false,
+  partCount: 0,
+  lastCommandedAngle: 0,
+  clearTimer: 0,
+  connections: [],
+  selectedInputPort: null,
+  beltNeutralAngle: 0,
+  beltCalibrated: false,
+  refreshTimer: CONFIG.neighborRefreshSec,
+  emptyFor: 0,
 
-    console.info(`[Turntable:${rootTag}] attached — drive "${rotaryNode.name}", sensor "${sensorNode.name}"${beltNode ? `, belt "${beltNode.name}"` : ''}`);
-
-    rv.behavior(rv.root, 'TurntableBehavior', {
-      Drive: rotaryNode.name,
-      Sensor: sensorNode.name,
-      ...(beltNode ? { Belt: beltNode.name } : {}),
-    });
-
-    const self = createSelf(rv, def, { mode: 'continuous' });
-    _state.set(self, {
-      rv,
-      rootTag,
-      rotaryNode,
-      sensorNode,
-      beltNode,
-      drive,
-      belt,
-      driveAxis: axisFromDriveNodeName(rotaryNode.name),
-
-      sensorOccupied: false,
-      partCount: 0,
-      lastCommandedAngle: 0,
-      clearTimer: 0,
-      connections: [],
-      selectedInputPort: null,
-      beltNeutralAngle: 0,
-      beltCalibrated: false,
-      refreshTimer: CONFIG.neighborRefreshSec,
-      emptyFor: 0,
-
-      _dir: new Vector3(),
-      _quat: new Quaternion(),
-    });
-
-    self.prop['alignedPort'] = null;
-    self.prop['selectedOutput'] = null;
-
-    def.continuous.setup!(self);
-    const fixed = def.continuous.fixedUpdate;
-    if (fixed) rv.onFixedUpdate((dt: number) => fixed(self, dt));
-    rv.onDispose(() => _state.delete(self));
-  },
-};
+  _dir: new Vector3(),
+  _quat: new Quaternion(),
+}));
 
 export default TurntableBehavior;

@@ -42,10 +42,14 @@ import type { RVBindContext } from '../core/behavior-runtime';
 import { registerCapabilities } from '../core/engine/rv-component-registry';
 import { defineMaterialFlow } from '../core/material-flow/define-material-flow';
 import { createSelf, type MaterialFlowSelf, type MU } from '../core/material-flow/material-flow-self';
-import { BEHAVIOR_BADGE } from './_shared/behavior-badge';
 
 // Hierarchy/inspector badge marker (pure marker — no factory).
-registerCapabilities('SourceBehavior', BEHAVIOR_BADGE);
+registerCapabilities('SourceBehavior', {
+  badgeColor: '#7e57c2',
+  filterLabel: 'Behavior',
+  hierarchyVisible: true,
+  inspectorVisible: true,
+});
 
 // ── Per-self DES generation state (id counter only; continuous holds nothing) ──
 const _muIdCounter = new WeakMap<MaterialFlowSelf, number>();

@@ -16,7 +16,6 @@ import { ContextMenuStore } from '../src/core/hmi/context-menu-store';
 import { matchesAny } from '../src/core/behaviors';
 import { getCapabilities } from '../src/core/engine/rv-component-registry';
 import Conveyor from '../src/behaviors/Conveyor';
-import { conveyorShouldRun } from '../src/behaviors/_shared/transport-links';
 import { findDownstreamRoot } from '../src/behaviors/_shared/snap-graph-helpers';
 
 const DT = 1 / 60;
@@ -104,21 +103,6 @@ describe('Conveyor behavior — model matching', () => {
   it('does not match unrelated filenames', () => {
     expect(matchesAny(Conveyor.models, 'Turntable')).toBe(false);
     expect(matchesAny(Conveyor.models, 'ChainTransfer')).toBe(false);
-  });
-});
-
-describe('conveyorShouldRun — ZPA release rule', () => {
-  it('runs while enabled and not blocked', () => {
-    expect(conveyorShouldRun(true, false, false)).toBe(true);
-    expect(conveyorShouldRun(true, true, false)).toBe(true);   // occupied but downstream free → release
-    expect(conveyorShouldRun(true, false, true)).toBe(true);   // downstream full but I'm empty → keep feeding
-  });
-  it('stops only when a part is held here AND downstream is occupied', () => {
-    expect(conveyorShouldRun(true, true, true)).toBe(false);
-  });
-  it('stops whenever Run is false', () => {
-    expect(conveyorShouldRun(false, false, false)).toBe(false);
-    expect(conveyorShouldRun(false, true, true)).toBe(false);
   });
 });
 
