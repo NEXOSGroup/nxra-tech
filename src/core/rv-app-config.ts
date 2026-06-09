@@ -75,17 +75,18 @@ export interface RVAppConfig {
 // ─── Build-time feature flags ──────────────────────────────────
 
 /**
- * Plan 194 P1 feature flag — is the unified SimulationKernel / ContinuousRunner
- * path enabled? Default OFF: the legacy fixedUpdate orchestration runs exactly
- * as today. Enable with `VITE_UNIFIED_SIM=1` for safe A/B during P1–P5; the
- * default flips to the kernel path in P6.
+ * Is the unified SimulationKernel / ContinuousRunner path enabled? Default ON:
+ * the kernel owns the fixed-update orchestration (continuous via ContinuousRunner,
+ * DES via the DESRunner). Opt out back to the legacy fixedUpdate path with
+ * `VITE_UNIFIED_SIM=0` (or `false`) — a rollback kept available during the soak
+ * period before the legacy path + `_physicsPluginActive` are removed.
  *
  * Read via `import.meta.env` so Vite statically replaces it (the value is the
- * raw string '1'/'true' or undefined). Truthy only for '1' / 'true'.
+ * raw string '0'/'false'/'1'/'true' or undefined).
  */
 export function isUnifiedSimEnabled(): boolean {
   const v = import.meta.env.VITE_UNIFIED_SIM;
-  return v === '1' || v === 'true';
+  return v !== '0' && v !== 'false';
 }
 
 // ─── Singleton State ───────────────────────────────────────────
