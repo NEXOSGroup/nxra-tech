@@ -23,6 +23,7 @@ defineMaterialFlow({
   kind: 'conveyor',           // conveyor | router | station | source | sink | storage
   models: ['*Conveyor*'],     // GLB / placed-asset name matcher (glob)
   schema: { /* mode-agnostic params from rv_extras */ },
+  setup(self),                          // mode-agnostic init: nodes, signals, badge, menu — BOTH runners
   logic:      { /* shared: state machine + routing decisions — no time, no physics */ },
   continuous: { setup, fixedUpdate },   // adapter: trigger = sensor/surface/poll, effect = physics
   des:        { onAccept, onArrival, /* ... */ }, // adapter: trigger = events, effect = time
@@ -30,12 +31,17 @@ defineMaterialFlow({
 ```
 
 - **schema** — parameters parsed from the GLB `rv_extras`, identical in both worlds.
+- **setup** — mode-agnostic per-instance init, called by BOTH runners before the mode-specific
+  wiring: resolve nodes into `self.local`, declare signals, stamp the inspector badge, build the
+  context menu. The DES runner needs all of this too — it just interprets the resolved nodes and
+  signals differently — so it lives here, not inside `continuous`.
 - **logic** — the paradigm-independent brain: routing (`selectInput`/`selectOutput`),
   the flow decision (`shouldFlow`), and state-machine transitions (`enter`, `onPartArrived`,
   `onRotationDone`, …). It reads and mutates `self` only; it never touches time or geometry.
-- **continuous** — a thin adapter. `setup(self)` resolves nodes, declares signals, wires
-  sensor subscriptions and context menus. `fixedUpdate(self, dt)` reads triggers (sensor edges,
-  surface occupancy, `drive.isAtTarget`) and applies physical effects (belt jog, drive moveTo).
+- **continuous** — a thin adapter over the shared init. `setup(self)` adds the continuous-only
+  trigger wiring (drive/belt handles, the downstream interlock, the AABB sensor subscription).
+  `fixedUpdate(self, dt)` reads triggers (sensor edges, surface occupancy, `drive.isAtTarget`)
+  and applies physical effects (belt jog, drive moveTo).
 - **des** — a thin adapter consumed by the DES runner. Hooks (`canAccept`, `onAccept`,
   `onArrival`, `onRotateComplete`, `onDownstreamReady`, …) react to scheduled events and apply
   time-based effects (`self.in(delay, 'Arrival', mu)`, `self.transfer(mu, port)`).
@@ -116,7 +122,7 @@ defines *who* the downstream neighbour is; the signal name defines *how* they co
 
 | Module | Provides |
 |---|---|
-| `_shared/transport-links.ts` | the interlock: `createDownstreamInterlock`, `outputLink(s)`, `linkOf`, `portIds`, `conveyorShouldRun`, `declareConveyorSignals` |
+| `_shared/transport-links.ts` | the interlock: `createDownstreamInterlock`, `outputLink(s)`, `linkOf`, `portIds`, `declareConveyorSignalsWith` |
 | `_shared/lazy-drive.ts` | `attachBelt` / `attachDrive` — drive handles that resolve on demand |
 | `_shared/surface-occupancy.ts` | `isSurfaceOccupied(viewer, node)` |
 | `_shared/snap-graph-helpers.ts` | port topology: `findOutputPairings`, `classifyConnections`, `listOwnSnaps` |
@@ -124,9 +130,10 @@ defines *who* the downstream neighbour is; the signal name defines *how* they co
 
 ## Authoring a new component
 
-1. add `src/behaviors/MyComponent.ts` → `defineMaterialFlow({ type, kind, models, schema, logic, continuous, des })`.
+1. add `src/behaviors/MyComponent.ts` → `defineMaterialFlow({ type, kind, models, schema, setup, logic, continuous, des })`.
 2. put routing and state-machine decisions in `logic` (so both paradigms share them).
-3. `continuous.setup` resolves nodes, declares signals, wires sensors and the context menu;
+3. `setup(self)` resolves nodes into `self.local`, declares signals, stamps the badge and builds
+   the context menu (mode-agnostic). `continuous.setup` adds the AABB sensor wiring + drive handles;
    `continuous.fixedUpdate` publishes surface occupancy and applies physical effects.
 4. add `des` hooks for the event-driven path.
 5. coordinate with neighbours by publishing/reading `Conveyor.Occupied[@id]`.
