@@ -29,6 +29,7 @@ import type { RVViewerPlugin } from '../../core/rv-plugin';
 import type { UISlotEntry } from '../../core/rv-ui-plugin';
 import { USER_PAUSE_REASON } from '../../core/engine/rv-constants';
 import { SimControllerToolbar } from './SimControllerToolbar';
+import { SimModeToggle } from './SimModeToggle';
 
 /** The pause-reason key used by this plugin. Exported so tests + adjacent
  *  modules (e.g. config helpers) can reference it without typo risk.
@@ -53,6 +54,10 @@ export class SimControllerPlugin implements RVViewerPlugin {
     // (Play/Pause + Reset) live at the very start of the TopBar, right after
     // the realvirtual logo / online indicator.
     { slot: 'toolbar-button-leading', component: SimControllerToolbar, order: 10 },
+    // Plan 194 P6 — Sim mode-toggle ([ Realtime | DES ] + sub-modes). Renders
+    // right after Play/Pause/Reset; renders nothing when the unified kernel
+    // path is off (default build) or no model is loaded.
+    { slot: 'toolbar-button-leading', component: SimModeToggle, order: 20 },
   ];
 
   /** Set in `onModelLoaded`. Used by `dispose()` for safety-net cleanup

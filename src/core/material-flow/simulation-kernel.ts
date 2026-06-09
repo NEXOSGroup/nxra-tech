@@ -34,6 +34,59 @@ import { ContinuousRunner } from './continuous-runner';
 export type SimulationMode = 'continuous' | 'des';
 
 /**
+ * DES sub-mode (Plan 194 §3.2 / F10). Declared here on the PUBLIC kernel surface
+ * so `SimModeToggle` (and any public UI) can drive the second toolbar row WITHOUT
+ * importing the private `DESRunner`. The private `DESRunner.DesSubMode` is the
+ * same string-union — it satisfies this structurally.
+ */
+export type SimSubMode = 'animated' | 'hybrid' | 'fastforward' | 'step';
+
+/**
+ * KPI snapshot the FastForward analysis panel reads (Plan 194 §4.2). Pure data —
+ * no private types — so the public KPI panel can render throughput / bottleneck /
+ * per-component utilization without reaching into `rv-des-statistics`.
+ */
+export interface SimKpiSnapshot {
+  /** Canonical simulation time in seconds. */
+  readonly simTimeSeconds: number;
+  /** Aggregate throughput (parts per hour) across the model. */
+  readonly throughputPerHour: number;
+  /** Highest-utilization component, or null when nothing is loaded yet. */
+  readonly bottleneck: { readonly name: string; readonly utilization: number } | null;
+  /** Per-component utilization rows for the bar list (0–100%). */
+  readonly components: ReadonlyArray<{ readonly name: string; readonly utilization: number }>;
+}
+
+/**
+ * The DES sub-mode / KPI control surface the public UI consumes. The active DES
+ * executor (the private `DESRunner`) implements this STRUCTURALLY — the public
+ * side only ever sees this interface, never the concrete class (Plan 194 V7). The
+ * kernel exposes it via `desControl()`, returning `null` outside DES mode.
+ */
+export interface SimDesControl {
+  /** Current sub-mode. */
+  readonly subMode: SimSubMode;
+  /** Switch the sub-mode (Animated / Hybrid / FastForward / Step). */
+  setSubMode(m: SimSubMode): void;
+  /** HybridSynced multiplier (≥ 1). */
+  readonly multiplier: number;
+  /** Set the HybridSynced multiplier. */
+  setMultiplier(n: number): void;
+  /** Canonical sim time in seconds (for displays / KPI). */
+  readonly simTime: number;
+  /** Process exactly one event (Step mode). Returns false when nothing ran. */
+  step(): boolean;
+  /** FastForward progress 0–1 when a FF run is in flight; undefined otherwise. */
+  readonly ffProgress?: number;
+  /** Run FastForward to completion; resolves true when done, false if cancelled. */
+  runFastForward?(): Promise<boolean>;
+  /** Cancel an in-flight FastForward run. */
+  cancelFastForward?(): void;
+  /** Current KPI snapshot (throughput / bottleneck / utilization). */
+  kpiSnapshot?(): SimKpiSnapshot;
+}
+
+/**
  * Factory the private DES side provides; `null` in the public build. Same shape
  * as `private-stubs/des-runner-stub.ts` `CreateDesRunner`.
  */
@@ -51,6 +104,12 @@ export interface SimulationKernelOptions {
   readonly defs?: MaterialFlowDefinition[];
   /** DES runner factory; defaults to the stub (`null`) → continuous-only public build. */
   readonly desRunnerFactory?: DesRunnerFactory;
+  /**
+   * Optional callback fired AFTER a successful mode switch (Plan 194 P6). The
+   * viewer wires this to emit a `'simulation-mode-changed'` event so the
+   * `SimModeToggle` UI re-renders. Pure notification — never mutates the kernel.
+   */
+  readonly onModeChanged?: (mode: SimulationMode) => void;
 }
 
 /**
@@ -71,6 +130,7 @@ export class SimulationKernel {
   private readonly topology: SimulationTopology;
   private readonly defs: MaterialFlowDefinition[];
   private desRunnerFactory: DesRunnerFactory;
+  private readonly onModeChanged?: (mode: SimulationMode) => void;
 
   /** The currently active executor (continuous by default). */
   private _active: SimulationExecutor;
@@ -86,6 +146,7 @@ export class SimulationKernel {
     this.topology = opts.topology;
     this.defs = opts.defs ?? [];
     this.desRunnerFactory = opts.desRunnerFactory ?? null;
+    this.onModeChanged = opts.onModeChanged;
     this._active = this.continuousRunner;
   }
 
@@ -113,6 +174,24 @@ export class SimulationKernel {
    */
   hasDesRunner(): boolean {
     return this.desRunnerFactory !== null;
+  }
+
+  /**
+   * The DES sub-mode / KPI control surface, or `null` when not in DES mode (or
+   * the active executor does not expose one). The public UI drives the
+   * sub-mode row + reads KPIs through this STRUCTURAL interface — it never sees
+   * the concrete (private) `DESRunner` (Plan 194 V7). The cast is purely
+   * structural; in the continuous mode (or with the public stub) there is no
+   * DES executor, so this returns `null` and the sub-mode row stays hidden.
+   */
+  desControl(): SimDesControl | null {
+    if (this._mode !== 'des') return null;
+    const exec = this._active as unknown as Partial<SimDesControl>;
+    // Minimal duck-type: a real DES executor exposes setSubMode + subMode.
+    if (typeof exec.setSubMode === 'function' && typeof exec.subMode === 'string') {
+      return exec as SimDesControl;
+    }
+    return null;
   }
 
   // ─── DES registration (injection, never import) ───────────────────────
@@ -168,6 +247,10 @@ export class SimulationKernel {
       incoming.start(this.defs, this.topology);
       this._active = incoming;
       this._mode = m;
+      // Notify AFTER the commit so a subscriber that reads `mode`/`desControl()`
+      // synchronously sees the new mode. Guarded so a throwing listener cannot
+      // wedge the switch (the latch is released in `finally`).
+      try { this.onModeChanged?.(m); } catch (e) { console.error('[SimulationKernel] onModeChanged listener threw:', e); }
     } catch (e) {
       console.error(`[SimulationKernel] setMode("${m}") failed — staying in '${this._mode}':`, e);
     } finally {

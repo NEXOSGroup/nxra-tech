@@ -859,6 +859,12 @@ export class MultiuserPlugin extends RVBehavior {
   private _applyMUSync(mus: MUSnapshot[]): void {
     if (!this.viewer) return;
 
+    // Plan 194 V6 — DES MU-sync guard. In DES mode the live MUs are driven by
+    // the (private) DESRunner, not the continuous `transportManager.mus`, so
+    // syncing against that list would clear/mis-sync the wrong set. DES +
+    // Multiuser is incompatible in v1; skip MU-sync entirely while in DES mode.
+    if (this.viewer.simulationKernel?.mode === 'des') return;
+
     const tm = this.viewer.transportManager;
     if (!tm) return;
 

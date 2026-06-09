@@ -1164,6 +1164,20 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   }
 
   /**
+   * Plan 194 P6 — public accessor for the unified SimulationKernel.
+   *
+   * Returns the active kernel, building it on demand when the `VITE_UNIFIED_SIM`
+   * flag is on and a model is loaded (so the Sim mode-toggle UI can read mode /
+   * `hasDesRunner()` even before the first fixed tick). Returns `null` when the
+   * flag is OFF (default) or no model is loaded yet — the toggle then renders
+   * nothing. The UI imports only this + the public kernel facade (never the
+   * private `DESRunner`, Plan 194 V7).
+   */
+  get simulationKernel(): SimulationKernel | null {
+    return this._getKernel();
+  }
+
+  /**
    * Plan 194 P1 — lazily build (or return) the unified SimulationKernel,
    * reusing the viewer's EXISTING transportManager + behaviors. Returns null
    * when the flag is OFF or no transportManager is loaded yet. Guarded so the
@@ -1185,6 +1199,8 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       // DES factory defaults to the stub (`null` in the public build) →
       // hasDesRunner() is false → the DES toggle stays hidden (P6).
       desRunnerFactory: createDesRunner,
+      // Plan 194 P6: re-render the Sim mode-toggle UI on a successful switch.
+      onModeChanged: (mode) => this.emit('simulation-mode-changed', { mode }),
     });
     return this._kernel;
   }

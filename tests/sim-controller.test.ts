@@ -6,10 +6,11 @@ import { createTestViewer } from './helpers/test-viewer';
 import { SimControllerPlugin, SIM_CONTROLLER_PAUSE_REASON } from '../src/plugins/sim-controller';
 
 describe('SimControllerPlugin — lifecycle', () => {
-  test('registers a toolbar-button slot', () => {
+  test('registers the leading toolbar-button slots (controls + mode-toggle)', () => {
     const plugin = new SimControllerPlugin();
-    expect(plugin.slots.length).toBe(1);
-    expect(plugin.slots[0].slot).toBe('toolbar-button-leading');
+    // Plan 194 P6 added a second leading slot for the Sim mode-toggle.
+    expect(plugin.slots.length).toBe(2);
+    expect(plugin.slots.every(s => s.slot === 'toolbar-button-leading')).toBe(true);
   });
 
   test('exposes a stable plugin id', () => {
