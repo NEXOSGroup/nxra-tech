@@ -221,11 +221,83 @@ function abortToIdle(self: TurntableSelf): void {
   enter(self, 'idle');
 }
 
+// ── DES router timing (Plan 194 §2.4) ─────────────────────────────────────
+//
+// The DES adapter has NO physical drive — it only consumes TIME. A rotation to
+// an angle takes |Δang|/RotationSpeed seconds, scheduled as a `RotateComplete`
+// event; `prop['driveTarget']` is the coupling point the Tween-Registry uses to
+// animate the real drive 1:1 in Animated/HybridSynced (so the optics match).
+
+const DES_DEFAULT_ROTATION_SPEED = 45; // deg/s
+
+function rotationSpeed(self: TurntableSelf): number {
+  const v = self.prop['RotationSpeed'];
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) && n > 0 ? n : DES_DEFAULT_ROTATION_SPEED;
+}
+
+function maxCapacity(self: TurntableSelf): number {
+  const v = self.prop['MaxCapacity'];
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1;
+}
+
+/**
+ * DES rotate: command a logical rotation to `targetAngle` and schedule the
+ * `RotateComplete` after `|Δang|/RotationSpeed` seconds (NO physical drive).
+ * Records the new commanded angle and the tween coupling target.
+ */
+function desRotateTo(self: TurntableSelf, targetAngle: number, next: State, mu: MU | null): void {
+  const l = self.local;
+  const dt = Math.abs(targetAngle - l.lastCommandedAngle) / rotationSpeed(self);
+  l.lastCommandedAngle = targetAngle;
+  self.prop['driveTarget'] = targetAngle; // Tween/Animated drives the real rotation 1:1.
+  enter(self, next);
+  self.in(Math.max(0.001, dt), 'RotateComplete', mu);
+}
+
+/** Pick a free output port for the DES router (first not-occupied output). */
+function desSelectOutput(self: TurntableSelf): Port | null {
+  const free = self.freeOutputs();
+  return free.length > 0 ? free[0] : null;
+}
+
 const def = defineMaterialFlow<TurntableSelf>({
   type: 'Turntable',
   kind: 'router',
   models: ['*Turntable*'],
-  schema: {},
+  // DES router params (Plan 194 §2.4). RotationSpeed drives the rotate-time
+  // schedule (|Δang|/RotationSpeed); MaxCapacity gates acceptance.
+  schema: {
+    RotationSpeed: { type: 'number', default: 45 }, // deg/s
+    MaxCapacity:   { type: 'number', default: 1 },
+  },
+
+  // Per-instance state slot — used by BOTH the continuous shim and the DES
+  // model-load binding so a directly-created self gets its local fields.
+  local: (): TurntableLocal => ({
+    disabled: false,
+    rotaryNode: null,
+    sensorNode: null,
+    beltNode: null,
+    drive: null,
+    belt: null,
+    driveAxis: new Vector3(0, 1, 0),
+
+    sensorOccupied: false,
+    partCount: 0,
+    lastCommandedAngle: 0,
+    clearTimer: 0,
+    connections: [],
+    selectedInputPort: null,
+    beltNeutralAngle: 0,
+    beltCalibrated: false,
+    refreshTimer: CONFIG.neighborRefreshSec,
+    emptyFor: 0,
+
+    _dir: new Vector3(),
+    _quat: new Quaternion(),
+  }),
 
   logic: { enter, tryReceive, tryDispatch, onPartAtCenter, onRotationDone, finishCycle, abortToIdle },
 
@@ -257,6 +329,16 @@ const def = defineMaterialFlow<TurntableSelf>({
     self.signal(CONFIG.occupiedSignal,  { type: 'PLCOutputBool', initialValue: false });
     self.signal(CONFIG.runningSignal,   { type: 'PLCOutputBool', initialValue: false });
     self.signal(CONFIG.partCountSignal, { type: 'PLCOutputInt',  initialValue: 0 });
+
+    // Mode-agnostic shared-state init (B2): ALL self.prop fields both adapters
+    // read MUST be initialised here so the DES path (which never runs
+    // continuous.setup) has a defined alignedPort/selectedOutput/driveTarget and
+    // a clean state after Reset-on-Switch / DESRunner.start().
+    self.prop['alignedPort'] = null;
+    self.prop['selectedOutput'] = null;
+    self.prop['heldMU'] = null;
+    self.prop['driveTarget'] = l.lastCommandedAngle;
+    self.setState('idle');
 
     self.contextMenu(rotaryNode, [
       {
@@ -365,45 +447,68 @@ const def = defineMaterialFlow<TurntableSelf>({
   },
 
   des: {
+    // Accept only at the currently aligned input port (when a port is supplied)
+    // AND below capacity. The base handshake passes `port === undefined`, in
+    // which case capacity alone gates acceptance — an idle table receives the
+    // part, then aligns to the chosen OUTPUT during onAccept (B2: alignedPort is
+    // initialised to null in setup(), the table is idle so it accepts).
     canAccept(self: TurntableSelf, _mu: MU, port?: Port): boolean {
-      // TODO(P5): port-aligned acceptance — accept only at the currently aligned
-      // input port. `alignedPort` is initialised in setup()/the FSM (B2).
-      return self.currentLoad < 1 && port?.id === (self.prop['alignedPort'] as string | null);
+      if (self.currentLoad >= maxCapacity(self)) return false;
+      if (self.state !== 'idle' && self.state !== 'receiving') return false;
+      if (port && self.prop['alignedPort'] != null && port.id !== self.prop['alignedPort']) {
+        return false;
+      }
+      return true;
     },
-    onAccept(_self: TurntableSelf, _mu: MU, _port?: Port): boolean {
-      return false; // TODO(P5): rotate-to-input then receive (time-based, via self.in).
+    // The part is on the platform. Pick a free output, rotate to it (time-based),
+    // and schedule RotateComplete. With no free output, HOLD the MU (parked on
+    // self.prop['heldMU']) until onDownstreamReady retries.
+    onAccept(self: TurntableSelf, mu: MU, port?: Port): boolean {
+      self.prop['alignedPort'] = port?.id ?? null;
+      const out = desSelectOutput(self);
+      if (!out) {
+        // No free output — hold the part on the platform (Plan 194 §2.4 HOLD).
+        self.prop['heldMU'] = mu.id;
+        enter(self, 'holding');
+        return true;
+      }
+      self.prop['selectedOutput'] = out.id;
+      const target = dispatchToOutputAngle(self.local.driveAxis, self.local.beltNeutralAngle, out.ownerRoot, self.local.lastCommandedAngle);
+      desRotateTo(self, target, 'rotating_out', mu);
+      return true;
     },
-    onRotateComplete(_self: TurntableSelf, _mu: MU): void {
-      // TODO(P5): advance the shared FSM (onRotationDone / onPartAtCenter) and transfer to the selected output port.
+    // Rotation to the chosen output is done — discharge: transfer the MU to the
+    // selected output port (the native handshake blocks if the output is full).
+    onRotateComplete(self: TurntableSelf, mu: MU): void {
+      const outId = self.prop['selectedOutput'] as string | null;
+      const out = outId != null ? self.outputs().find(p => p.id === outId) : undefined;
+      enter(self, 'discharging');
+      self.transfer(mu, out);
+      self.prop['selectedOutput'] = null;
+      self.prop['heldMU'] = null;
+      enter(self, 'idle');
     },
-    onDownstreamReady(_self: TurntableSelf, _from: unknown): void {
-      // TODO(P5): push a HELD MU once the chosen output frees.
+    // A chosen output freed — if a part is held (no output was free at accept
+    // time), retry the dispatch now.
+    onDownstreamReady(self: TurntableSelf, _from: unknown): void {
+      if (self.state !== 'holding') return;
+      const heldId = self.prop['heldMU'] as number | null;
+      if (heldId == null) return;
+      const out = desSelectOutput(self);
+      if (!out) return; // still blocked — wait for the next ready signal
+      const held = self.mus.find(m => m.id === heldId) ?? null;
+      self.prop['selectedOutput'] = out.id;
+      const target = dispatchToOutputAngle(self.local.driveAxis, self.local.beltNeutralAngle, out.ownerRoot, self.local.lastCommandedAngle);
+      desRotateTo(self, target, 'rotating_out', held);
     },
   },
 });
 
-const TurntableBehavior: Behavior = toBehavior(def, () => ({
-  disabled: false,
-  rotaryNode: null,
-  sensorNode: null,
-  beltNode: null,
-  drive: null,
-  belt: null,
-  driveAxis: new Vector3(0, 1, 0),
+// The local-state factory lives on the def (`def.local`) so both the continuous
+// shim and the DES binding seed `self.local` identically.
+const TurntableBehavior: Behavior = toBehavior(def);
 
-  sensorOccupied: false,
-  partCount: 0,
-  lastCommandedAngle: 0,
-  clearTimer: 0,
-  connections: [],
-  selectedInputPort: null,
-  beltNeutralAngle: 0,
-  beltCalibrated: false,
-  refreshTimer: CONFIG.neighborRefreshSec,
-  emptyFor: 0,
-
-  _dir: new Vector3(),
-  _quat: new Quaternion(),
-}));
+/** The material-flow definition (schema + logic + continuous + des) — for DES tests / runner. */
+export const TurntableFlow = def;
 
 export default TurntableBehavior;

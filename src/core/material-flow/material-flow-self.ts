@@ -82,6 +82,37 @@ export interface MU {
 export type DesHookName = string;
 
 /**
+ * A tween descriptor a `des` block may attach to a DURATION event so the
+ * (private) DESRunner animates the effect over the scheduled interval (Plan 194
+ * §3.1). It is pure DATA — the public side never touches the tween registry; it
+ * only describes the interpolation, and the private scheduler registers it on
+ * its `TweenRegistry` (keyed by the event's t0 / duration). Both flavours map
+ * onto `TweenRegistry.addPosition` / `addDrive`.
+ *
+ * Pass it as the `data` argument of `self.in(delay, hook, mu, { tween })` (the
+ * scheduler reads `data.tween`); in continuous/mock mode (no scheduler) it is
+ * inert because `self.in` itself is a dev-throw there.
+ */
+export interface TweenSpec {
+  /** Position tween: lerp `target.position` from `from` to `to` over the interval. */
+  readonly tween:
+    | {
+        readonly kind: 'position';
+        /** The visual to move (a `PositionTweenTarget` — typically `mu.visual`). */
+        readonly target: unknown | null;
+        readonly from: readonly [number, number, number];
+        readonly to: readonly [number, number, number];
+      }
+    | {
+        readonly kind: 'drive';
+        /** The drive to interpolate (a `DriveTweenTarget` wrapper). */
+        readonly drive: unknown | null;
+        readonly from: number;
+        readonly to: number;
+      };
+}
+
+/**
  * A unified material-flow port. EXTENDS Plan-196's `TransportLink`:
  *   port.id === TransportLink.partnerSnapId === partner snap id
  *   port.ownerComponent fills TransportLink.partnerComponent (DES handshake)
@@ -152,6 +183,22 @@ export interface MaterialFlowSelf<S = Record<string, never>> {
 
   // MU transfer / load.
   transfer(mu: MU, fromPort?: Port): void;
+  /**
+   * Would the downstream accept `mu` right now? DES routing pre-check (Plan 194
+   * §2.5 `self.downstream?.canAccept(mu)`): in DES mode it queries the resolved
+   * downstream component's handshake; in continuous/mock mode (no backend) it
+   * returns `true` (the transport surface, not a handshake, gates the flow).
+   * `port` selects a specific output for multi-output routers.
+   */
+  downstreamCanAccept(mu: MU, port?: Port): boolean;
+  /**
+   * Mint a fresh MU (sources). In DES mode this creates + registers a real
+   * runner-backed MU (so the manager tracks it, ids are global, and the tween
+   * registry can animate its `visual`). In continuous/mock mode it returns a
+   * plain structural MU. Use this in `des.onGenerate` instead of fabricating a
+   * `{ id }` literal so the model-load flow tracks every part.
+   */
+  spawn(): MU;
   readonly mus: ReadonlyArray<MU>;
   readonly currentLoad: number;
 
@@ -266,6 +313,20 @@ function makeLinkLike(
   };
 }
 
+/**
+ * Read a numeric config value from `self.prop` (the rv_extras bag the binding
+ * wiring fills) with a default fallback. Non-finite / missing → `def`.
+ */
+export function readConfigNumber(
+  self: Pick<MaterialFlowSelf, 'prop'>,
+  key: string,
+  def: number,
+): number {
+  const v = self.prop[key];
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : def;
+}
+
 // ─── createSelf ─────────────────────────────────────────────────────────
 
 /** Minimal definition shape `createSelf` needs (avoids a cycle with define-material-flow). */
@@ -291,6 +352,18 @@ export interface CreateSelfOptions<S = Record<string, never>> {
    * (the transport manager moves MUs surface→surface).
    */
   onTransfer?: ((mu: MU, fromPort?: Port) => void) | null;
+  /**
+   * DES MU factory (P5). When present, `self.spawn()` mints a real runner-backed
+   * MU. Absent (continuous) → `self.spawn()` returns a plain structural MU with a
+   * locally-incremented id.
+   */
+  spawnMU?: (() => MU) | null;
+  /**
+   * DES downstream-acceptance probe (P5). When present, `self.downstreamCanAccept`
+   * delegates to it (the runner queries the resolved downstream adapter). Absent
+   * (continuous) → `downstreamCanAccept` returns `true`.
+   */
+  canAcceptDownstream?: ((mu: MU, port?: Port) => boolean) | null;
   /** Per-instance state object exposed as `self.local` (defaults to `{}`). */
   local?: S;
 }
@@ -320,7 +393,10 @@ export function createSelf<S = Record<string, never>>(
   const entityId = opts.entityId ?? -1;
   const scheduler = opts.scheduler ?? null;
   const onTransfer = opts.onTransfer ?? null;
+  const spawnMU = opts.spawnMU ?? null;
+  const canAcceptDownstream = opts.canAcceptDownstream ?? null;
   const local = (opts.local ?? {}) as S;
+  let localMuId = 0;
 
   const prop: Record<string, JsonValue> = {};
   const mus: MU[] = [];
@@ -412,6 +488,16 @@ export function createSelf<S = Record<string, never>>(
       // block) to the runner-injected backend. Continuous: implicit no-op
       // hand-off (the transport manager moves MUs surface→surface).
       if (onTransfer) onTransfer(mu, fromPort);
+    },
+    spawn(): MU {
+      // DES: a real runner-backed MU (manager-tracked, global id, visual). Else
+      // a plain structural MU with a local id (continuous/mock).
+      return spawnMU ? spawnMU() : { id: ++localMuId, prop: {} };
+    },
+    downstreamCanAccept(mu: MU, port?: Port): boolean {
+      // DES: probe the resolved downstream adapter; continuous/mock: always true
+      // (the transport surface gates the flow, not a handshake).
+      return canAcceptDownstream ? canAcceptDownstream(mu, port) : true;
     },
     get mus(): ReadonlyArray<MU> {
       return mus;

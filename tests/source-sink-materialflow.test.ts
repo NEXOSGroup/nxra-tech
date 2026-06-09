@@ -67,6 +67,7 @@ function makeMockSelf(opts: {
   const schedules: MockSelf['schedules'] = [];
   const writes = new Map<string, boolean | number>();
   const outs = opts.outputs ?? [];
+  let muId = 0;
 
   const self: MockSelf = {
     type: opts.type,
@@ -94,6 +95,8 @@ function makeMockSelf(opts: {
     setState: () => { /* no-op */ },
     state: 'idle',
     transfer: (mu: MU, from?: Port) => { transfers.push({ mu, from }); },
+    spawn: (): MU => ({ id: ++muId, prop: {} }),
+    downstreamCanAccept: () => true,
     mus: [],
     currentLoad: 0,
     contextMenu: () => { /* no-op */ },

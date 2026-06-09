@@ -15,11 +15,20 @@
 import type { Object3D } from 'three';
 import type { MaterialFlowDefinition } from './define-material-flow';
 import type { MaterialFlowSelf, MU } from './material-flow-self';
+import type { BindContextHost } from '../behavior-runtime';
 
 /** Topology handed to an executor at start (resolved ports per instance). */
 export interface SimulationTopology {
   /** Scene root the executor operates on. */
   readonly root: Object3D;
+  /**
+   * Optional bind-context host (the RVViewer) the DES runner uses on `start()`
+   * to discover placed material-flow components in the scene and build a
+   * per-node `self`. Absent in programmatic/unit-test setups, where instances
+   * are added directly via `runner.addInstance(...)`. Kept structural (no
+   * private import) so the public core stays DES-runner-independent.
+   */
+  readonly host?: BindContextHost;
 }
 
 /**

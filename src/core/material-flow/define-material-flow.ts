@@ -88,6 +88,14 @@ export interface MaterialFlowDefinition<S extends MaterialFlowSelf<any> = Materi
   /** Component schema (same shape as rv-component-registry; applySchema reused). */
   readonly schema: ComponentSchema;
   /**
+   * Per-instance `self.local` factory — the seed for the typed local state slot.
+   * Used by BOTH the continuous shim (`toBehavior`) and the DES model-load
+   * binding so a directly-created `self` (no `toBehavior`) still gets its
+   * resolved-nodes/handles/flags slot. When omitted, `self.local` defaults to
+   * an empty object.
+   */
+  readonly local?: () => S extends MaterialFlowSelf<infer L> ? L : never;
+  /**
    * Mode-agnostic per-instance init, called by BOTH the continuous and DES
    * runners. Resolve nodes into `self.local`, declare signals, stamp the
    * inspector/badge companion, build the context menu — everything that is
@@ -139,12 +147,14 @@ export function toBehavior<S = Record<string, never>>(
   localFactory?: () => S,
 ): Behavior {
   const models = def.models ?? [`*${def.type}*`];
+  // The local-state factory: prefer the explicit arg, else the def's own `local`.
+  const makeLocal = localFactory ?? (def.local as (() => S) | undefined);
   return {
     models,
     bind(rv: RVBindContext): void {
       const self = createSelf<S>(rv, def, {
         mode: 'continuous',
-        local: localFactory ? localFactory() : undefined,
+        local: makeLocal ? makeLocal() : undefined,
       });
       const c = def.continuous;
       // Mode-agnostic init FIRST (resolves self.local nodes, declares signals,

@@ -51,15 +51,6 @@ registerCapabilities('SourceBehavior', {
   inspectorVisible: true,
 });
 
-// ── Per-self DES generation state (id counter only; continuous holds nothing) ──
-const _muIdCounter = new WeakMap<MaterialFlowSelf, number>();
-
-function nextMuId(self: MaterialFlowSelf): number {
-  const n = (_muIdCounter.get(self) ?? 0) + 1;
-  _muIdCounter.set(self, n);
-  return n;
-}
-
 /** Seconds between generations, derived from the mode-agnostic schema. */
 function generationInterval(self: MaterialFlowSelf): number {
   const interval = Number(self.prop['Interval'] ?? 0);
@@ -101,7 +92,10 @@ const def = defineMaterialFlow({
      * continuous path.
      */
     onGenerate(self: MaterialFlowSelf): void {
-      const mu: MU = { id: nextMuId(self), prop: {} };
+      // Mint a real runner-backed MU (manager-tracked) — `self.spawn()` returns a
+      // plain structural MU in continuous/mock mode, a registered DESMU under the
+      // DESRunner.
+      const mu: MU = self.spawn();
       // Hand the new MU to the first output port (the start of the line). The
       // DESRunner replaces self.transfer with the real canAccept→accept handshake
       // (P5); in continuous/mock mode it is a no-op (no double-effect).

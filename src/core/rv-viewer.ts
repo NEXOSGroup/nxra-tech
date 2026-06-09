@@ -1176,7 +1176,9 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     const runner = new ContinuousRunner(this.transportManager, this.behaviors);
     this._kernel = new SimulationKernel({
       continuousRunner: runner,
-      topology: { root: this.currentModel },
+      // Pass the viewer as the bind-context host so the DESRunner can discover
+      // and bind placed material-flow components on start() (Plan 194 P5b).
+      topology: { root: this.currentModel, host: this as unknown as BindContextHost },
       // P5 wires the actual material-flow definitions in play; continuous
       // discovery already binds them via the BehaviorManager today.
       defs: [],
