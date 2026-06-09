@@ -42,6 +42,7 @@ type State =
   | 'discharging';
 
 interface TurntableLocal {
+  disabled: boolean;
   rotaryNode: Object3D | null;
   sensorNode: Object3D | null;
   beltNode: Object3D | null;
@@ -228,38 +229,63 @@ const def = defineMaterialFlow<TurntableSelf>({
 
   logic: { enter, tryReceive, tryDispatch, onPartAtCenter, onRotationDone, finishCycle, abortToIdle },
 
+  // Mode-agnostic init (continuous AND DES): resolve nodes into self.local,
+  // declare signals, stamp the badge, build the Reset context menu.
+  setup(self: TurntableSelf): void {
+    const l = self.local;
+    const rootTag = self.root.name || '<unnamed>';
+    const rotaryNode = findRotaryDrive(self.root);
+    const sensorNode = findSensor(self.root);
+    const beltNode = findTransport(self.root);
+    if (!rotaryNode) { console.warn(`[Turntable:${rootTag}] no Drive-Rot-* node found`); l.disabled = true; return; }
+    if (!sensorNode) { console.warn(`[Turntable:${rootTag}] no Sensor node found`); l.disabled = true; return; }
+    if (!beltNode)   console.warn(`[Turntable:${rootTag}] no Transport-* node found — belt stop/start will be a no-op`);
+
+    l.rotaryNode = rotaryNode;
+    l.sensorNode = sensorNode;
+    l.beltNode = beltNode;
+    l.driveAxis = axisFromDriveNodeName(rotaryNode.name);
+
+    console.info(`[Turntable:${rootTag}] attached — drive "${rotaryNode.name}", sensor "${sensorNode.name}"${beltNode ? `, belt "${beltNode.name}"` : ''}`);
+    self.stamp('TurntableBehavior', {
+      Drive: rotaryNode.name,
+      Sensor: sensorNode.name,
+      ...(beltNode ? { Belt: beltNode.name } : {}),
+    });
+
+    self.signal(CONFIG.runSignal,       { type: 'PLCInputBool',  initialValue: true });
+    self.signal(CONFIG.occupiedSignal,  { type: 'PLCOutputBool', initialValue: false });
+    self.signal(CONFIG.runningSignal,   { type: 'PLCOutputBool', initialValue: false });
+    self.signal(CONFIG.partCountSignal, { type: 'PLCOutputInt',  initialValue: 0 });
+
+    self.contextMenu(rotaryNode, [
+      {
+        id: 'reset', label: 'Reset',
+        action: () => {
+          l.drive!.stop();
+          setBelt(l, false);
+          blockAllInputs(self);
+          l.selectedInputPort = null;
+          enter(self, 'idle');
+        },
+      },
+    ]);
+  },
+
   continuous: {
+    // Continuous-only wiring — reads the self.local nodes resolved by the shared
+    // setup() above: drive/belt handles, belt-neutral calibration, topology +
+    // per-port interlock state, and the AABB-sensor subscription.
     setup(self: TurntableSelf): void {
       const l = self.local;
-      const rootTag = self.root.name || '<unnamed>';
-      const rotaryNode = findRotaryDrive(self.root);
-      const sensorNode = findSensor(self.root);
-      const beltNode = findTransport(self.root);
-      if (!rotaryNode) { console.warn(`[Turntable:${rootTag}] no Drive-Rot-* node found`); return; }
-      if (!sensorNode) { console.warn(`[Turntable:${rootTag}] no Sensor node found`); return; }
-      if (!beltNode)   console.warn(`[Turntable:${rootTag}] no Transport-* node found — belt stop/start will be a no-op`);
+      if (l.disabled) return;
 
-      l.rotaryNode = rotaryNode;
-      l.sensorNode = sensorNode;
-      l.beltNode = beltNode;
-      l.drive = attachDrive(selfDrives(self), rotaryNode);
-      l.belt = beltNode ? attachBelt(selfDrives(self), beltNode) : null;
-      l.driveAxis = axisFromDriveNodeName(rotaryNode.name);
-
-      console.info(`[Turntable:${rootTag}] attached — drive "${rotaryNode.name}", sensor "${sensorNode.name}"${beltNode ? `, belt "${beltNode.name}"` : ''}`);
-      self.stamp('TurntableBehavior', {
-        Drive: rotaryNode.name,
-        Sensor: sensorNode.name,
-        ...(beltNode ? { Belt: beltNode.name } : {}),
-      });
+      l.drive = attachDrive(selfDrives(self), l.rotaryNode!);
+      l.belt = l.beltNode ? attachBelt(selfDrives(self), l.beltNode) : null;
 
       self.prop['alignedPort'] = null;
       self.prop['selectedOutput'] = null;
 
-      self.signal(CONFIG.runSignal,       { type: 'PLCInputBool',  initialValue: true });
-      self.signal(CONFIG.occupiedSignal,  { type: 'PLCOutputBool', initialValue: false });
-      self.signal(CONFIG.runningSignal,   { type: 'PLCOutputBool', initialValue: false });
-      self.signal(CONFIG.partCountSignal, { type: 'PLCOutputInt',  initialValue: 0 });
       for (const sp of listOwnSnaps(self.viewer as { getPlugin?(id: string): unknown }, self.root)) {
         self.signals.set(portOccupiedSignal(sp.id), true);
       }
@@ -267,7 +293,7 @@ const def = defineMaterialFlow<TurntableSelf>({
       l.connections = classifyConnections(self.viewer as { getPlugin?(id: string): unknown }, self.root);
       calibrateBelt(self);
 
-      self.signals.on(sensorNode.name, (v) => {
+      self.signals.on(l.sensorNode!.name, (v) => {
         const present = v === true;
         if (present && !l.sensorOccupied) {
           l.partCount += 1;
@@ -283,19 +309,6 @@ const def = defineMaterialFlow<TurntableSelf>({
           enter(self, 'discharge_clearing');
         }
       });
-
-      self.contextMenu(rotaryNode, [
-        {
-          id: 'reset', label: 'Reset',
-          action: () => {
-            l.drive!.stop();
-            setBelt(l, false);
-            blockAllInputs(self);
-            l.selectedInputPort = null;
-            enter(self, 'idle');
-          },
-        },
-      ]);
     },
 
     fixedUpdate(self: TurntableSelf, dt: number): void {
@@ -370,6 +383,7 @@ const def = defineMaterialFlow<TurntableSelf>({
 });
 
 const TurntableBehavior: Behavior = toBehavior(def, () => ({
+  disabled: false,
   rotaryNode: null,
   sensorNode: null,
   beltNode: null,

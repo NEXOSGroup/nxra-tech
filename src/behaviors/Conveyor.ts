@@ -81,32 +81,43 @@ const def = defineMaterialFlow<ConveyorSelf>({
 
   logic: { shouldFlow, onPartAtSensor, onPartLeft },
 
+  // Mode-agnostic init (continuous AND DES): resolve nodes into self.local,
+  // declare signals, stamp the badge, build the context menu.
+  setup(self: ConveyorSelf): void {
+    const l = self.local;
+    const rootTag = self.root.name || '<unnamed>';
+    const beltNode = findTransport(self.root);
+    const sensorNode = findSensor(self.root);
+    if (!beltNode)   { console.warn(`[Conveyor:${rootTag}] no Transport-* node found — skipping bind`); l.disabled = true; return; }
+    if (!sensorNode) { console.warn(`[Conveyor:${rootTag}] no Sensor / Sensor-* node found — skipping bind`); l.disabled = true; return; }
+
+    l.beltNode = beltNode;
+    l.sensorNode = sensorNode;
+
+    console.info(`[Conveyor:${rootTag}] attached — belt "${beltNode.name}", sensor "${sensorNode.name}"`);
+    self.stamp('ConveyorBehavior', { Belt: beltNode.name, Sensor: sensorNode.name });
+
+    declareConveyorSignalsWith((n, o) => self.signal(n, o));
+
+    self.contextMenu(beltNode, [
+      { id: 'run',  label: 'Run',  action: () => self.signals.set(RUN_SIGNAL, true) },
+      { id: 'stop', label: 'Stop', danger: true, dividerBefore: true,
+        action: () => self.signals.set(RUN_SIGNAL, false) },
+    ]);
+  },
+
   continuous: {
+    // Continuous-only wiring — reads the self.local nodes resolved by the shared
+    // setup() above. attachBelt → belt handle, the downstream interlock, and the
+    // AABB-sensor subscription are the continuous trigger/effect plumbing.
     setup(self: ConveyorSelf): void {
       const l = self.local;
-      const rootTag = self.root.name || '<unnamed>';
-      const beltNode = findTransport(self.root);
-      const sensorNode = findSensor(self.root);
-      if (!beltNode)   { console.warn(`[Conveyor:${rootTag}] no Transport-* node found — skipping bind`); l.disabled = true; return; }
-      if (!sensorNode) { console.warn(`[Conveyor:${rootTag}] no Sensor / Sensor-* node found — skipping bind`); l.disabled = true; return; }
+      if (l.disabled) return;
 
-      l.beltNode = beltNode;
-      l.sensorNode = sensorNode;
-      l.belt = attachBelt(selfDrives(self), beltNode);
+      l.belt = attachBelt(selfDrives(self), l.beltNode!);
       l.interlock = createDownstreamInterlock(self);
 
-      console.info(`[Conveyor:${rootTag}] attached — belt "${beltNode.name}", sensor "${sensorNode.name}"`);
-      self.stamp('ConveyorBehavior', { Belt: beltNode.name, Sensor: sensorNode.name });
-
-      declareConveyorSignalsWith((n, o) => self.signal(n, o));
-
-      self.signals.on(sensorNode.name, (v) => onPartAtSensor(self, v === true));
-
-      self.contextMenu(beltNode, [
-        { id: 'run',  label: 'Run',  action: () => self.signals.set(RUN_SIGNAL, true) },
-        { id: 'stop', label: 'Stop', danger: true, dividerBefore: true,
-          action: () => self.signals.set(RUN_SIGNAL, false) },
-      ]);
+      self.signals.on(l.sensorNode!.name, (v) => onPartAtSensor(self, v === true));
     },
 
     fixedUpdate(self: ConveyorSelf, _dt: number): void {

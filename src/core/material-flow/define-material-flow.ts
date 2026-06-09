@@ -87,6 +87,15 @@ export interface MaterialFlowDefinition<S extends MaterialFlowSelf<any> = Materi
   readonly models?: string[];
   /** Component schema (same shape as rv-component-registry; applySchema reused). */
   readonly schema: ComponentSchema;
+  /**
+   * Mode-agnostic per-instance init, called by BOTH the continuous and DES
+   * runners. Resolve nodes into `self.local`, declare signals, stamp the
+   * inspector/badge companion, build the context menu — everything that is
+   * needed regardless of simulation mode. Runs BEFORE the mode-specific
+   * `continuous.setup` / DES wiring, so those can rely on the resolved
+   * `self.local` nodes.
+   */
+  setup?(self: S): void;
   /** Shared state-machine + routing (mode-agnostic). */
   readonly logic?: LogicBlock<S>;
   /** Continuous adapter — public default path. */
@@ -114,7 +123,8 @@ export function defineMaterialFlow<S extends MaterialFlowSelf<any> = MaterialFlo
  * current BehaviorManager discovery/dispatch runs it unchanged on the
  * continuous path:
  *   - `models` → behavior `models` (default `['*' + type + '*']`)
- *   - `continuous.setup(self)`         runs in `bind()`
+ *   - `setup(self)`                    runs FIRST in `bind()` (mode-agnostic init)
+ *   - `continuous.setup(self)`         runs in `bind()` AFTER the shared `setup`
  *   - `continuous.fixedUpdate(self,dt)` registered via `rv.onFixedUpdate`
  *   - `continuous.lateFixedUpdate`      chained after fixedUpdate (same tick)
  *
@@ -137,6 +147,10 @@ export function toBehavior<S = Record<string, never>>(
         local: localFactory ? localFactory() : undefined,
       });
       const c = def.continuous;
+      // Mode-agnostic init FIRST (resolves self.local nodes, declares signals,
+      // stamps the badge, builds the context menu), THEN the continuous-only
+      // wiring that depends on those resolved nodes.
+      if (def.setup) def.setup(self);
       if (c.setup) c.setup(self);
       const fixed = c.fixedUpdate;
       const late = c.lateFixedUpdate;

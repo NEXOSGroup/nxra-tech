@@ -70,16 +70,22 @@ const def = defineMaterialFlow({
   models: ['*Sink*'],
   schema: {},
 
+  // ── Mode-agnostic init (continuous AND DES) — declares + publishes the
+  //    successor-clear interlock signal so an upstream conveyor that snaps into
+  //    the sink discharges its line. A Sink is ALWAYS a clear successor; this is
+  //    a single signal write at init, never per-tick, and never touches MUs.
+  setup(self: MaterialFlowSelf): void {
+    self.signal(OCCUPIED_SIGNAL, { type: 'PLCOutputBool', initialValue: false });
+    self.signals.set(OCCUPIED_SIGNAL, false);
+  },
+
   // ── Continuous adapter — INERT for MU destruction. The engine RVSink owns
-  //    the per-tick AABB consumption. setup() only declares + publishes the
-  //    successor-clear interlock signal (so upstream discharges into the sink).
+  //    the per-tick AABB consumption. No fixedUpdate, no MU handling: RVSink
+  //    remains the continuous destroy driver.
   continuous: {
-    setup(self: MaterialFlowSelf): void {
-      // A Sink is ALWAYS a clear successor — publish Occupied=false once so an
-      // upstream conveyor that snaps into it discharges its line. No fixedUpdate,
-      // no MU handling: RVSink remains the continuous destroy driver.
-      self.signal(OCCUPIED_SIGNAL, { type: 'PLCOutputBool', initialValue: false });
-      self.signals.set(OCCUPIED_SIGNAL, false);
+    setup(_self: MaterialFlowSelf): void {
+      // Intentionally empty — the successor-clear interlock is published by the
+      // shared setup() above; continuous MU destruction stays with RVSink.
     },
   },
 
@@ -102,10 +108,10 @@ const def = defineMaterialFlow({
 
 // ─── Default export: a Behavior so glob discovery (behaviors.ts) finds it ──
 //
-// The continuous bind stamps the inspector badge and runs the (continuous-mode)
-// definition setup (which publishes the successor-clear interlock), but registers
-// NO fixedUpdate. The engine RVSink (constructed from rv_extras) remains the sole
-// continuous MU-destroy driver.
+// The continuous bind stamps the inspector badge and runs the shared (mode-
+// agnostic) setup (which publishes the successor-clear interlock) followed by the
+// inert continuous setup, but registers NO fixedUpdate. The engine RVSink
+// (constructed from rv_extras) remains the sole continuous MU-destroy driver.
 const SinkBehavior: Behavior = {
   models: def.models ?? ['*Sink*'],
   bind(rv: RVBindContext): void {
@@ -114,6 +120,9 @@ const SinkBehavior: Behavior = {
     console.info(`[Sink:${rootTag}] material-flow definition bound (continuous consumption stays with the engine RVSink)`);
 
     const self = createSelf(rv, def, { mode: 'continuous' });
+    // Mode-agnostic init FIRST, then the (inert) continuous setup — same order
+    // as toBehavior(), so the successor-clear interlock is published.
+    def.setup!(self);
     def.continuous.setup!(self);
     // No rv.onFixedUpdate — continuous consumption is owned by the engine RVSink.
   },
