@@ -27,6 +27,7 @@
 
 import {
   registerComponentSchema,
+  getRegisteredFactories,
   type ComponentSchema,
 } from '../engine/rv-component-registry';
 import { matchesAny } from '../behaviors';
@@ -86,6 +87,17 @@ export function registerMaterialFlow(def: MaterialFlowDefinition): void {
   //    enough for GLB extras auto-mapping + inspector visibility and stays
   //    DES-runner-independent. The full adapter component (extends/implements
   //    the DES handshake) is material-flow-adapter.ts, attached by the runners.
+  //
+  //    GUARD: when an engine component FACTORY already owns this type (e.g.
+  //    'Source' → RVSource, 'Sink' → RVSink), it has already registered the
+  //    richer schema (incl. its own CONSUMED fields) and capabilities (badge
+  //    colour, simulationActive). Overwriting them here would clobber the
+  //    engine's inspector schema/badge with the generic MaterialFlow ones — a
+  //    regression. The continuous-matcher entry + reserved DES action names
+  //    above are all the material-flow registry needs for such types; the engine
+  //    factory remains the source of truth for loader/inspector. So we skip the
+  //    schema-adapter step when a factory already owns the type.
+  if (getRegisteredFactories().has(type)) return;
   try {
     registerComponentSchema(type, def.schema as ComponentSchema, {
       filterLabel: 'MaterialFlow',
