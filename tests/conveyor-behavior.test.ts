@@ -2,7 +2,8 @@
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
 import { describe, it, expect } from 'vitest';
-import { Object3D } from 'three';
+import { Object3D, Vector3 } from 'three';
+import { AABB } from '../src/core/engine/rv-aabb';
 import {
   createBindContext,
   iterateFixedUpdate,
@@ -164,10 +165,11 @@ describe('Conveyor behavior — bind is robust when the drive is missing at bind
     // No drive to toggle, but the Running signal should still publish (downstream is null → blocked, but empty).
     expect(signalStore.get('ConvNoDrive/Conveyor.Running')).toBe(true);
 
-    // Part hits the sensor → Occupied publishes → upstream can read it.
+    // Part hits the sensor → counted; with no downstream the belt holds (not running).
+    // (Conveyor.Occupied is surface-based and published from the transport manager,
+    // which this minimal host lacks — exercised in surface-occupancy.test.ts instead.)
     signalStore.set('ConvNoDrive/Sensor', true);
     iterateFixedUpdate(handle, DT);
-    expect(signalStore.get('ConvNoDrive/Conveyor.Occupied')).toBe(true);
     expect(signalStore.get('ConvNoDrive/Conveyor.PartCount')).toBe(1);
     // No downstream → blocked → not running.
     expect(signalStore.get('ConvNoDrive/Conveyor.Running')).toBe(false);
@@ -284,11 +286,11 @@ describe('Conveyor behavior — single zone (no downstream)', () => {
     iterateFixedUpdate(handle, DT);
     expect(drive.jogForward).toBe(true);   // empty → runs (parts can transit through)
 
-    // Part at the sensor → Occupied + counted. With NO downstream neighbour,
-    // the missing successor is treated as blocked, so the belt holds its part
+    // Part at the sensor → counted. With NO downstream neighbour, the missing
+    // successor is treated as blocked, so the belt holds its part at the sensor
     // rather than discharging into nothing (add a Sink to declare clear).
+    // (Conveyor.Occupied is now surface-based — see surface-occupancy.test.ts.)
     signalStore.set('Sensor-1', true);
-    expect(signalStore.get('Conveyor.Occupied')).toBe(true);
     expect(signalStore.get('Conveyor.PartCount')).toBe(1);
     iterateFixedUpdate(handle, DT);
     expect(drive.jogForward).toBe(false);
@@ -404,6 +406,19 @@ describe('Conveyor behavior — two-conveyor line (ZPA back-pressure)', () => {
 
     const A = placedConveyor('ConvA');
     const B = placedConveyor('ConvB');
+    // Separate the belts in space so a good on B's belt doesn't also overlap A's.
+    B.root.position.set(10, 0, 0); B.root.updateMatrixWorld(true);
+
+    // Fake transport manager so the conveyors publish SURFACE-based occupancy.
+    // Occupancy is now driven by a good (MU) physically overlapping a belt surface.
+    const mus: { aabb: AABB; markedForRemoval: boolean }[] = [];
+    const surf = (node: Object3D) => ({ node, aabb: AABB.fromHalfSize(node, new Vector3(1, 0.1, 1)) });
+    const transportManager = { surfaces: [surf(A.drive.node), surf(B.drive.node)], mus };
+    const placeGoodOn = (node: Object3D) => {
+      const g = new Object3D(); node.getWorldPosition(g.position); g.updateMatrixWorld(true);
+      mus.push({ aabb: AABB.fromHalfSize(g, new Vector3(0.2, 0.2, 0.2)), markedForRemoval: false });
+    };
+    const clearGoods = () => { mus.length = 0; };
 
     // Snap graph: A's OUTPUT → B's INPUT. B's OUTPUT is unpaired (end of line).
     const aOut = { id: 'a-out', flow: 'out', pairedSnapId: 'b-in', ownerRoot: A.root };
@@ -422,6 +437,9 @@ describe('Conveyor behavior — two-conveyor line (ZPA back-pressure)', () => {
       registry: null,
       getPlugin: (id: string) => (id === 'snap-point' ? { getRegistry: () => reg } : undefined),
     };
+    // `rv.viewer` is this host at runtime; expose the fake transport manager for
+    // surface-based occupancy (not part of the narrow BindContextHost type).
+    (host as unknown as { transportManager: unknown }).transportManager = transportManager;
 
     const a = createBindContext(A.root, host, {});
     const b = createBindContext(B.root, host, {});
@@ -439,16 +457,19 @@ describe('Conveyor behavior — two-conveyor line (ZPA back-pressure)', () => {
     expect(A.drive.jogForward).toBe(true);
     expect(B.drive.jogForward).toBe(true);
 
-    // A part at B (downstream of A is full) AND a part held at A.
-    signalStore.set('ConvB/Sensor', true);   // B occupied → publishes ConvB/Conveyor.Occupied
-    signalStore.set('ConvA/Sensor', true);   // A occupied
-    tick();
+    // A good on B's belt (B occupied, surface-based) that has reached B's sensor,
+    // AND a part held at A's sensor.
+    placeGoodOn(B.drive.node);               // B surface occupied → publishes ConvB/Conveyor.Occupied
+    signalStore.set('ConvB/Sensor', true);   // B's local discharge trigger (holds, counts)
+    signalStore.set('ConvA/Sensor', true);   // A's part is at its discharge sensor
+    tick(); tick();                          // B publishes occupancy, then A reads it (1-tick latency)
     expect(A.drive.jogForward).toBe(false);  // A holds — downstream B is occupied
     expect(B.drive.jogForward).toBe(false);  // B holds — no successor → treated as blocked
 
-    // B's part clears → A releases its part; B (empty again, still no successor) runs.
+    // B's good leaves the belt → A releases its part; B (empty, still no successor) runs.
+    clearGoods();
     signalStore.set('ConvB/Sensor', false);
-    tick();
+    tick(); tick();
     expect(A.drive.jogForward).toBe(true);
     expect(B.drive.jogForward).toBe(true);
   });

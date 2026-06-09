@@ -318,6 +318,84 @@ describe('Turntable behavior — multi-input cycle', () => {
   });
 });
 
+describe('Turntable behavior — fair input selection', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  /** Drive idle → ALIGNING_IN → RECEIVING with both inputs already waiting. */
+  function receiveWithBothWaiting(s: ReturnType<typeof setup>): void {
+    s.signalStore.set('Conv0/Conveyor.Occupied', false);
+    s.signalStore.set('Conveyor.Run', true);
+    s.setInputWaiting(0, true);
+    s.setInputWaiting(1, true);
+    iterateFixedUpdate(s.handle, DT);                          // tryReceive → ALIGNING_IN
+    s.rotary.isAtTarget = true; iterateFixedUpdate(s.handle, DT); // → RECEIVING the picked input
+  }
+
+  it('honours the random pick: input1 is served when random points to it', () => {
+    // floor(0.99 * 2 inputs) = 1 → ready[1] = input1 (NOT the deterministic-first input0).
+    vi.spyOn(Math, 'random').mockReturnValue(0.99);
+    const s = setup({ inputs: 2, downstreams: 1 });
+    receiveWithBothWaiting(s);
+    expect(s.portOcc('tt-in1')).toBe(false);                   // input1 port OPEN — it was chosen
+    expect(s.portOcc('tt-in0')).toBe(true);                    // input0 still blocked
+  });
+
+  it('does not starve: over many cycles both inputs get selected (real random)', () => {
+    // With deterministic .find() this would always pick input0. With a fair random pick,
+    // both inputs must appear as chosen across many independent idle→receive cycles.
+    const chosen = new Set<string>();
+    for (let trial = 0; trial < 40; trial++) {
+      const s = setup({ inputs: 2, downstreams: 1 });
+      receiveWithBothWaiting(s);
+      if (s.portOcc('tt-in0') === false) chosen.add('in0');
+      if (s.portOcc('tt-in1') === false) chosen.add('in1');
+    }
+    expect(chosen.has('in0')).toBe(true);
+    expect(chosen.has('in1')).toBe(true);                      // would fail with first-match selection
+  });
+});
+
+describe('Turntable behavior — part-deletion recovery', () => {
+  beforeEach(() => { vi.spyOn(Math, 'random').mockReturnValue(0); });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('frees the turntable when a part held on the platform is deleted (no discharge)', () => {
+    const s = setup({ inputs: 1, downstreams: 1 });
+    receiveFromInput(s, 0);                                     // → RECEIVING
+    s.signalStore.set('Conv0/Conveyor.Occupied', true);        // output blocked
+    s.signalStore.set('Sensor', true);                         // captured → no free output → HOLDING
+    expect(s.signalStore.get('Conveyor.Occupied')).toBe(true); // latched busy
+
+    // Part deleted: its feeder good is gone too, the sensor clears, platform empties.
+    // (No transportManager in the test host → surface occupancy is sensor-only.)
+    s.setInputWaiting(0, false);
+    s.signalStore.set('Sensor', false);
+
+    // Within the grace it must NOT reset prematurely — still busy.
+    pump(s.handle, 0.5);
+    expect(s.signalStore.get('Conveyor.Occupied')).toBe(true);
+
+    // After the empty-grace it frees back to idle, exactly like a conveyor would.
+    pump(s.handle, 0.5);
+    expect(s.signalStore.get('Conveyor.Occupied')).toBe(false);
+    expect(s.signalStore.get('Conveyor.Running')).toBe(false);
+    expect(s.portOcc('tt-in0')).toBe(true);                    // inputs re-blocked
+  });
+
+  it('does NOT abort a normal discharge — the dwell re-idles first', () => {
+    const s = setup({ inputs: 1, downstreams: 1 });
+    receiveFromInput(s, 0);
+    s.signalStore.set('Conv0/Conveyor.Occupied', false);       // output free
+    s.signalStore.set('Sensor', true);                         // captured → ROTATING_OUT
+    s.rotary.isAtTarget = true; iterateFixedUpdate(s.handle, DT); // → DISCHARGING
+    s.setInputWaiting(0, false);
+    s.signalStore.set('Sensor', false);                        // good rolled off → DISCHARGE_CLEARING
+    pump(s.handle, 0.66);                                       // dwell elapses → finishCycle → IDLE
+    expect(s.signalStore.get('Conveyor.Occupied')).toBe(false);
+    expect(s.signalStore.get('Conveyor.PartCount')).toBe(1);   // it really discharged, not aborted
+  });
+});
+
 describe('Turntable behavior — back-pressure across the cycle', () => {
   beforeEach(() => { vi.spyOn(Math, 'random').mockReturnValue(0); });
   afterEach(() => { vi.restoreAllMocks(); });

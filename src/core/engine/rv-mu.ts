@@ -14,6 +14,8 @@ import type { RVTransportSurface } from './rv-transport-surface';
 
 // Pre-allocated temp vector for getWorldPosition (no GC in hot path)
 const _tmpWorldPos = new Vector3();
+// Pre-allocated scratch for the rotation-aware AABB-extent recompute in updateAABB().
+const _aabbWorldQuat = new Quaternion();
 
 /**
  * IMUAccessor — Unified interface abstracting over clone-based and
@@ -67,6 +69,12 @@ export class RVMovingUnit implements IMUAccessor {
    *  entered MU is not snapped by a phantom one-tick rotation. */
   lastSurfaceTickId?: number;
 
+  /** MU half-extents in its OWN local frame (spawn orientation), captured at
+   *  construction. `updateAABB()` re-derives the world axis-aligned footprint
+   *  from this under the MU's CURRENT world rotation, so a pallet turned 90° at
+   *  a turntable corner keeps a detection box that matches the visible mesh. */
+  private readonly _localHalf: Vector3;
+
   constructor(node: Object3D, sourceName: string, halfSize?: Vector3, localCenter?: Vector3) {
     this.node = node;
     this.sourceName = sourceName;
@@ -76,6 +84,7 @@ export class RVMovingUnit implements IMUAccessor {
     } else {
       this.aabb = AABB.fromNode(node);
     }
+    this._localHalf = this.aabb.halfSize.clone();
   }
 
   // ─── IMUAccessor implementation (clone mode) ────────────────────
@@ -117,8 +126,14 @@ export class RVMovingUnit implements IMUAccessor {
 
   // ─── Lifecycle ──────────────────────────────────────────────────
 
-  /** Update AABB world position after transport movement */
+  /** Update AABB world position after transport movement. Re-derives the world
+   *  axis-aligned extent from the MU's local half-extents under its current world
+   *  rotation, so the detection/collision footprint follows the part as it is
+   *  turned (e.g. by a turntable) — otherwise a rotated part is detected at the
+   *  wrong point (a light-barrier beam breaks ~half-a-part-length off). */
   updateAABB(): void {
+    this.node.getWorldQuaternion(_aabbWorldQuat);
+    this.aabb.setHalfSizeFromRotatedExtents(this._localHalf, _aabbWorldQuat);
     this.aabb.update();
   }
 
@@ -234,7 +249,11 @@ export class InstancedMovingUnit implements IMUAccessor {
       halfSize,
       localCenter,
     );
+    this._localHalf = halfSize.clone();
   }
+
+  /** MU half-extents in its own local frame (see RVMovingUnit._localHalf). */
+  private readonly _localHalf: Vector3;
 
   /** @internal Called by MUInstancePool._grow() to update the backing mesh after pool resize. */
   _updateNode(mesh: InstancedMesh): void {
@@ -297,6 +316,10 @@ export class InstancedMovingUnit implements IMUAccessor {
   // ─── Lifecycle ──────────────────────────────────────────────────
 
   updateAABB(): void {
+    // Pool quaternions are stored in WORLD space (instances are root-parented),
+    // so the per-instance quaternion is the world rotation directly. Re-derive the
+    // world axis-aligned extent so a rotated part is detected at the right point.
+    this.aabb.setHalfSizeFromRotatedExtents(this._localHalf, this.getQuaternion());
     this.aabb.update();
   }
 

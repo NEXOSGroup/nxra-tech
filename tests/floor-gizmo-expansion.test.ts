@@ -6,7 +6,8 @@
  *
  * `resolveExpansionTarget` decides whether the gizmo should be minimized
  * (0 = small green disk) or full (1) from cursor proximity, with a hysteresis
- * band between EXPAND_RADIUS_PX (10.5) and COLLAPSE_RADIUS_PX (19.5). Dragging and
+ * band between EXPAND_RADIUS_PX (10.5) and COLLAPSE_RADIUS_PX (~79 px, derived
+ * from the gizmo's screen radius × 1.1). Dragging and
  * "no pointer" force 0; the minimize feature being disabled forces 1.
  */
 
@@ -23,11 +24,11 @@ describe('resolveExpansionTarget', () => {
 
   it('collapses when the cursor is beyond the collapse radius', () => {
     expect(resolveExpansionTarget(200, 1, ON)).toBe(0);
-    expect(resolveExpansionTarget(22, 1, ON)).toBe(0);
+    expect(resolveExpansionTarget(90, 1, ON)).toBe(0);
   });
 
   it('holds the previous state inside the hysteresis band', () => {
-    // distPx = 15 is between EXPAND (10.5) and COLLAPSE (19.5).
+    // distPx = 15 is between EXPAND (10.5) and COLLAPSE (~79).
     expect(resolveExpansionTarget(15, 1, ON)).toBe(1); // stays expanded
     expect(resolveExpansionTarget(15, 0, ON)).toBe(0); // stays collapsed
   });

@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
-import { Vector3, Object3D, Box3, Quaternion } from 'three';
+import { Vector3, Object3D, Box3, Quaternion, Matrix4 } from 'three';
 import { unityPositionToGltf } from './rv-coordinate-utils';
 
 // Module-level scratch — pre-allocated to keep `AABB.update()` GC-free in the
 // transport hot path. Each `update()` call is single-threaded so reuse is safe.
 const _scratchQuat = new Quaternion();
 const _scratchOffset = new Vector3();
+const _scratchRotMat = new Matrix4();
 
 /**
  * Pre-allocated Axis-Aligned Bounding Box for fast overlap tests.
@@ -143,6 +144,24 @@ export class AABB {
     }
     this.min.copy(this.center).sub(this.halfSize);
     this.max.copy(this.center).add(this.halfSize);
+  }
+
+  /**
+   * Set the world axis-aligned `halfSize` as the TIGHT enclosure of a box with
+   * the given LOCAL half-extents rotated by `worldQuat`:
+   * `worldHalf_i = Σ_j |R_ij|·localHalf_j`. Lets a moving box (a rotated MU, a
+   * spinning turntable belt) keep a collision/detection footprint that matches
+   * its current orientation instead of staying frozen at the pose it was built
+   * at. At 0°/180° this is identical to `localHalf`; at ±90° it swaps the axes.
+   * Call BEFORE `update()` (which derives min/max from `center ± halfSize`).
+   */
+  setHalfSizeFromRotatedExtents(localHalf: Vector3, worldQuat: Quaternion): void {
+    const e = _scratchRotMat.makeRotationFromQuaternion(worldQuat).elements;
+    this.halfSize.set(
+      Math.abs(e[0]) * localHalf.x + Math.abs(e[4]) * localHalf.y + Math.abs(e[8]) * localHalf.z,
+      Math.abs(e[1]) * localHalf.x + Math.abs(e[5]) * localHalf.y + Math.abs(e[9]) * localHalf.z,
+      Math.abs(e[2]) * localHalf.x + Math.abs(e[6]) * localHalf.y + Math.abs(e[10]) * localHalf.z,
+    );
   }
 
   /** Replace the position callback (used when InstancedMesh slot changes) */

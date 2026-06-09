@@ -138,8 +138,8 @@ function getComponentRegistry(host: ClassifyHost): ComponentRegistryShape | null
 // Scratch vectors — module-local, never escape this file.
 const _dir = new Vector3();
 const _matingPos = new Vector3();
-const _ownerPos = new Vector3();
-const _toMating = new Vector3();
+const _tableCentre = new Vector3();
+const _toCentre = new Vector3();
 
 /** Map an authored flow to a role for the ambiguous/near-perpendicular fallback. */
 function roleFromFlow(flow: SnapLite['flow']): 'input' | 'output' {
@@ -179,12 +179,16 @@ export function classifyConnections(host: ClassifyHost, root: Object3D): PortCon
       : null;
     if (surface) {
       surface.getWorldDirection(_dir);
-      // Mating point ≈ the conveyor-side snap's world position; reference vector
-      // points from the conveyor body toward that connection (i.e. toward us).
+      // Reference vector: from the mating connection point toward the TURNTABLE
+      // CENTRE (`root`). A belt moving toward the centre feeds the table (input);
+      // one moving away discharges from it (output). Using the turntable centre —
+      // NOT the connected conveyor's root origin — keeps the sign correct for
+      // conveyors with an off-centre pivot (origin at the discharge end), a common
+      // library-asset case that otherwise flipped the classification.
       partner.object3D.getWorldPosition(_matingPos);
-      ownerRoot.getWorldPosition(_ownerPos);
-      _toMating.copy(_matingPos).sub(_ownerPos);
-      const proj = _dir.dot(_toMating);
+      root.getWorldPosition(_tableCentre);
+      _toCentre.copy(_tableCentre).sub(_matingPos);
+      const proj = _dir.dot(_toCentre);
       if (Math.abs(proj) > 1e-4) role = proj > 0 ? 'input' : 'output';
     }
 

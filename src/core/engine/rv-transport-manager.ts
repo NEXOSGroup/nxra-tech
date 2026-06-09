@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
+import { Vector3 } from 'three';
 import type { Scene } from 'three';
 import { RVTransportSurface } from './rv-transport-surface';
 import type { RVSensor } from './rv-sensor';
@@ -10,6 +11,11 @@ import type { RVGrip } from './rv-grip';
 import type { RVGripTarget } from './rv-grip-target';
 import type { RVMovingUnit, InstancedMovingUnit } from './rv-mu';
 import { debug } from './rv-debug';
+
+// Pre-allocated scratch for the driver-selection direction gate (no GC in the
+// per-tick transport hot path; single-threaded reuse is safe).
+const _pickDir = new Vector3();
+const _pickToMu = new Vector3();
 
 /**
  * RVTransportManager - Central coordinator for transport simulation.
@@ -124,51 +130,28 @@ export class RVTransportManager {
       if (mu.markedForRemoval) continue;
       if (!mu.isInstanced && (mu as RVMovingUnit).isGripped) continue;
 
-      // Check if currentSurface still overlaps (XZ only — MUs sit ON surfaces).
-      // Stay attached as long as the MU spatially overlaps the surface — even
-      // if the belt is currently stopped (drive.speed === 0 → !isActive).
-      // This is critical for turntables: the platform belt is STOPPED during
-      // rotation, but the MU must remain attached so `transportMU` keeps
-      // running its per-tick matrix-delta carry and the part orbits with the
-      // platform. `transportMU` advances by `speed × dt`, so a stopped belt
-      // doesn't move the part — it only carries it through parent rotation.
-      if (mu.currentSurface) {
-        const curr = mu.currentSurface;
-        if (curr.aabb.overlapsXZ(mu.aabb)) {
-          curr.transportMU(mu, dt);
-          // Tag the MU as on-surface for this tick — `transportMU` reads this
-          // on the NEXT tick to decide whether to carry the MU along with a
-          // rotating platform. We tag AFTER the call so the current tick's
-          // check (`=== tickId - 1`) sees the previous tick's value.
-          mu.lastSurfaceTickId = tickId;
-          continue;
+      // Pick the single surface that drives this MU this tick. When a good
+      // straddles two belts (a hand-off), an ACTIVE (running) overlapping surface
+      // wins so a stopped upstream belt never freezes a good the downstream belt
+      // is ready to pull. See `_pickDrivingSurface` for the full priority.
+      const prev = mu.currentSurface;
+      const driver = this._pickDrivingSurface(mu);
+      if (driver) {
+        if (driver !== prev) {
+          // Ownership changed — clear the carry marker so `transportMU` doesn't
+          // apply a phantom parent-rotation delta on the entry tick (its carry
+          // guard fires only when `lastSurfaceTickId === tickId - 1`).
+          mu.lastSurfaceTickId = undefined;
+          mu.currentSurface = driver;
+          if (driver !== prev) debug('transport', `MU "${mu.getName()}" entered surface "${driver.node.name}"`);
         }
-        // Left the current surface
+        driver.transportMU(mu, dt);
+        // Tag AFTER the call so a STAY sees the previous tick's value (carry),
+        // while a SWITCH already reset it to undefined above (no phantom carry).
+        mu.lastSurfaceTickId = tickId;
+      } else {
         mu.currentSurface = null;
         mu.lastSurfaceTickId = undefined;
-      }
-
-      // Find a new surface (XZ only — Y is irrelevant for belt conveyors).
-      // Attachment is purely geometric (AABB overlap) — we do NOT skip stopped
-      // (inactive) surfaces. A stopped belt contributes `speed*dt = 0` so it
-      // moves the MU nowhere, but the MU must still ATTACH to it so it (a) gets
-      // carried by a rotating/translating parent (turntable, lift, transfer) and
-      // (b) starts moving the instant the belt's drive is started by the PLC.
-      // Skipping inactive surfaces here made attachment depend on run history
-      // (an MU could STAY on a stopped surface but never FIND one), which broke
-      // hand-off onto stationary turntables and spawning before drives start.
-      for (const surface of this.surfaces) {
-        if (surface.aabb.overlapsXZ(mu.aabb)) {
-          mu.currentSurface = surface;
-          // Note: `lastSurfaceTickId` is left as-is — usually undefined (first
-          // ever) or stale by ≥2 ticks. Either way `transportMU`'s carry
-          // guard (`=== tickId - 1`) fails on this entry tick, which is what
-          // we want — no phantom rotation snap on the tick the MU lands.
-          surface.transportMU(mu, dt);
-          mu.lastSurfaceTickId = tickId;
-          debug('transport', `MU "${mu.getName()}" entered surface "${surface.node.name}"`);
-          break;
-        }
       }
     }
 
@@ -222,6 +205,56 @@ export class RVTransportManager {
 
     // 8. Batch-update instance matrices after all position changes
     this.updatePoolMatrices();
+  }
+
+  /**
+   * Choose the one surface that drives `mu` this tick among all it overlaps (XZ).
+   * A good is always carried by exactly one surface (no double-driving); the
+   * question is which, when it touches several at once during a hand-off.
+   *
+   * Priority:
+   *  1. Keep the current surface if it still overlaps AND is active — sticky
+   *     ownership avoids churn and keeps a moving good on its belt.
+   *  2. Otherwise an ACTIVE overlapping surface that the good is ENTERING — the
+   *     downstream belt pulls the good IN off a stopped upstream belt (the
+   *     reported hand-off bug). The "entering" gate is what stops a still-running
+   *     UPSTREAM belt from shoving a good that has just halted at its sensor
+   *     further forward (the intermittent ~15 cm overshoot at a seam).
+   *  3. Otherwise the current overlapping surface even if stopped (a good waiting
+   *     in accumulation, or a centered good carried by a rotating turntable
+   *     platform), else the first overlapping stopped surface.
+   *  4. null when the MU overlaps no surface.
+   *
+   * Attachment stays purely geometric — a stopped belt is still a valid owner, so
+   * a good keeps its place and starts moving the instant that belt's drive runs.
+   */
+  private _pickDrivingSurface(mu: RVMovingUnit | InstancedMovingUnit): RVTransportSurface | null {
+    const curr = mu.currentSurface;
+    const currOverlaps = !!curr && curr.aabb.overlapsXZ(mu.aabb);
+    if (curr && currOverlaps && curr.isActive) return curr;            // (1)
+
+    let stoppedFallback: RVTransportSurface | null = currOverlaps ? curr : null;
+    for (const s of this.surfaces) {
+      if (!s.aabb.overlapsXZ(mu.aabb)) continue;
+      if (s.isActive && this._goodIsEntering(s, mu)) return s;          // (2) downstream belt pulls it IN
+      if (!stoppedFallback) stoppedFallback = s;                       // first stopped (or upstream-only) overlap
+    }
+    return stoppedFallback;                                            // (3) / (4)
+  }
+
+  /**
+   * True when surface `s`'s motion would carry `mu` DEEPER into `s` (a downstream
+   * pull), false when `s` would only shove an already-exiting good further out (an
+   * upstream drag). Used to gate hand-off to a non-current active surface during a
+   * seam straddle, so a running upstream belt can't drag a good past the sensor it
+   * just stopped at. Rule (1) handles a good travelling along its OWN active belt,
+   * so this never gates normal mid-belt motion.
+   */
+  private _goodIsEntering(s: RVTransportSurface, mu: RVMovingUnit | InstancedMovingUnit): boolean {
+    // Actual motion direction (sign(speed) handles a reversed belt).
+    s.getWorldDirection(_pickDir).multiplyScalar(Math.sign(s.speed));
+    _pickToMu.copy(mu.aabb.center).sub(s.aabb.center);
+    return _pickDir.dot(_pickToMu) <= 0;                               // mu behind centre along motion → entering
   }
 
   /**

@@ -464,10 +464,18 @@ export interface LayoutPlannerOptions {
 }
 
 /** Max world-space distance (metres) at which two restored snaps count as
- *  mated. Mated snaps are placed exactly coincident, so this only needs to
- *  absorb float drift from the pivot/align recompute — kept small to avoid
- *  pairing genuinely separate (but nearby) compatible ports. */
-const SNAP_PAIR_REBUILD_EPS_M = 0.005;
+ *  mated. Mated snaps are placed exactly coincident in-session (the magnetic
+ *  controller decomposes to an exact pose), but the live geometry can drift by
+ *  up to ~1 cm by the time it is reconstructed on reload (drop-to-surface
+ *  re-adjust, a snap riding a drive node, accumulated align recompute). The old
+ *  5 mm tolerance silently dropped such connections even though they were
+ *  clearly mated — far stricter than the tolerance at which the magnetic system
+ *  forms (≈400 mm engage) and holds a chain. 30 mm comfortably absorbs the drift
+ *  while staying well below the spacing between any two distinct, non-mated
+ *  compatible ports (≥ a module length, typically ≥ 250 mm). The greedy
+ *  nearest-match in `computeProximityPairings` still prefers the closest partner,
+ *  so widening the window does not mis-pair when the true partner is nearer. */
+const SNAP_PAIR_REBUILD_EPS_M = 0.03;
 
 export class LayoutPlannerPlugin implements RVViewerPlugin {
   readonly id = 'layout-planner';
@@ -584,6 +592,10 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
    *  `blob:` URLs from a prior session) against the freshly-loaded
    *  catalogs by `catalogId`. */
   private _catalogsLoaded: Promise<void> = Promise.resolve();
+
+  /** Guards the one-time `scene-loaded` subscription that auto-enters planner
+   *  mode on reload AFTER the scene is fully restored (see `_attachToViewer`). */
+  private _plannerActivateHooked = false;
 
   /** The layout store — public so tests and UI can access it. */
   readonly store: LayoutStore;
@@ -869,7 +881,17 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
           // Broadcast drag-end so external plugins can finalise their per-
           // drag state (snap-point magnetic snap marks occupied here).
           const endRoot = this._transformControls?.target ?? null;
-          if (endRoot) this._viewer?.emit('layout-drag-end', { node: endRoot });
+          if (endRoot) {
+            this._viewer?.emit('layout-drag-end', { node: endRoot });
+            // The magnetic snap (run synchronously inside the emit above) only
+            // pairs the SINGLE engaged snap. A piece dropped so that MORE than
+            // one of its ports lands on a neighbour (closing a loop, or a
+            // multi-port turntable) needs every coincident end paired. Reuse the
+            // reload reconstruction: it skips already-occupied snaps (the engaged
+            // pair) and pairs the remaining coincident ends. No-op when nothing
+            // else is coincident.
+            this._scheduleSnapPairingRebuild();
+          }
           // Multi-select: snapshot each member's transform back into
           // its original parent's local frame and write to the store.
           // CRITICAL: writeTransformsOnDragEnd() must run synchronously
@@ -1027,8 +1049,22 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     // Restore planner open state from localStorage. Planner docks to the
     // right slot — use isOpen() which is side-agnostic.
     viewer.leftPanelManager.restore?.({ 'layout-planner': LAYOUT_PANEL_WIDTH });
-    if (viewer.leftPanelManager.isOpen?.('layout-planner')) {
-      this.setActive(true);
+    // Enter planner mode only AFTER the scene is FULLY loaded — model, restored
+    // placements, re-scanned snap points and rebuilt snap pairings (enchainment).
+    // `_attachToViewer` runs during `onModelLoaded` (loadScene Phase 3), BEFORE
+    // placements are restored (Phase 4); activating here left the snap points,
+    // chaining and toolbar half-initialised on a page reload — hence the user
+    // had to toggle the planner off/on to repair it. `scene-loaded` (emitted at
+    // the very end of loadScene, after placements + drain) is the "everything
+    // ready" signal. Subscribe once; the handler re-reads the persisted open
+    // state on every scene load.
+    if (!this._plannerActivateHooked) {
+      this._plannerActivateHooked = true;
+      const unsubActivate = viewer.on('scene-loaded', () => {
+        if (this._active) return;
+        if (viewer.leftPanelManager.isOpen?.('layout-planner')) this.setActive(true);
+      });
+      this._unsubs.push(unsubActivate);
     }
 
     // Defense-in-Depth: if another plugin replaces the panel by calling
@@ -2827,6 +2863,13 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
       kind: 'addPlacement', placement: { ...comp },
     });
 
+    // `smPlaceAtSnapPoint` pairs only the single target↔ownSnap pair. If the
+    // placed piece has OTHER ports coincident with neighbours (loop closure,
+    // multi-port turntable), pair them too via the reload reconstruction — it
+    // skips the already-occupied engaged pair and adds the remaining coincident
+    // ends. No-op when nothing else is coincident.
+    this._scheduleSnapPairingRebuild();
+
     this._viewer.markRenderDirty();
     return id;
   }
@@ -3138,6 +3181,12 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
           console.warn(`[LayoutPlanner] Failed to restore component ${comp.label}:`, e);
         }
       }
+      // Reconstruct the snap-point connection graph (enchainment) from geometry
+      // so chained assemblies restored from the legacy autosave survive a page
+      // reload. The scene-ops restore path (_restorePlacements) already rebuilds
+      // pairings; this autosave path did not, which left chains unpaired until
+      // the planner was toggled off/on.
+      this._rebuildSnapPairings();
       this.store.autoSave(); // persist any updated blob URLs
       this._refreshHierarchy();
       this._viewer.markRenderDirty();

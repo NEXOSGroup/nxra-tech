@@ -8,7 +8,7 @@
  * Runs in browser via Vitest + Playwright (like glb-extras.test.ts).
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { Object3D, Vector3, Scene } from 'three';
+import { Object3D, Vector3, Scene, MathUtils } from 'three';
 import { AABB } from '../src/core/engine/rv-aabb';
 import { RVMovingUnit } from '../src/core/engine/rv-mu';
 import { RVTransportSurface } from '../src/core/engine/rv-transport-surface';
@@ -291,6 +291,108 @@ describe('RVTransportManager', () => {
     expect(manager.totalSpawned).toBe(0);
     expect(manager.totalConsumed).toBe(0);
     expect(sensor.occupied).toBe(false);
+  });
+});
+
+// ─── Multi-surface hand-off (straddle) ───────────────────────────
+
+describe('RVTransportManager — multi-surface hand-off', () => {
+  it('pulls a good straddling a STOPPED belt and a RUNNING belt with the running one', () => {
+    const manager = new RVTransportManager();
+    manager.scene = new Scene();
+    // A spans X[-1,1] and is STOPPED; B spans X[0.5,2.5] and RUNS in +X.
+    const A = createSurface(0, 0, 0, new Vector3(1, 0.1, 1), new Vector3(1, 0, 0), 0);
+    const B = createSurface(1.5, 0, 0, new Vector3(1, 0.1, 1), new Vector3(1, 0, 0), 1000);
+    manager.surfaces.push(A, B);
+
+    const mu = createMU('part1', 0.75, 0, 0); // in the A∩B overlap
+    mu.currentSurface = A;                     // arrived on A (the stopped upstream belt)
+    manager.mus.push(mu);
+
+    const startX = mu.getPosition().x;
+    manager.update(1 / 60);
+
+    expect(mu.getPosition().x).toBeGreaterThan(startX); // pulled forward by B, not frozen on A
+    expect(mu.currentSurface).toBe(B);                  // ownership handed to the running belt
+  });
+
+  it('keeps a good on its current belt while that belt is the active one (no churn)', () => {
+    const manager = new RVTransportManager();
+    manager.scene = new Scene();
+    const A = createSurface(0, 0, 0, new Vector3(1, 0.1, 1), new Vector3(1, 0, 0), 1000); // running
+    const B = createSurface(1.5, 0, 0, new Vector3(1, 0.1, 1), new Vector3(1, 0, 0), 1000);
+    manager.surfaces.push(A, B);
+
+    const mu = createMU('part1', 0.75, 0, 0);
+    mu.currentSurface = A;
+    manager.mus.push(mu);
+
+    manager.update(1 / 60);
+    expect(mu.currentSurface).toBe(A); // current is active → stays put, no needless switch
+  });
+
+  it('leaves a good in place on a single stopped belt (accumulation)', () => {
+    const manager = new RVTransportManager();
+    manager.scene = new Scene();
+    const A = createSurface(0, 0, 0, new Vector3(1, 0.1, 1), new Vector3(1, 0, 0), 0);
+    manager.surfaces.push(A);
+
+    const mu = createMU('part1', 0, 0, 0);
+    manager.mus.push(mu);
+
+    const startX = mu.getPosition().x;
+    manager.update(1 / 60);
+    expect(mu.getPosition().x).toBeCloseTo(startX, 5); // stopped belt → no movement
+    expect(mu.currentSurface).toBe(A);                 // still owned; moves once the belt runs
+  });
+
+  it('does NOT let a running UPSTREAM belt drag a good that has stopped at its sensor (no overshoot)', () => {
+    const manager = new RVTransportManager();
+    manager.scene = new Scene();
+    // B is the good's belt: STOPPED at its sensor, spans X[0.5,1.5], centre 1.0.
+    const B = createSurface(1.0, 0, 0, new Vector3(0.5, 0.1, 1), new Vector3(1, 0, 0), 0);
+    // A is UPSTREAM and still RUNNING (+X), spans X[-0.65,1.05] — it overlaps only
+    // the good's trailing edge, so the good sits on A's OUTGOING half.
+    const A = createSurface(0.2, 0, 0, new Vector3(0.85, 0.1, 1), new Vector3(1, 0, 0), 1000);
+    manager.surfaces.push(A, B);
+
+    const mu = createMU('part1', 1.0, 0, 0); // spans X[0.95,1.05]: centre on B, tail still on A
+    mu.currentSurface = B;                   // arrived and stopped on B (at the sensor)
+    manager.mus.push(mu);
+
+    const startX = mu.getPosition().x;
+    manager.update(1 / 60);
+
+    expect(mu.getPosition().x).toBeCloseTo(startX, 5); // upstream belt must NOT drag it forward
+    expect(mu.currentSurface).toBe(B);                 // stays owned by the stopped belt it halted on
+  });
+});
+
+// ─── MU rotation-aware detection footprint ───────────────────────
+
+describe('RVMovingUnit — rotation-aware AABB footprint', () => {
+  it('keeps its footprint for an un-rotated part (no change on straight conveyors)', () => {
+    const node = new Object3D();
+    // Elongated like a Euro-pallet: long axis along local Z.
+    const mu = new RVMovingUnit(node, 'src', new Vector3(0.4, 0.2, 0.6));
+    mu.updateAABB();
+    expect(mu.aabb.halfSize.x).toBeCloseTo(0.4, 3);
+    expect(mu.aabb.halfSize.z).toBeCloseTo(0.6, 3);
+  });
+
+  it('swaps the footprint axes when the part is rotated 90° (matches the visible mesh)', () => {
+    const node = new Object3D();
+    const mu = new RVMovingUnit(node, 'src', new Vector3(0.4, 0.2, 0.6));
+
+    // Turn the part 90° about Y — as a turntable corner would.
+    node.rotation.y = MathUtils.degToRad(90);
+    node.updateMatrixWorld(true);
+    mu.updateAABB();
+
+    // Long axis is now world-X, short axis world-Z — so a cross-belt light
+    // barrier breaks at the part's true edge instead of ~0.2 m off.
+    expect(mu.aabb.halfSize.x).toBeCloseTo(0.6, 3);
+    expect(mu.aabb.halfSize.z).toBeCloseTo(0.4, 3);
   });
 });
 

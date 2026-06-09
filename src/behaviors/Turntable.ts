@@ -56,6 +56,7 @@ import { findRotaryDrive, findSensor, findTransport } from '../core/library-comp
 import { registerCapabilities } from '../core/engine/rv-component-registry';
 import { classifyConnections, listOwnSnaps, type PortConnection } from './_shared/snap-graph-helpers';
 import { alignToInputAngle, dispatchToOutputAngle, calibrateBeltNeutralAngle } from './_shared/turntable-angle-math';
+import { isSurfaceOccupied } from './_shared/surface-occupancy';
 
 registerCapabilities('TurntableBehavior', {
   badgeColor: '#7e57c2',
@@ -72,6 +73,10 @@ const CONFIG = {
   neighborRefreshSec: 0.5,
   dischargeClearSec: 0.5,  // belt keeps running this long after the sensor clears,
                            // so the good fully exits before the platform re-idles
+  emptyResetSec: 0.75,     // a part-carrying state whose platform stays empty this
+                           // long is freed back to idle (the part was deleted / fell
+                           // off). MUST exceed dischargeClearSec so a NORMAL discharge
+                           // re-idles via its own dwell first.
 } as const;
 
 type State =
@@ -176,6 +181,7 @@ export default defineBehavior({
     let beltNeutralAngle = 0;
     let beltCalibrated = false;
     let refreshTimer: number = CONFIG.neighborRefreshSec;
+    let emptyFor = 0;                 // seconds the platform has been empty in a part-carrying state
 
     // Scratch (no per-tick allocation).
     const _dir = new Vector3();
@@ -195,7 +201,11 @@ export default defineBehavior({
       for (const c of connections) rv.signals.set(portOccupiedSignal(c.snap.id), c.snap.id !== openId);
     };
     const publishOccupied = (): void => {
-      rv.signals.set(CONFIG.occupiedSignal, sensorOccupied || state !== 'idle');
+      // Surface-based: a good physically on the platform belt OR any busy state.
+      // The busy term keeps the turntable blocked across the whole receive→discharge
+      // cycle; the surface term covers a good lingering on an otherwise-idle platform.
+      const platformOccupied = beltNode ? isSurfaceOccupied(rv.viewer, beltNode) : sensorOccupied;
+      rv.signals.set(CONFIG.occupiedSignal, platformOccupied || state !== 'idle');
     };
     const publishRunning = (): void => {
       rv.signals.set(CONFIG.runningSignal, state !== 'idle');
@@ -240,14 +250,17 @@ export default defineBehavior({
     const inputs = (): PortConnection[] => connections.filter(c => c.role === 'input');
     const outputs = (): PortConnection[] => connections.filter(c => c.role === 'output');
 
-    /** Idle: find an input with a waiting good, rotate to align, start receiving. */
+    /** Idle: pick a random input with a waiting good, rotate to align, start receiving. */
     const tryReceive = (): void => {
       if (state !== 'idle') return;
       if (rv.signals.get<boolean>(CONFIG.runSignal) !== true) return;
 
-      const waiting = inputs().find(c =>
+      // Choose randomly among ALL waiting inputs (mirrors tryDispatch) so that when
+      // several inputs have a good ready, none gets starved by deterministic order.
+      const ready = inputs().filter(c =>
         rv.signals.get(`/${c.ownerRoot.name}/${CONFIG.occupiedSignal}`) === true);
-      if (!waiting) return;
+      if (ready.length === 0) return;
+      const waiting = ready[Math.floor(Math.random() * ready.length)];
 
       selectedInputPort = waiting.snap.id;
       const target = alignToInputAngle(driveAxis, beltNeutralAngle, waiting.snap.object3D, lastCommandedAngle);
@@ -274,6 +287,23 @@ export default defineBehavior({
     /** Discharge dwell elapsed — belt off, re-idle and re-scan for inputs. */
     const finishCycle = (): void => {
       setBelt(false);
+      enterState('idle');
+    };
+
+    /** True if a part is physically on the platform belt OR at the sensor. */
+    const platformHasPart = (): boolean =>
+      (beltNode ? isSurfaceOccupied(rv.viewer, beltNode) : false) || sensorOccupied;
+
+    /** Recover to idle when the platform has unexpectedly emptied (a part it was
+     *  carrying was deleted or fell off). Without this the busy state latches
+     *  `Occupied=true` and keeps every input blocked forever; a conveyor frees
+     *  the instant its surface clears, so the turntable must too. */
+    const abortToIdle = (): void => {
+      if (drive) drive.stop();
+      setBelt(false);
+      blockAllInputs();
+      selectedInputPort = null;
+      emptyFor = 0;
       enterState('idle');
     };
 
@@ -304,12 +334,32 @@ export default defineBehavior({
 
     // ─── Per-tick loop ───────────────────────────────────────────────
     rv.onFixedUpdate((dt) => {
+      // Re-publish surface-based occupancy every tick so a good arriving on / leaving
+      // the platform updates the interlock between state-machine edges.
+      publishOccupied();
+
       refreshTimer += dt;
       if (refreshTimer >= CONFIG.neighborRefreshSec) {
         refreshTimer = 0;
         refreshTopology();
         if (state === 'idle') tryReceive();                          // poll inputs for a waiting good
         else if (state === 'holding' && sensorOccupied) tryDispatch(); // retry now an output may be free
+      }
+
+      // Platform-empty watchdog: free the turntable if a part it was carrying has
+      // physically vanished (deleted by the user, fell off). Skipped in `idle`
+      // (nothing to free) and `aligning_in` (platform legitimately empty while the
+      // part is still on the feeder, rotating to meet it). The grace exceeds the
+      // discharge-clear dwell, so a NORMAL discharge always re-idles on its own first.
+      if (state !== 'idle' && state !== 'aligning_in') {
+        if (!platformHasPart()) {
+          emptyFor += dt;
+          if (emptyFor >= CONFIG.emptyResetSec) abortToIdle();
+        } else {
+          emptyFor = 0;
+        }
+      } else {
+        emptyFor = 0;
       }
 
       // Belt control + state transitions driven by drive.isAtTarget.

@@ -41,6 +41,7 @@ import { defineBehavior } from '../core/behaviors';
 import { findTransport, findSensor } from '../core/library-component-loader';
 import { registerCapabilities } from '../core/engine/rv-component-registry';
 import { findDownstreamRoot as findFirstDownstreamRoot, findOutputPairings } from './_shared/snap-graph-helpers';
+import { isSurfaceOccupied } from './_shared/surface-occupancy';
 import type { Object3D } from 'three';
 
 // Hierarchy/inspector badge marker (pure marker — no factory).
@@ -112,7 +113,11 @@ export default defineBehavior({
     rv.signal(CONFIG.partCountSignal, { type: 'PLCOutputInt',  initialValue: 0 });
 
     // ─── State ───────────────────────────────────────────────────────
-    let occupied = false;
+    // `partAtSensor` is the LOCAL discharge trigger (a good sits at this conveyor's
+    // sensor, a point near the belt end). It is distinct from the PUBLISHED
+    // `Conveyor.Occupied`, which is surface-based ("a good is anywhere on my belt")
+    // and read by the upstream neighbour as its successor-occupancy interlock.
+    let partAtSensor = false;
     let partCount = 0;
     // Downstream interlock — resolved lazily because the line topology changes as
     // conveyors are snapped on after this one was placed. Stored as an absolute,
@@ -122,15 +127,22 @@ export default defineBehavior({
 
     rv.signals.on(sensorNode.name, (v) => {
       const present = v === true;
-      if (present && !occupied) {                   // rising edge → a part arrived
+      if (present && !partAtSensor) {               // rising edge → a part arrived
         partCount += 1;
         rv.signals.set(CONFIG.partCountSignal, partCount);
       }
-      occupied = present;
-      rv.signals.set(CONFIG.occupiedSignal, present);
+      partAtSensor = present;
+      // NOTE: `Conveyor.Occupied` is NOT published here anymore — it is published
+      // every tick from surface occupancy (see onFixedUpdate) so it reflects a good
+      // ANYWHERE on the belt, not only at the sensor point.
     });
 
     rv.onFixedUpdate((dt) => {
+      // Publish surface-based occupancy every tick: a good ANYWHERE on this belt
+      // marks the zone occupied so the upstream neighbour won't push a second good
+      // onto it (one good per zone). Read by the predecessor as its successor interlock.
+      rv.signals.set(CONFIG.occupiedSignal, isSurfaceOccupied(rv.viewer, beltNode));
+
       // Periodically (re)resolve the downstream neighbour's Occupied interlock
       // AND retry the drive lookup if it wasn't ready at bind time.
       refreshTimer += dt;
@@ -167,7 +179,7 @@ export default defineBehavior({
       const downstreamOccupied = downstreamOccupiedSignal === null
         ? true
         : rv.signals.get<boolean>(downstreamOccupiedSignal) === true;
-      const moving = conveyorShouldRun(run, occupied, downstreamOccupied);
+      const moving = conveyorShouldRun(run, partAtSensor, downstreamOccupied);
       rv.signals.set(CONFIG.runningSignal, moving);
       if (belt) {
         belt.jogForward = moving;                    // belt speed = drive.currentSpeed

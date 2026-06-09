@@ -14,11 +14,25 @@ import { debug } from './rv-debug';
 import { MM_TO_METERS } from './rv-constants';
 import { buildSourceMarker } from './rv-source-marker';
 import { applyShadowFlags } from './rv-mesh-classifier';
+import type { RVTransportManager } from './rv-transport-manager';
+import type { RVTransportSurface } from './rv-transport-surface';
+import type { EventEmitter } from '../rv-events';
+import type { ViewerEvents } from '../rv-viewer-events';
+import {
+  classifySourcePlacement, anyMUOnSurfaces,
+  OCCUPANCY_GATED_BEHAVIORS, SURFACE_TOP_EPS_M,
+  type SourcePlacement,
+} from './rv-source-placement';
 
 // Pre-allocated temp vectors (no GC in hot path)
 const _sourcePos = new Vector3();
 const _lastMUPos = new Vector3();
+const _placementPos = new Vector3();
 const _identityQuat = new Quaternion();
+
+/** How often (seconds) a source re-resolves what it stands on. Matches the Conveyor behavior's
+ *  neighbour-refresh cadence — fast enough to react to topology changes, cheap enough to ignore. */
+const PLACEMENT_REFRESH_SEC = 0.5;
 
 /**
  * Strip authored component / layout metadata from a cloned subtree so it can
@@ -118,6 +132,21 @@ export class RVSource implements RVComponent {
 
   /** Raw GLB extras for computing spawn config in init() */
   rawExtras: Record<string, unknown> | null = null;
+
+  // ── Placement detection (what the source stands on) ──────────────────
+  /** Transport manager — provides the live surface + MU sets for placement. */
+  private transportManager: RVTransportManager | null = null;
+  /** Viewer event bus — invalidates the placement cache on planner moves. */
+  private events: EventEmitter<ViewerEvents> | null = null;
+  /** Unsubscribe for the `layout-transform-update` subscription. */
+  private _unsubPlacement: (() => void) | null = null;
+  /** Cached placement classification; drives the spawn gate in `update()`. */
+  private _placement: SourcePlacement<RVTransportSurface> =
+    { mode: 'none', surface: null, conveyorRoot: null, conveyorSurfaces: [] };
+  /** Accumulator for throttled placement re-resolution. */
+  private _placementTimer = 0;
+  /** False forces a re-resolve on the next update (initial + after a planner move). */
+  private _placementResolved = false;
 
   /** Always-visible ghost CLONE of the spawned MU (separate-template case),
    *  shown at the source position: a clone of the MU template keeping its real
@@ -247,6 +276,17 @@ export class RVSource implements RVComponent {
 
     if (template) {
       this.setTemplate(template);
+    }
+
+    // Placement detection wiring: keep the live surface/MU sets and invalidate
+    // the cached placement whenever a layout object is moved in the planner so
+    // the source re-detects what it stands on without polling every frame.
+    this.transportManager = context.transportManager;
+    this.events = context.events ?? null;
+    if (this.events) {
+      this._unsubPlacement = this.events.on('layout-transform-update', () => {
+        this._placementResolved = false;
+      });
     }
 
     // Register in transport manager
@@ -470,6 +510,10 @@ export class RVSource implements RVComponent {
    *  source is removed from the scene (e.g. layout-planner remove, model
    *  clear via TransportManager.reset). */
   dispose(): void {
+    if (this._unsubPlacement) {
+      this._unsubPlacement();
+      this._unsubPlacement = null;
+    }
     this._disposePreview();
     if (this._ghostNode) {
       if (this._ghostNode.parent) this._ghostNode.parent.remove(this._ghostNode);
@@ -515,8 +559,30 @@ export class RVSource implements RVComponent {
       return null;
     }
 
-    // Spawning is enabled. If a held preview exists we just (re-)activated —
-    // release it as the first real spawn and restart the spawn rhythm.
+    // Re-resolve what the source stands on (throttled). Force a fresh resolve
+    // while a held preview is pending so a spawn decision after a planner move
+    // reflects the latest placement rather than a stale pre-move cache.
+    this._maybeResolvePlacement(dt, this._previewInstance !== null);
+
+    const mode = this._placement.mode;
+
+    // Case 3 — not on any transport surface: never spawn (and never release the
+    // held preview into empty space).
+    if (mode === 'none') return null;
+
+    // Case 2 — on a ConveyorBehavior: gate purely on belt occupancy. Spawn the
+    // next part only once the conveyor's surface(s) are clear (no MU on them).
+    if (mode === 'conveyor') {
+      if (this._conveyorOccupied()) return null;
+      if (this._previewInstance) {
+        this._disposePreview();
+        this.timer = 0;
+      }
+      return this.spawn(forceClone);
+    }
+
+    // Case 1 — plain transport surface: keep the configured Interval/Distance
+    // rhythm. A held preview is released as the first real spawn.
     if (this._previewInstance) {
       this._disposePreview();
       this.timer = 0;
@@ -547,6 +613,42 @@ export class RVSource implements RVComponent {
     // OnSignal mode not implemented for PoC
 
     return null;
+  }
+
+  /** Re-resolve placement on the first update, when invalidated by a planner
+   *  move, when `force` is set, or every `PLACEMENT_REFRESH_SEC` as a backstop
+   *  for topology changes (e.g. a conveyor snapped on after the source). */
+  private _maybeResolvePlacement(dt: number, force: boolean): void {
+    this._placementTimer += dt;
+    if (force || !this._placementResolved || this._placementTimer >= PLACEMENT_REFRESH_SEC) {
+      this._placementTimer = 0;
+      this._placementResolved = true;
+      this._resolvePlacement();
+    }
+  }
+
+  /** Classify what the source stands on from its current world position. */
+  private _resolvePlacement(): void {
+    if (!this.transportManager) {
+      // No transport context wired (a source used outside the manager, e.g. a
+      // unit test). Placement can't be detected — fall back to the permissive
+      // legacy behavior (plain surface) rather than silently never spawning.
+      this._placement = { mode: 'surface', surface: null, conveyorRoot: null, conveyorSurfaces: [] };
+      return;
+    }
+    this.node.getWorldPosition(_placementPos);
+    this._placement = classifySourcePlacement(
+      _placementPos,
+      this.transportManager.surfaces,
+      OCCUPANCY_GATED_BEHAVIORS,
+      SURFACE_TOP_EPS_M,
+    );
+  }
+
+  /** True when any live MU sits on the conveyor's belt surface(s) (conveyor mode). */
+  private _conveyorOccupied(): boolean {
+    if (!this.transportManager) return false;
+    return anyMUOnSurfaces(this._placement.conveyorSurfaces, this.transportManager.mus);
   }
 
   /** Create a new MU at this source's position (clone or instanced). When

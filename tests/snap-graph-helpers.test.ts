@@ -130,11 +130,14 @@ describe('classifyConnections — role by connected transport direction', () => 
     return { owner, registry };
   }
 
+  // The role is decided relative to the TURNTABLE CENTRE (the `root` arg), not
+  // the connected conveyor's origin — so the conveyor body position is irrelevant
+  // (left at the world origin here). Only the mating point + belt direction matter.
   it('a conveyor moving goods TOWARD the turntable is an input', () => {
-    const TT = new Object3D(); TT.name = 'TT';
-    const { owner: CV, registry } = conveyorWith(new Vector3(0, 0, 1)); // toward +Z
-    const ttNode = new Object3D(); ttNode.position.set(0, 0, 1);
-    const cvNode = new Object3D(); cvNode.position.set(0, 0, 1);        // mating point at +Z of CV
+    const TT = new Object3D(); TT.name = 'TT';                          // turntable at the world origin
+    const { owner: CV, registry } = conveyorWith(new Vector3(0, 0, 1)); // belt runs +Z toward the table
+    const ttNode = new Object3D(); ttNode.position.set(0, 0, -1);
+    const cvNode = new Object3D(); cvNode.position.set(0, 0, -1);       // mating point SOUTH of the table
     const host = makeHost([
       { id: 'tt', object3D: ttNode, flow: 'bidi', pairedSnapId: 'cv', ownerRoot: TT },
       { id: 'cv', object3D: cvNode, flow: 'bidi', pairedSnapId: 'tt', ownerRoot: CV },
@@ -146,10 +149,10 @@ describe('classifyConnections — role by connected transport direction', () => 
   });
 
   it('a conveyor moving goods AWAY from the turntable is an output', () => {
-    const TT = new Object3D(); TT.name = 'TT';
-    const { owner: CV, registry } = conveyorWith(new Vector3(0, 0, -1)); // away from +Z
+    const TT = new Object3D(); TT.name = 'TT';                          // turntable at the world origin
+    const { owner: CV, registry } = conveyorWith(new Vector3(0, 0, 1)); // belt runs +Z away from the table
     const ttNode = new Object3D(); ttNode.position.set(0, 0, 1);
-    const cvNode = new Object3D(); cvNode.position.set(0, 0, 1);
+    const cvNode = new Object3D(); cvNode.position.set(0, 0, 1);        // mating point NORTH of the table
     const host = makeHost([
       { id: 'tt', object3D: ttNode, flow: 'bidi', pairedSnapId: 'cv', ownerRoot: TT },
       { id: 'cv', object3D: cvNode, flow: 'bidi', pairedSnapId: 'tt', ownerRoot: CV },

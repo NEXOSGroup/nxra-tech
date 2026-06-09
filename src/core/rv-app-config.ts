@@ -105,7 +105,9 @@ export function isTabLocked(tab: SettingsTabId): boolean {
  */
 export async function fetchAppConfig(): Promise<RVAppConfig> {
   try {
-    const resp = await fetch(`./settings.json?v=${Date.now()}`, { cache: 'no-store' });
+    // Use BASE_URL (not a bare relative path) so it resolves correctly under
+    // sub-folder deploys (e.g. Bunny CDN /demo/) regardless of a trailing slash.
+    const resp = await fetch(`${import.meta.env.BASE_URL}settings.json?v=${Date.now()}`, { cache: 'no-store' });
     if (!resp.ok) {
       debug('config', 'No settings.json found, using defaults');
       return {};

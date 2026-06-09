@@ -103,8 +103,14 @@ const OUTLINE_OPACITY_DRAG = 1.00;
 const COLLAPSED_SCALE = 0.21;
 /** Cursor within this many px of the gizmo centre → expand. */
 const EXPAND_RADIUS_PX = 10.5;
-/** Cursor beyond this many px → collapse (hysteresis band avoids flicker). */
-const COLLAPSE_RADIUS_PX = 19.5;
+/** Full screen-space radius of the expanded gizmo — disc centre out to the
+ *  arrow tips (ring outer edge + axis arm). Screen-space px is zoom-invariant
+ *  because the root is scaled to keep the disc at DISC_SCREEN_RADIUS_PX. */
+const GIZMO_SCREEN_RADIUS_PX = DISC_SCREEN_RADIUS_PX * (RING_OUTER_FACTOR + AXIS_ARM_LENGTH);
+/** Cursor beyond this many px → collapse (hysteresis band avoids flicker).
+ *  Set just past the gizmo's visible edge so it only collapses once the cursor
+ *  has actually left the gizmo. */
+const COLLAPSE_RADIUS_PX = GIZMO_SCREEN_RADIUS_PX * 1.1;
 /** Per-frame smoothing factor for the expansion animation. */
 const EXPANSION_LERP = 0.22;
 /** Below this expansion the gizmo is non-interactive (indicator only). */

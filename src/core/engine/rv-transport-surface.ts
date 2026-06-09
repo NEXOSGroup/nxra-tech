@@ -23,6 +23,9 @@ const _quatCarry = new Quaternion();
 const _scratchVecA = new Vector3();
 const _scratchQuatA = new Quaternion();
 const _scratchQuatB = new Quaternion();
+// Scratch for the rotation-aware AABB-extent recompute in updateAABB().
+const _aabbQuat = new Quaternion();
+const _aabbRotMat = new Matrix4();
 
 /** Identity-matrix element pattern (column-major), used by `matrixIsIdentity`. */
 const _identityElements = new Matrix4().elements;
@@ -111,6 +114,17 @@ export class RVTransportSurface implements RVComponent {
   /** True once we have a previous-tick matrix to diff against. */
   private _lastMatrixCaptured = false;
 
+  /**
+   * Belt half-extents in the node's LOCAL frame (pose-independent), captured
+   * once at `init()`. `updateAABB()` re-derives the world-axis-aligned half-size
+   * from this every tick, so the collision footprint follows the node's CURRENT
+   * rotation — both while a parent drive spins the platform AND when the AABB
+   * was first built at the wrong pose (the reload path constructs the surface
+   * before the saved rotation is applied). Null when the subtree has no mesh
+   * geometry (collider-only sinks), in which case the static halfSize is kept.
+   */
+  private _localHalfExtents: Vector3 | null = null;
+
   /** Cloned textures for independent conveyor belt animation */
   private _texMaps: Texture[] = [];
   /** Raw Unity local direction X component for UV animation */
@@ -159,6 +173,18 @@ export class RVTransportSurface implements RVComponent {
     // through `transportMU` (gizmo, debug logs) see a sensible value at init.
     this._refreshWorldDirection();
 
+    // Capture the belt's half-extents in NODE-LOCAL space (pose-independent) so
+    // `updateAABB()` can keep the collision footprint aligned with the surface's
+    // CURRENT world rotation. Without this, a turntable platform that rotates 90°
+    // (or a surface whose AABB was built before its reload rotation was applied)
+    // keeps a stale axis-aligned footprint and goods fail to hand off at the seam.
+    this.node.updateMatrixWorld(true);
+    const localBox = this._computeLocalAABB();
+    if (localBox) {
+      this._localHalfExtents = localBox.getSize(new Vector3()).multiplyScalar(0.5);
+      localBox.getCenter(this.aabb.localCenter); // keep centre consistent with the local extents
+    }
+
     // Initialize transport internals (radial, texture animation)
     this.initTransport();
 
@@ -180,13 +206,13 @@ export class RVTransportSurface implements RVComponent {
       this.drive.isTransportSurface = true;
     }
 
-    // Belt drives (conveyor + turntable platform) default to 200 mm/s — twice
-    // the generic Drive default (100 mm/s in `RVDrive` schema). We only bump
-    // when the drive's `TargetSpeed` is still at the generic default, so a GLB
-    // that authored a different value (e.g. 150 or 50) is respected. `applySchema`
-    // runs before `init`, so this check fires after any explicit value has
-    // already been written by the loader.
-    const BELT_DEFAULT_SPEED = 200;
+    // Belt drives (conveyor + turntable platform) default to 1000 mm/s (1 m/s).
+    // We only bump when the drive's `TargetSpeed` is still at the generic Drive
+    // default (100 mm/s in `RVDrive` schema), so a GLB that authored a different
+    // value (e.g. 150 or 50) is respected. `applySchema` runs before `init`, so
+    // this check fires after any explicit value has already been written by the
+    // loader.
+    const BELT_DEFAULT_SPEED = 1000;
     const DRIVE_SCHEMA_DEFAULT = 100;
     if (this.drive && this.drive.TargetSpeed === DRIVE_SCHEMA_DEFAULT) {
       this.drive.TargetSpeed = BELT_DEFAULT_SPEED;
@@ -639,8 +665,26 @@ export class RVTransportSurface implements RVComponent {
     }
   }
 
-  /** Update AABB (call once per frame, before overlap checks) */
+  /** Update AABB (call once per frame, before overlap checks).
+   *
+   *  Re-derives the world axis-aligned half-size from the belt's LOCAL extents
+   *  under the node's CURRENT world rotation (`worldHalf_i = Σ_j |R_ij|·localHalf_j`),
+   *  so the footprint follows the surface as a parent drive rotates it (turntable
+   *  platform) and is correct regardless of the pose the AABB was first built at.
+   *  At 0°/180° this is identical to the static footprint (no change for plain
+   *  conveyors); at 90° it swaps the long/short axes so handoff to a perpendicular
+   *  neighbour works. */
   updateAABB(): void {
+    const h = this._localHalfExtents;
+    if (h) {
+      this.node.getWorldQuaternion(_aabbQuat);
+      const e = _aabbRotMat.makeRotationFromQuaternion(_aabbQuat).elements;
+      this.aabb.halfSize.set(
+        Math.abs(e[0]) * h.x + Math.abs(e[4]) * h.y + Math.abs(e[8]) * h.z,
+        Math.abs(e[1]) * h.x + Math.abs(e[5]) * h.y + Math.abs(e[9]) * h.z,
+        Math.abs(e[2]) * h.x + Math.abs(e[6]) * h.y + Math.abs(e[10]) * h.z,
+      );
+    }
     this.aabb.update();
   }
 
