@@ -15,7 +15,9 @@ import { EventEmitter } from '../src/core/rv-events';
 import { ContextMenuStore } from '../src/core/hmi/context-menu-store';
 import { matchesAny } from '../src/core/behaviors';
 import { getCapabilities } from '../src/core/engine/rv-component-registry';
-import Conveyor, { conveyorShouldRun, findDownstreamRoot } from '../src/behaviors/Conveyor';
+import Conveyor from '../src/behaviors/Conveyor';
+import { conveyorShouldRun } from '../src/behaviors/_shared/transport-links';
+import { findDownstreamRoot } from '../src/behaviors/_shared/snap-graph-helpers';
 
 const DT = 1 / 60;
 
