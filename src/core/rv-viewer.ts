@@ -128,6 +128,10 @@ import { ControlsFacadeImpl } from './facades/controls-facade';
 import { SimLoopFacadeImpl } from './facades/sim-loop-facade';
 import { TickStage } from './rv-tick-stages';
 import { BehaviorManager } from './behaviors';
+import { isUnifiedSimEnabled } from './rv-app-config';
+import { ContinuousRunner } from './material-flow/continuous-runner';
+import { SimulationKernel } from './material-flow/simulation-kernel';
+import { createDesRunner } from '../private-stubs/des-runner-stub';
 import {
   applyKinematicsSpec,
   createBindContext,
@@ -392,6 +396,18 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   private _renderPlugins: RVViewerPlugin[] = [];
   /** Flag: a plugin handles transport (kinematic transportManager.update is skipped). */
   private _physicsPluginActive = false;
+
+  /**
+   * Plan 194 P1 — unified SimulationKernel. Built lazily on first tick after a
+   * model loads, and ONLY when the `VITE_UNIFIED_SIM` flag is on. When the flag
+   * is OFF (default) this stays null and the legacy fixedUpdate path
+   * (transport.update + behaviors.tick) runs byte-for-byte unchanged.
+   * The kernel reuses the viewer's EXISTING transportManager + behaviors — it
+   * does NOT relocate ownership or re-instantiate them.
+   */
+  private _kernel: SimulationKernel | null = null;
+  /** Cached `isUnifiedSimEnabled()` — read once at construction (flag is build-time static). */
+  private readonly _unifiedSim = isUnifiedSimEnabled();
   /** IDs of plugins that have been disabled via disablePlugin(). */
   private _disabledIds = new Set<string>();
   /** Last successful load result (for retroactive onModelLoaded). */
@@ -1135,6 +1151,35 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   resetSimulation(): void {
     if (this.transportManager) this.transportManager.reset();
     if (this.logicEngine) this.logicEngine.reset();
+    // Plan 194 P1 (K3): when the unified kernel is active, also reset the active
+    // executor so a future DES runner clears its own state. No-op for the
+    // continuous runner beyond the transportManager.reset() above (same target),
+    // and entirely skipped when the flag is OFF.
+    if (this._unifiedSim) this._kernel?.activeExecutor.reset();
+  }
+
+  /**
+   * Plan 194 P1 — lazily build (or return) the unified SimulationKernel,
+   * reusing the viewer's EXISTING transportManager + behaviors. Returns null
+   * when the flag is OFF or no transportManager is loaded yet. Guarded so the
+   * default (flag-OFF) path never constructs a kernel.
+   */
+  private _getKernel(): SimulationKernel | null {
+    if (!this._unifiedSim) return null;
+    if (!this.transportManager || !this.currentModel) return null;
+    if (this._kernel) return this._kernel;
+    const runner = new ContinuousRunner(this.transportManager, this.behaviors);
+    this._kernel = new SimulationKernel({
+      continuousRunner: runner,
+      topology: { root: this.currentModel },
+      // P5 wires the actual material-flow definitions in play; continuous
+      // discovery already binds them via the BehaviorManager today.
+      defs: [],
+      // DES factory defaults to the stub (`null` in the public build) →
+      // hasDesRunner() is false → the DES toggle stays hidden (P6).
+      desRunnerFactory: createDesRunner,
+    });
+    return this._kernel;
   }
 
   // #region NodeFilter
@@ -1922,6 +1967,10 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this.currentModel.userData._rvModelRoot = true;
     this.drives = result.drives;
     this.transportManager = result.transportManager;
+    // Plan 194 P1: invalidate the unified kernel so it rebuilds against the new
+    // transportManager on the next tick (no-op when the flag is OFF — _kernel
+    // stays null in that case anyway).
+    this._kernel = null;
     this.signalStore = result.signalStore;
     this.playback = result.playback;
     this.replayRecordings = result.replayRecordings;
@@ -2222,6 +2271,9 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       this.transportManager.reset();
       this.transportManager = null;
     }
+    // Plan 194 P1: drop the unified kernel with the model it was built against
+    // (no-op when the flag is OFF — _kernel is already null).
+    this._kernel = null;
 
     // Collect every model root currently parented to the scene. Normally this
     // is just `this.currentModel`, but a `_rvModelRoot`-tagged orphan can
@@ -3250,7 +3302,16 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this._prevMuCount = muCount;
 
     // ── Core Transport (kinematic — skipped when physics plugin is active) ──
-    if (this.transportManager && !this._physicsPluginActive) {
+    // Plan 194 P1: when the unified-sim flag is ON, route transport + the
+    // behaviour/material-flow fixedUpdate through the SimulationKernel's active
+    // executor (ContinuousRunner.tick = transport.update → behaviors.tick, exact
+    // R1 order). The legacy `behaviors.tick(dt)` further down is then skipped
+    // (kernel.lateTick fills that slot). When OFF (default) this whole branch is
+    // bypassed and the legacy split path below runs byte-for-byte unchanged.
+    const kernel = this._unifiedSim ? this._getKernel() : null;
+    if (kernel) {
+      if (!this._physicsPluginActive) kernel.tick(dt);
+    } else if (this.transportManager && !this._physicsPluginActive) {
       this.transportManager.update(dt);
     }
 
@@ -3285,7 +3346,14 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this._runTickCallbacks(TickStage.SIM, dt);
 
     // 3b. Behavior onFixedUpdate fan-out (auto-disposed on model-cleared).
-    this.behaviors.tick(dt);
+    // Plan 194 P1: when the kernel is active, the behaviour fixedUpdate already
+    // ran inside `kernel.tick(dt)` (transport → behaviours, exact R1 order)
+    // above; here we only run the kernel's late pass. OFF path is unchanged.
+    if (kernel) {
+      kernel.lateTick(dt);
+    } else {
+      this.behaviors.tick(dt);
+    }
 
     // ── TickStage.POST ─────────────────────────────────────────────────────
     // 4. Legacy onFixedUpdatePost-Plugins (defensive snapshot).
