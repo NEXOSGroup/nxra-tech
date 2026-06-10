@@ -7,7 +7,7 @@
  * Verifies:
  *   - both register with the correct kind/models,
  *   - des.onGenerate creates an MU + transfers it to the first output + re-arms,
- *   - des.onAccept destroys the MU + publishes Conveyor.Occupied = false,
+ *   - des.onAccept destroys the MU + publishes Flow.Occupied = false,
  *   - the continuous blocks are INERT (no spawn/destroy on the default path —
  *     the engine RVSource / RVSink own the continuous work, no double effect).
  *
@@ -81,12 +81,12 @@ function makeMockSelf(opts: {
       set: (n: string, v: boolean | number) => { writes.set(n, v); },
       on: () => { /* not used by des hooks */ },
     },
-    // Sink's signals block publishes `Conveyor.Occupied` via `self.sig.Occupied`
+    // Sink's signals block publishes `Flow.Occupied` via `self.sig.Occupied`
     // (namespace 'Conveyor'). Mirror that here so the des hook resolves it.
     sig: {
       Occupied: {
-        get: (): boolean => writes.get('Conveyor.Occupied') === true,
-        set: (v: boolean | number): void => { writes.set('Conveyor.Occupied', v); },
+        get: (): boolean => writes.get('Flow.Occupied') === true,
+        set: (v: boolean | number): void => { writes.set('Flow.Occupied', v); },
       },
     },
     signal: () => { /* declare — irrelevant in mock */ },
@@ -237,7 +237,7 @@ describe('Source — des.onGenerate', () => {
 // ─── Sink.des.onAccept ───────────────────────────────────────────────────────
 
 describe('Sink — des.onAccept', () => {
-  it('destroys the MU, publishes Conveyor.Occupied=false, and accepts', () => {
+  it('destroys the MU, publishes Flow.Occupied=false, and accepts', () => {
     const def = getMaterialFlow('Sink')!;
     const self = makeMockSelf({ kind: 'sink', type: 'Sink' });
     const mu: MU = { id: 9, prop: {} };
@@ -246,7 +246,7 @@ describe('Sink — des.onAccept', () => {
 
     expect(accepted).toBe(true);
     expect(mu.prop!['consumed']).toBe(true);
-    expect(self.writes.get('Conveyor.Occupied')).toBe(false);
+    expect(self.writes.get('Flow.Occupied')).toBe(false);
   });
 
   it('flags the visual for removal when present (RVSink interop)', () => {
@@ -291,9 +291,9 @@ describe('Source / Sink — continuous blocks are inert (no double effect)', () 
     const { ctx, handle } = createBindContext(root, host, {});
     SinkBehavior.bind(ctx);
     // setup() published Occupied=false so an upstream conveyor discharges into the sink.
-    expect(values.get('Sink/Conveyor.Occupied')).toBe(false);
+    expect(values.get('Sink/Flow.Occupied')).toBe(false);
     // Ticking does nothing (no fixedUpdate) — no MU handling on the continuous path.
     iterateFixedUpdate(handle, 1 / 60);
-    expect(values.get('Sink/Conveyor.Occupied')).toBe(false);
+    expect(values.get('Sink/Flow.Occupied')).toBe(false);
   });
 });

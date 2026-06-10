@@ -12,13 +12,20 @@
  * Separation of concerns: this module is topology + signal-name ADDRESSING of
  * the interlock. Occupancy DETECTION (is a good physically on the belt) lives in
  * `_shared/surface-occupancy.ts`; the surface-based PUBLICATION of
- * `Conveyor.Occupied` stays in the behavior, not here.
+ * `Flow.Occupied` stays in the behavior, not here.
  */
 import type { Object3D } from 'three';
 import type { RVBindContext, SignalOpts } from '../../core/behavior-runtime';
 import { findOutputPairings, listOwnSnaps, type OutputPairing, type PortConnection } from './snap-graph-helpers';
 
-const OCCUPIED = 'Conveyor.Occupied';
+/**
+ * SSOT for the type-neutral downstream-occupancy interlock signal. This is the
+ * generic material-flow back-pressure signal — NOT conveyor-specific (turntables
+ * and sinks publish/read it too). Every internal user (makeLink,
+ * createDownstreamInterlock, material-flow-self's makeLinkLike) addresses through
+ * THIS constant; no module hand-builds the literal `'Flow.Occupied'`.
+ */
+export const FLOW_OCCUPIED = 'Flow.Occupied';
 
 export interface TransportLink {
   /** Stable snap id on my side (Object3D.uuid). */
@@ -41,7 +48,7 @@ export interface TransportLink {
 }
 
 function makeLink(rv: RVBindContext, mySnapId: string, partnerSnapId: string, partnerRoot: Object3D): TransportLink {
-  const partnerRootSig = `/${partnerRoot.name}/${OCCUPIED}`;
+  const partnerRootSig = `/${partnerRoot.name}/${FLOW_OCCUPIED}`;
   return {
     mySnapId, partnerSnapId, partnerRoot,
     partnerComponent: null,    // Plan 194 fills this for the DES handshake
@@ -54,7 +61,7 @@ function makeLink(rv: RVBindContext, mySnapId: string, partnerSnapId: string, pa
       return rv.signals.get<boolean>(partnerRootSig) === true;
     },
     setOccupied(v: boolean) {
-      rv.signals.set(`${OCCUPIED}@${mySnapId}`, v);
+      rv.signals.set(`${FLOW_OCCUPIED}@${mySnapId}`, v);
     },
   };
 }
@@ -85,16 +92,16 @@ export function portIds(rv: RVBindContext): string[] {
 type SignalDeclarer = (name: string, opts: SignalOpts) => void;
 
 /** Registers the public 4-signal contract via any declarer (rv.signal or self.signal). */
-export function declareConveyorSignalsWith(signal: SignalDeclarer): void {
-  signal('Conveyor.Run',       { type: 'PLCInputBool',  initialValue: true });
-  signal('Conveyor.Occupied',  { type: 'PLCOutputBool', initialValue: false });
-  signal('Conveyor.Running',   { type: 'PLCOutputBool', initialValue: false });
-  signal('Conveyor.PartCount', { type: 'PLCOutputInt',  initialValue: 0 });
+export function declareFlowSignalsWith(signal: SignalDeclarer): void {
+  signal('Flow.Run',       { type: 'PLCInputBool',  initialValue: true });
+  signal('Flow.Occupied',  { type: 'PLCOutputBool', initialValue: false });
+  signal('Flow.Running',   { type: 'PLCOutputBool', initialValue: false });
+  signal('Flow.PartCount', { type: 'PLCOutputInt',  initialValue: 0 });
 }
 
 /** Registers the public 4-signal contract (instance-scoped). */
-export function declareConveyorSignals(rv: RVBindContext): void {
-  declareConveyorSignalsWith((n, o) => rv.signal(n, o));
+export function declareFlowSignals(rv: RVBindContext): void {
+  declareFlowSignalsWith((n, o) => rv.signal(n, o));
 }
 
 /** Minimal interlock host — satisfied by both `rv` and the material-flow `self`. */
@@ -116,7 +123,7 @@ export function createDownstreamInterlock(rv: InterlockHost): { occupied(): bool
       // pairing, read per-port-then-root; no successor → blocked.
       const pairing = findOutputPairings(rv.viewer as { getPlugin?(id: string): unknown }, rv.root)[0];   // small/no alloc; 1-4 snaps
       if (!pairing) return true;
-      const rootSig = `/${pairing.ownerRoot.name}/${OCCUPIED}`;
+      const rootSig = `/${pairing.ownerRoot.name}/${FLOW_OCCUPIED}`;
       const perPort = `${rootSig}@${pairing.pairedSnap.id}`;
       const name = rv.signals.get(perPort) !== undefined ? perPort : rootSig;
       return rv.signals.get<boolean>(name) === true;

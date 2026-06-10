@@ -111,9 +111,9 @@ export interface MaterialFlowDefinition<
    * Signal-name namespace for the `signals` block (Plan 197 §2.4b-A). The factory
    * auto-declares each signal as `${signalNamespace ?? type}.${key}` and the
    * `self.sig.<key>` accessors read/write the same scoped name. Defaults to
-   * `type`. Cross-type components that publish another type's signals by interop
-   * convention (Turntable/Sink → `Conveyor.*`, NOT `Turntable.*`/`Sink.*`) set
-   * this so the signals block produces the partner type's signal names.
+   * `type`. The material-flow interop components (Conveyor/Turntable/Sink) set
+   * `signalNamespace: 'Flow'` (NOT `Conveyor.*`/`Turntable.*`/`Sink.*`) so the
+   * signals block produces the shared type-neutral `Flow.*` interop names.
    */
   readonly signalNamespace?: string;
   /** Continuous-matcher globs; default `['*' + type + '*']`. */
@@ -123,7 +123,7 @@ export interface MaterialFlowDefinition<
   /**
    * Optional declarative `signals` block (Plan 197 §2.4b-A). Maps a short key to
    * its PLC signal type; the factory auto-declares each as `${type}.${key}`
-   * (replaces `declareConveyorSignalsWith`) and exposes a typed `self.sig.<key>`
+   * (replaces `declareFlowSignalsWith`) and exposes a typed `self.sig.<key>`
    * accessor. OPTIONAL — a definition without `signals` declares signals
    * manually exactly as before. Initial value defaults per type (bool→false,
    * int/float→0).

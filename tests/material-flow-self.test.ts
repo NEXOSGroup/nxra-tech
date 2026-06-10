@@ -93,10 +93,10 @@ describe('createSelf — signals project through rv.signals', () => {
     const root = new Object3D(); root.name = 'Conv';
     const { host, values } = makeHost({ root });
     const self = createSelf(ctxFor(host, root), DEF);
-    self.signals.set('Conveyor.Run', true);
+    self.signals.set('Flow.Run', true);
     // No LayoutObject ancestor → empty scope → unscoped name.
-    expect(values.get('Conveyor.Run')).toBe(true);
-    expect(self.signals.get<boolean>('Conveyor.Run')).toBe(true);
+    expect(values.get('Flow.Run')).toBe(true);
+    expect(self.signals.get<boolean>('Flow.Run')).toBe(true);
   });
 
   it('on() subscribes and fires on subsequent set()', () => {
@@ -189,7 +189,7 @@ describe('createSelf — ports from the snap graph', () => {
     // Mark downstream root occupied (no per-port key → root signal). The `/`-prefixed
     // read resolves via the global escape, which strips the leading slash, so the
     // stored key is the un-prefixed name.
-    values.set('ConvB/Conveyor.Occupied', true);
+    values.set('ConvB/Flow.Occupied', true);
     expect(self.freeOutputs().length).toBe(0);
     expect(self.downstreamOccupied(self.outputs()[0])).toBe(true);
   });

@@ -111,30 +111,30 @@ describe('Turntable — multiple instances are independent', () => {
 
     const s = scene.signalStore;
     // Both tables enabled; downstream of t1 is free.
-    s.set('Turntable/Conveyor.Run', true);
-    s.set('Turntable_2/Conveyor.Run', true);
-    s.set('Conv_t1/Conveyor.Occupied', false);
+    s.set('Turntable/Flow.Run', true);
+    s.set('Turntable_2/Flow.Run', true);
+    s.set('Conv_t1/Flow.Occupied', false);
 
     // A good waits ONLY at turntable #1's infeed.
-    s.set('Infeed_t1/Conveyor.Occupied', true);
+    s.set('Infeed_t1/Flow.Occupied', true);
 
     iterateFixedUpdate(t1.handle, DT);                 // t1: refresh → tryReceive → ALIGNING_IN
     iterateFixedUpdate(t2.handle, DT);                 // t2: should stay idle
 
     // t1 reacts.
     expect(t1.rotary.running).toBe(true);
-    expect(s.get('Turntable/Conveyor.Occupied')).toBe(true);
+    expect(s.get('Turntable/Flow.Occupied')).toBe(true);
 
     // t2 is untouched — its own drive never moved, its signals stayed idle.
     expect(t2.rotary.running).toBe(false);
-    expect(s.get('Turntable_2/Conveyor.Occupied')).not.toBe(true);
-    expect(s.get('Turntable_2/Conveyor.Running')).not.toBe(true);
+    expect(s.get('Turntable_2/Flow.Occupied')).not.toBe(true);
+    expect(s.get('Turntable_2/Flow.Running')).not.toBe(true);
 
     // Complete t1's receive and verify ONLY t1's input port opens (scoped by id).
     t1.rotary.isAtTarget = true;
     iterateFixedUpdate(t1.handle, DT);                 // → RECEIVING, opens t1-in
-    expect(s.get('Turntable/Conveyor.Occupied@t1-in')).toBe(false);   // t1's port open
-    expect(s.get('Turntable_2/Conveyor.Occupied@t2-in')).toBe(true);  // t2's port still blocked
+    expect(s.get('Turntable/Flow.Occupied@t1-in')).toBe(false);   // t1's port open
+    expect(s.get('Turntable_2/Flow.Occupied@t2-in')).toBe(true);  // t2's port still blocked
     expect(t2.rotary.running).toBe(false);                            // t2 still idle
   });
 });

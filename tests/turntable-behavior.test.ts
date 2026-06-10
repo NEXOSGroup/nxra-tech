@@ -153,16 +153,16 @@ function setup(opts?: { inputs?: number; downstreams?: number; missingBelt?: boo
   Turntable.bind(ctx);
 
   // Convenience helpers for the common signal names.
-  const setInputWaiting = (i: number, v: boolean) => signalStore.set(`Infeed${i}/Conveyor.Occupied`, v);
+  const setInputWaiting = (i: number, v: boolean) => signalStore.set(`Infeed${i}/Flow.Occupied`, v);
   // Per-port interlock is keyed by the snap id (e.g. 'tt-in0', 'tt-out1').
-  const portOcc = (portId: string) => signalStore.get(`Conveyor.Occupied@${portId}`);
+  const portOcc = (portId: string) => signalStore.get(`Flow.Occupied@${portId}`);
 
   return { signalStore, rotary, belt, handle, root, accum, infeedRoots, downstreamRoots, setInputWaiting, portOcc };
 }
 
 /** Drive the turntable from idle through ALIGNING_IN → RECEIVING for input `i`. */
 function receiveFromInput(s: ReturnType<typeof setup>, i = 0): void {
-  s.signalStore.set('Conveyor.Run', true);
+  s.signalStore.set('Flow.Run', true);
   s.setInputWaiting(i, true);                       // a good waits at the infeed
   iterateFixedUpdate(s.handle, DT);                 // refresh → tryReceive → ALIGNING_IN
   s.rotary.isAtTarget = true;                       // rotation to the input completes
@@ -208,23 +208,23 @@ describe('Turntable behavior — multi-input cycle', () => {
 
   it('IDLE: belt stopped while empty, even with Run=true (nothing feeds until a port opens)', () => {
     const { signalStore, belt, handle } = setup({ downstreams: 1 });
-    signalStore.set('Conveyor.Run', true);
+    signalStore.set('Flow.Run', true);
     iterateFixedUpdate(handle, DT);
     expect(belt.jogForward).toBe(false);
-    expect(signalStore.get('Conveyor.Occupied')).not.toBe(true);
-    expect(signalStore.get('Conveyor.Running')).not.toBe(true);
+    expect(signalStore.get('Flow.Occupied')).not.toBe(true);
+    expect(signalStore.get('Flow.Running')).not.toBe(true);
   });
 
   it('a waiting input → ALIGNING_IN: rotation commanded, belt stopped, busy', () => {
     const { signalStore, rotary, belt, handle, setInputWaiting } = setup({ downstreams: 1 });
-    signalStore.set('Conveyor.Run', true);
+    signalStore.set('Flow.Run', true);
     setInputWaiting(0, true);
     iterateFixedUpdate(handle, DT);                 // refresh → tryReceive
     expect(rotary.running).toBe(true);              // rotation to the input commanded
     expect(rotary.isAtTarget).toBe(false);
     expect(belt.jogForward).toBe(false);            // belt stopped while rotating
-    expect(signalStore.get('Conveyor.Occupied')).toBe(true);
-    expect(signalStore.get('Conveyor.Running')).toBe(true);
+    expect(signalStore.get('Flow.Occupied')).toBe(true);
+    expect(signalStore.get('Flow.Running')).toBe(true);
   });
 
   it('aligned → RECEIVING: ONLY the selected input port opens, belt runs', () => {
@@ -239,53 +239,53 @@ describe('Turntable behavior — multi-input cycle', () => {
   it('sensor rising during RECEIVING → re-block all inputs, dispatch to a free output', () => {
     const s = setup({ inputs: 1, downstreams: 1 });
     receiveFromInput(s, 0);
-    s.signalStore.set('Conv0/Conveyor.Occupied', false);        // output free
+    s.signalStore.set('Conv0/Flow.Occupied', false);        // output free
     s.signalStore.set('Sensor', true);                          // good captured (handler runs synchronously)
     expect(s.portOcc('tt-in0')).toBe(true);                    // input re-blocked
     expect(s.rotary.running).toBe(true);                        // dispatch rotation commanded
     expect(s.belt.jogForward).toBe(false);                      // belt stopped for the dispatch rotation
-    expect(s.signalStore.get('Conveyor.PartCount')).toBe(1);
+    expect(s.signalStore.get('Flow.PartCount')).toBe(1);
   });
 
   it('dispatch rotation reaches target → DISCHARGING (belt on), then dwell → IDLE', () => {
     const s = setup({ inputs: 1, downstreams: 1 });
     receiveFromInput(s, 0);
-    s.signalStore.set('Conv0/Conveyor.Occupied', false);
+    s.signalStore.set('Conv0/Flow.Occupied', false);
     s.signalStore.set('Sensor', true);                          // → ROTATING_OUT
     s.rotary.isAtTarget = true;
     iterateFixedUpdate(s.handle, DT);                           // → DISCHARGING
     expect(s.belt.jogForward).toBe(true);
-    expect(s.signalStore.get('Conveyor.Running')).toBe(true);
+    expect(s.signalStore.get('Flow.Running')).toBe(true);
 
     s.signalStore.set('Sensor', false);                         // → DISCHARGE_CLEARING
     iterateFixedUpdate(s.handle, DT);
     expect(s.belt.jogForward).toBe(true);                       // belt keeps running through the dwell
     pump(s.handle, 0.66);                                       // dwell elapses → finishCycle → IDLE
     expect(s.belt.jogForward).toBe(false);
-    expect(s.signalStore.get('Conveyor.Occupied')).toBe(false);
-    expect(s.signalStore.get('Conveyor.Running')).toBe(false);
+    expect(s.signalStore.get('Flow.Occupied')).toBe(false);
+    expect(s.signalStore.get('Flow.Running')).toBe(false);
   });
 
   it('HOLDING: good captured but every output blocked → belt off; releases when one frees', () => {
     const s = setup({ inputs: 1, downstreams: 2 });
     receiveFromInput(s, 0);
-    s.signalStore.set('Conv0/Conveyor.Occupied', true);
-    s.signalStore.set('Conv1/Conveyor.Occupied', true);
+    s.signalStore.set('Conv0/Flow.Occupied', true);
+    s.signalStore.set('Conv1/Flow.Occupied', true);
     const alignTarget = s.rotary.targetPosition;                // angle from aligning to the input
     s.signalStore.set('Sensor', true);                          // captured, but no free output
     expect(s.rotary.targetPosition).toBe(alignTarget);          // no dispatch rotation commanded
     expect(s.belt.jogForward).toBe(false);                      // belt stopped — good waits on the platform
-    expect(s.signalStore.get('Conveyor.Occupied')).toBe(true);  // still busy
+    expect(s.signalStore.get('Flow.Occupied')).toBe(true);  // still busy
 
-    s.signalStore.set('Conv1/Conveyor.Occupied', false);        // an output frees
+    s.signalStore.set('Conv1/Flow.Occupied', false);        // an output frees
     pump(s.handle, 0.6);                                        // refresh tick retries dispatch
     expect(s.rotary.targetPosition).not.toBe(alignTarget);      // dispatch rotation now commanded
   });
 
   it('multiple inputs: a second waiting input is served on the next cycle', () => {
     const s = setup({ inputs: 2, downstreams: 1 });
-    s.signalStore.set('Conv0/Conveyor.Occupied', false);
-    s.signalStore.set('Conveyor.Run', true);
+    s.signalStore.set('Conv0/Flow.Occupied', false);
+    s.signalStore.set('Flow.Run', true);
     s.setInputWaiting(0, true);
     s.setInputWaiting(1, true);
     iterateFixedUpdate(s.handle, DT);                           // selects input0 → ALIGNING_IN
@@ -299,7 +299,7 @@ describe('Turntable behavior — multi-input cycle', () => {
     s.rotary.isAtTarget = true; iterateFixedUpdate(s.handle, DT); // → DISCHARGING
     s.signalStore.set('Sensor', false);                         // → DISCHARGE_CLEARING
     pump(s.handle, 0.66);                                       // → IDLE
-    expect(s.signalStore.get('Conveyor.Occupied')).toBe(false);
+    expect(s.signalStore.get('Flow.Occupied')).toBe(false);
 
     // Next idle scan picks input1.
     pump(s.handle, 0.6);                                        // refresh → tryReceive selects input1
@@ -314,8 +314,8 @@ describe('Turntable behavior — fair input selection', () => {
 
   /** Drive idle → ALIGNING_IN → RECEIVING with both inputs already waiting. */
   function receiveWithBothWaiting(s: ReturnType<typeof setup>): void {
-    s.signalStore.set('Conv0/Conveyor.Occupied', false);
-    s.signalStore.set('Conveyor.Run', true);
+    s.signalStore.set('Conv0/Flow.Occupied', false);
+    s.signalStore.set('Flow.Run', true);
     s.setInputWaiting(0, true);
     s.setInputWaiting(1, true);
     iterateFixedUpdate(s.handle, DT);                          // tryReceive → ALIGNING_IN
@@ -353,9 +353,9 @@ describe('Turntable behavior — part-deletion recovery', () => {
   it('frees the turntable when a part held on the platform is deleted (no discharge)', () => {
     const s = setup({ inputs: 1, downstreams: 1 });
     receiveFromInput(s, 0);                                     // → RECEIVING
-    s.signalStore.set('Conv0/Conveyor.Occupied', true);        // output blocked
+    s.signalStore.set('Conv0/Flow.Occupied', true);        // output blocked
     s.signalStore.set('Sensor', true);                         // captured → no free output → HOLDING
-    expect(s.signalStore.get('Conveyor.Occupied')).toBe(true); // latched busy
+    expect(s.signalStore.get('Flow.Occupied')).toBe(true); // latched busy
 
     // Part deleted: its feeder good is gone too, the sensor clears, platform empties.
     // (No transportManager in the test host → surface occupancy is sensor-only.)
@@ -364,26 +364,26 @@ describe('Turntable behavior — part-deletion recovery', () => {
 
     // Within the grace it must NOT reset prematurely — still busy.
     pump(s.handle, 0.5);
-    expect(s.signalStore.get('Conveyor.Occupied')).toBe(true);
+    expect(s.signalStore.get('Flow.Occupied')).toBe(true);
 
     // After the empty-grace it frees back to idle, exactly like a conveyor would.
     pump(s.handle, 0.5);
-    expect(s.signalStore.get('Conveyor.Occupied')).toBe(false);
-    expect(s.signalStore.get('Conveyor.Running')).toBe(false);
+    expect(s.signalStore.get('Flow.Occupied')).toBe(false);
+    expect(s.signalStore.get('Flow.Running')).toBe(false);
     expect(s.portOcc('tt-in0')).toBe(true);                    // inputs re-blocked
   });
 
   it('does NOT abort a normal discharge — the dwell re-idles first', () => {
     const s = setup({ inputs: 1, downstreams: 1 });
     receiveFromInput(s, 0);
-    s.signalStore.set('Conv0/Conveyor.Occupied', false);       // output free
+    s.signalStore.set('Conv0/Flow.Occupied', false);       // output free
     s.signalStore.set('Sensor', true);                         // captured → ROTATING_OUT
     s.rotary.isAtTarget = true; iterateFixedUpdate(s.handle, DT); // → DISCHARGING
     s.setInputWaiting(0, false);
     s.signalStore.set('Sensor', false);                        // good rolled off → DISCHARGE_CLEARING
     pump(s.handle, 0.66);                                       // dwell elapses → finishCycle → IDLE
-    expect(s.signalStore.get('Conveyor.Occupied')).toBe(false);
-    expect(s.signalStore.get('Conveyor.PartCount')).toBe(1);   // it really discharged, not aborted
+    expect(s.signalStore.get('Flow.Occupied')).toBe(false);
+    expect(s.signalStore.get('Flow.PartCount')).toBe(1);   // it really discharged, not aborted
   });
 });
 
@@ -393,24 +393,24 @@ describe('Turntable behavior — back-pressure across the cycle', () => {
 
   it('Occupied is true from ALIGNING_IN through DISCHARGE_CLEARING — only clears at IDLE', () => {
     const s = setup({ inputs: 1, downstreams: 1 });
-    s.signalStore.set('Conveyor.Run', true);
+    s.signalStore.set('Flow.Run', true);
     s.setInputWaiting(0, true);
 
     iterateFixedUpdate(s.handle, DT);                           // ALIGNING_IN
-    expect(s.signalStore.get('Conveyor.Occupied')).toBe(true);
+    expect(s.signalStore.get('Flow.Occupied')).toBe(true);
     s.rotary.isAtTarget = true; iterateFixedUpdate(s.handle, DT); // RECEIVING
-    expect(s.signalStore.get('Conveyor.Occupied')).toBe(true);
+    expect(s.signalStore.get('Flow.Occupied')).toBe(true);
 
-    s.signalStore.set('Conv0/Conveyor.Occupied', false);
+    s.signalStore.set('Conv0/Flow.Occupied', false);
     s.signalStore.set('Sensor', true);                          // ROTATING_OUT
-    expect(s.signalStore.get('Conveyor.Occupied')).toBe(true);
+    expect(s.signalStore.get('Flow.Occupied')).toBe(true);
     s.rotary.isAtTarget = true; iterateFixedUpdate(s.handle, DT); // DISCHARGING
-    expect(s.signalStore.get('Conveyor.Occupied')).toBe(true);
+    expect(s.signalStore.get('Flow.Occupied')).toBe(true);
 
     s.signalStore.set('Sensor', false); iterateFixedUpdate(s.handle, DT); // DISCHARGE_CLEARING
-    expect(s.signalStore.get('Conveyor.Occupied')).toBe(true);
+    expect(s.signalStore.get('Flow.Occupied')).toBe(true);
     pump(s.handle, 0.66);                                       // IDLE
-    expect(s.signalStore.get('Conveyor.Occupied')).toBe(false);
+    expect(s.signalStore.get('Flow.Occupied')).toBe(false);
   });
 });
 
@@ -420,10 +420,10 @@ describe('Turntable behavior — works without a belt drive', () => {
 
   it('binds without a belt and still rotates to align with a waiting input', () => {
     const { signalStore, rotary, handle, setInputWaiting } = setup({ downstreams: 1, missingBelt: true });
-    signalStore.set('Conveyor.Run', true);
+    signalStore.set('Flow.Run', true);
     setInputWaiting(0, true);
     iterateFixedUpdate(handle, DT);
     expect(rotary.running).toBe(true);                          // rotation still commanded
-    expect(signalStore.get('Conveyor.Occupied')).toBe(true);
+    expect(signalStore.get('Flow.Occupied')).toBe(true);
   });
 });

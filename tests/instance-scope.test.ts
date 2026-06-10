@@ -31,10 +31,10 @@ describe('instanceScope', () => {
 
 describe('scopeSignalName', () => {
   it('prefixes with the scope', () => {
-    expect(scopeSignalName('Inst', 'Conveyor.Run')).toBe('Inst/Conveyor.Run');
+    expect(scopeSignalName('Inst', 'Flow.Run')).toBe('Inst/Flow.Run');
   });
   it('passes through unchanged when scope is empty', () => {
-    expect(scopeSignalName('', 'Conveyor.Run')).toBe('Conveyor.Run');
+    expect(scopeSignalName('', 'Flow.Run')).toBe('Flow.Run');
   });
   it('treats a leading "/" as a global signal (strips it, never prefixes)', () => {
     expect(scopeSignalName('Inst', '/Machine.EStop')).toBe('Machine.EStop');

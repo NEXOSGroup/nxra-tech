@@ -27,7 +27,7 @@
  * auto-disposed on `model-cleared` (or `disposeObject` on removal).
  */
 
-import type { Object3D } from 'three';
+import { Object3D } from 'three';
 import {
   createBindContext,
   applyKinematicsSpec,
@@ -38,9 +38,14 @@ import {
   type KinematicsSpec,
   type KinematizeReport,
 } from './behavior-runtime';
+import { instanceScope } from './engine/rv-instance-scope';
 // Glob matcher lives in its own dependency-free module (cycle break — see the
 // re-export note below). Imported here for this module's own internal use.
 import { matchesAny, extractGlbName } from './glob-match';
+
+/** Name of the synthetic, render-free container that holds materialised
+ *  behavior-signal nodes under a bind root — mirrors the GLB `Signals` group. */
+const SIGNALS_CONTAINER_NAME = 'Signals';
 
 // ─── Public types ───────────────────────────────────────────────────────
 
@@ -78,6 +83,9 @@ interface ActiveBind {
   handle: BindContextHandle;
   /** Set when bound to a placed LayoutObject subtree (its placement id) — null for whole-scene binds. */
   objectKey?: string;
+  /** Synthetic `Signals` container this bind materialised (if any) — its
+   *  NodeRegistry entries are unregistered on dispose to avoid a registry leak. */
+  signalsContainer?: Object3D;
 }
 
 /**
@@ -94,6 +102,8 @@ export class BehaviorManager {
   private host: BindContextHost | null = null;
   /** Placement ids already dispatched, to keep per-object dispatch idempotent. */
   private dispatchedObjects = new Set<string>();
+  /** Coalesces the signal-index rebuild + hierarchy refresh to once per batch. */
+  private hierarchyRefreshScheduled = false;
 
   /**
    * Register a behavior with an explicit id (filename without extension,
@@ -188,8 +198,8 @@ export class BehaviorManager {
         if (report.warnings.length > 0) {
           console.warn(`[behaviors] '${id}' for '${matchName}': ${report.warnings.length} warning(s)`);
         }
-        this.registerBehaviorSignals(accum);
-        this.active.push({ behaviorId: id, handle, objectKey });
+        const signalsContainer = this.registerBehaviorSignals(accum, root);
+        this.active.push({ behaviorId: id, handle, objectKey, signalsContainer: signalsContainer ?? undefined });
       } catch (e) {
         console.error(`[behaviors] '${id}' bind error for '${matchName}':`, e);
       }
@@ -201,32 +211,116 @@ export class BehaviorManager {
   }
 
   /**
-   * Register each behavior-declared signal's initialValue in the SignalStore.
+   * Register each behavior-declared signal in the SignalStore AND — when the host
+   * registry exposes a write surface — materialise it as a synthetic hierarchy
+   * node so a `self.signal()` signal is indistinguishable from an rv_extras one
+   * (Plan 197 F4): same OutBool/InBool badge, same live value, same node path.
    *
    * Why this lives here: the load-time signal-construction pass reads behavior
    * signals from `userData.realvirtual.__BehaviorSignals`, but behaviors write
-   * that key DURING bind (after construction has already happened). So without
-   * this post-bind pass, a behavior's `initialValue: true` never reaches the
-   * store, `signals.get(...)` returns `undefined`, and the first onFixedUpdate
-   * sees a stale state. This is non-destructive: an already-present value
-   * (PLC, saved scene, prior bind) is preserved.
+   * those DURING bind (after construction has already happened). So without this
+   * post-bind pass, a behavior's `initialValue` never reaches the store.
+   *
+   * Per signal (when materialising): create a render-free `Object3D` under a
+   * `Signals` container child of `root`, stamp `userData.realvirtual[sigType] =
+   * { Name, Status:{ Value } }` (the shape the hierarchy scan + badge read), and
+   * register node + store + registry under the node path — mirroring
+   * `registerSignal()` in rv-signal-construction.ts. `store.register` preserves
+   * an already-present value (PLC / saved scene / prior bind), so this is
+   * non-destructive; only the path→name mapping changes (`path !== name`).
+   *
+   * Returns the synthetic `Signals` container (or null) so the caller can
+   * unregister its NodeRegistry entries on dispose (leak fix).
    */
-  private registerBehaviorSignals(accum: KinematicsSpec): void {
+  private registerBehaviorSignals(accum: KinematicsSpec, root: Object3D): Object3D | null {
     const store = this.host?.signalStore;
-    if (!store) { console.warn(`[behaviors] registerBehaviorSignals: no signalStore on host — ${accum.signals?.length ?? 0} behavior signal(s) DROPPED`); return; }
-    if (!accum.signals || accum.signals.length === 0) return;
-    let registered = 0; let skippedExisting = 0; let skippedNoInit = 0;
+    if (!store) { console.warn(`[behaviors] registerBehaviorSignals: no signalStore on host — ${accum.signals?.length ?? 0} behavior signal(s) DROPPED`); return null; }
+    if (!accum.signals || accum.signals.length === 0) return null;
+
+    // Materialise hierarchy nodes only when the registry exposes the write
+    // surface. Test / minimal hosts (registry: null) skip it gracefully and fall
+    // back to the store-only seed.
+    const reg = this.host?.registry;
+    const registerNode = reg?.registerNode?.bind(reg);
+    const registerComp = reg?.register?.bind(reg);
+    const materialise = !!(registerNode && registerComp);
+
+    // `sig.name` is already instance-scoped by ctx.signal (`${scope}/${name}`).
+    const scope = instanceScope(root);
+
+    // One render-free `Signals` container per root (idempotent), created lazily
+    // on the first materialised signal — mirrors the GLB `Signals` group.
+    let container: Object3D | null = null;
+    let registered = 0; let materialised = 0;
+
     for (const sig of accum.signals) {
-      if (sig.initialValue === undefined) { skippedNoInit++; continue; }
-      if (store.get(sig.name) !== undefined) { skippedExisting++; continue; }
-      if (store.register) {
-        store.register(sig.name, sig.name, sig.initialValue, sig.type);
+      if (registerNode && registerComp) {
+        // Strip the scope back off for the readable node name + the path's leaf.
+        const local = scope && sig.name.startsWith(`${scope}/`) ? sig.name.slice(scope.length + 1) : sig.name;
+        const seed = store.get(sig.name) ?? sig.initialValue ?? (sig.type.includes('Bool') ? false : 0);
+        container ??= this.getOrCreateSignalsContainer(root);
+        const path = scope ? `${scope}/${SIGNALS_CONTAINER_NAME}/${local}` : `${SIGNALS_CONTAINER_NAME}/${local}`;
+        // Idempotent per container — a re-bind must not append a duplicate node.
+        let node = container.children.find((n) => n.name === local) ?? null;
+        if (!node) {
+          node = new Object3D();
+          node.name = local;
+          container.add(node);
+          materialised++;
+        }
+        // userData.realvirtual[sigType] = { Name, Status:{ Value } } — the exact
+        // shape the hierarchy scan + signal badge read (parity with rv_extras).
+        const ud = node.userData as { realvirtual?: Record<string, unknown> };
+        (ud.realvirtual ??= {})[sig.type] = { Name: sig.name, Status: { Value: seed } };
+        // Node + store + registry under the node path (mirrors registerSignal).
+        registerNode(path, node);
+        store.register?.(sig.name, path, seed, sig.type);
+        registerComp(sig.type, path, { address: path, signalName: sig.name });
+        registered++;
       } else {
-        store.set(sig.name, sig.initialValue);
+        // No registry write surface — keep the store-only seed (preserve existing).
+        if (sig.initialValue === undefined) continue;
+        if (store.get(sig.name) !== undefined) continue;
+        if (store.register) store.register(sig.name, sig.name, sig.initialValue, sig.type);
+        else store.set(sig.name, sig.initialValue);
+        registered++;
       }
-      registered++;
     }
-    console.info(`[behaviors] registerBehaviorSignals: ${registered} registered, ${skippedExisting} pre-existing, ${skippedNoInit} no-init (of ${accum.signals.length} total)`);
+
+    // Rebuild the suffix index + refresh the hierarchy ONCE per synchronous batch
+    // (a model-load dispatches every placed object in one turn — calling these
+    // per bind would run a full scene.traverse N times).
+    if (materialise) this.scheduleHierarchyRefresh();
+
+    console.info(`[behaviors] registerBehaviorSignals: ${registered} registered (${materialised} hierarchy node(s)) of ${accum.signals.length} total`);
+    return container;
+  }
+
+  /** Find-or-create the render-free `Signals` container under `root` (mirrors
+   *  the GLB `Signals` group; marked with `_rvSignals` so it stays unique). */
+  private getOrCreateSignalsContainer(root: Object3D): Object3D {
+    const existing = root.children.find(
+      (c) => c.name === SIGNALS_CONTAINER_NAME && (c.userData as Record<string, unknown>)?._rvSignals === true,
+    );
+    if (existing) return existing;
+    const container = new Object3D();
+    container.name = SIGNALS_CONTAINER_NAME;
+    (container.userData as Record<string, unknown>)._rvSignals = true;
+    root.add(container);
+    return container;
+  }
+
+  /** Coalesce the signal suffix-index rebuild + hierarchy refresh to a single
+   *  microtask so a model-load that binds N placed objects refreshes once, not N
+   *  times (each refresh is a full scene.traverse). Both calls null-guarded. */
+  private scheduleHierarchyRefresh(): void {
+    if (this.hierarchyRefreshScheduled) return;
+    this.hierarchyRefreshScheduled = true;
+    queueMicrotask(() => {
+      this.hierarchyRefreshScheduled = false;
+      this.host?.signalStore?.buildIndex?.();
+      (this.host?.getPlugin?.('rv-extras-editor') as { refreshEditableNodes?(): void } | undefined)?.refreshEditableNodes?.();
+    });
   }
 
   /** True if `node` is the ROOT of a placed LayoutObject (carries the marker). */
@@ -275,12 +369,20 @@ export class BehaviorManager {
     });
   }
 
+  /** Dispose one bind: tear down its hooks AND unregister the synthetic signal
+   *  nodes from the NodeRegistry (the Object3D leaves with `root`; the registry
+   *  entries would otherwise leak). */
+  private disposeBind(a: ActiveBind): void {
+    try { a.handle.dispose(); } catch { /* ignore */ }
+    if (a.signalsContainer) this.host?.registry?.unregisterSubtree?.(a.signalsContainer);
+  }
+
   /** Dispose the behavior contexts bound to a placed object (call on removal). */
   disposeObject(root: Object3D): void {
     const key = this.layoutKey(root);
     const remaining: ActiveBind[] = [];
     for (const a of this.active) {
-      if (a.objectKey === key) { try { a.handle.dispose(); } catch { /* ignore */ } }
+      if (a.objectKey === key) this.disposeBind(a);
       else remaining.push(a);
     }
     this.active = remaining;
@@ -308,9 +410,7 @@ export class BehaviorManager {
 
   /** For tests: dispose all active binds. */
   disposeAll(): void {
-    for (const a of this.active) {
-      try { a.handle.dispose(); } catch { /* ignore */ }
-    }
+    for (const a of this.active) this.disposeBind(a);
     this.active.length = 0;
     this.dispatchedObjects.clear();
   }

@@ -146,27 +146,27 @@ describe('Conveyor behavior — bind is robust when the drive is missing at bind
     const { ctx, handle } = createBindContext(root, host, {});
     Conveyor.bind(ctx);
 
-    signalStore.set('ConvNoDrive/Conveyor.Run', true);
+    signalStore.set('ConvNoDrive/Flow.Run', true);
     iterateFixedUpdate(handle, DT);
     // No drive to toggle, but the Running signal should still publish (downstream is null → blocked, but empty).
-    expect(signalStore.get('ConvNoDrive/Conveyor.Running')).toBe(true);
+    expect(signalStore.get('ConvNoDrive/Flow.Running')).toBe(true);
 
     // Part hits the sensor → counted; with no downstream the belt holds (not running).
-    // (Conveyor.Occupied is surface-based and published from the transport manager,
+    // (Flow.Occupied is surface-based and published from the transport manager,
     // which this minimal host lacks — exercised in surface-occupancy.test.ts instead.)
     signalStore.set('ConvNoDrive/Sensor', true);
     iterateFixedUpdate(handle, DT);
-    expect(signalStore.get('ConvNoDrive/Conveyor.PartCount')).toBe(1);
+    expect(signalStore.get('ConvNoDrive/Flow.PartCount')).toBe(1);
     // No downstream → blocked → not running.
-    expect(signalStore.get('ConvNoDrive/Conveyor.Running')).toBe(false);
+    expect(signalStore.get('ConvNoDrive/Flow.Running')).toBe(false);
   });
 });
 
 describe('Conveyor behavior — unknown downstream is permissive', () => {
   // Scenario: the successor's behavior didn't bind (e.g., HMR artifact, wrong
   // model name, or it's a non-Conveyor neighbour that never publishes
-  // Conveyor.Occupied). The upstream snap-graph still resolves the successor's
-  // root, but the read of `<succ>/Conveyor.Occupied` returns undefined. The
+  // Flow.Occupied). The upstream snap-graph still resolves the successor's
+  // root, but the read of `<succ>/Flow.Occupied` returns undefined. The
   // safe default is to RELEASE — pessimistic locking would stall the whole
   // line whenever a single neighbour misbehaves. A no-successor end-of-line is
   // still treated as blocked (see "HOLDS at sensor" above).
@@ -213,7 +213,7 @@ describe('Conveyor behavior — unknown downstream is permissive', () => {
 
     const a = createBindContext(A_root, host, {});
     Conveyor.bind(a.ctx);
-    signalStore.set('ConvA/Conveyor.Run', true);
+    signalStore.set('ConvA/Flow.Run', true);
 
     // Part on A; B has no published Occupied signal (its behavior never bound).
     signalStore.set('ConvA/Sensor', true);
@@ -255,29 +255,29 @@ describe('findDownstreamRoot — snap graph', () => {
 describe('Conveyor behavior — single zone (no downstream)', () => {
   it('runs while Run is true (when empty) and stops when cleared', () => {
     const { signalStore, drive, handle } = setup();
-    signalStore.set('Conveyor.Run', true);
+    signalStore.set('Flow.Run', true);
     iterateFixedUpdate(handle, DT);
     expect(drive.jogForward).toBe(true);
-    expect(signalStore.get('Conveyor.Running')).toBe(true);
+    expect(signalStore.get('Flow.Running')).toBe(true);
 
-    signalStore.set('Conveyor.Run', false);
+    signalStore.set('Flow.Run', false);
     iterateFixedUpdate(handle, DT);
     expect(drive.jogForward).toBe(false);
-    expect(signalStore.get('Conveyor.Running')).toBe(false);
+    expect(signalStore.get('Flow.Running')).toBe(false);
   });
 
   it('counts parts and HOLDS at the sensor when there is no successor', () => {
     const { signalStore, drive, handle } = setup();
-    signalStore.set('Conveyor.Run', true);
+    signalStore.set('Flow.Run', true);
     iterateFixedUpdate(handle, DT);
     expect(drive.jogForward).toBe(true);   // empty → runs (parts can transit through)
 
     // Part at the sensor → counted. With NO downstream neighbour, the missing
     // successor is treated as blocked, so the belt holds its part at the sensor
     // rather than discharging into nothing (add a Sink to declare clear).
-    // (Conveyor.Occupied is now surface-based — see surface-occupancy.test.ts.)
+    // (Flow.Occupied is now surface-based — see surface-occupancy.test.ts.)
     signalStore.set('Sensor-1', true);
-    expect(signalStore.get('Conveyor.PartCount')).toBe(1);
+    expect(signalStore.get('Flow.PartCount')).toBe(1);
     iterateFixedUpdate(handle, DT);
     expect(drive.jogForward).toBe(false);
 
@@ -285,9 +285,9 @@ describe('Conveyor behavior — single zone (no downstream)', () => {
     signalStore.set('Sensor-1', false);
     iterateFixedUpdate(handle, DT);
     expect(drive.jogForward).toBe(true);
-    expect(signalStore.get('Conveyor.PartCount')).toBe(1);   // no double count
+    expect(signalStore.get('Flow.PartCount')).toBe(1);   // no double count
     signalStore.set('Sensor-1', true);
-    expect(signalStore.get('Conveyor.PartCount')).toBe(2);   // rising edge only
+    expect(signalStore.get('Flow.PartCount')).toBe(2);   // rising edge only
   });
 });
 
@@ -344,10 +344,10 @@ describe('Conveyor behavior — per-port downstream interlock (turntable input)'
   it('uses the per-port signal (blocked) even when the root signal says free', () => {
     const signalStore = makeStore();
     const { A_drive, handle } = bindConvToTurntable(signalStore);
-    signalStore.set('ConvA/Conveyor.Run', true);
+    signalStore.set('ConvA/Flow.Run', true);
     // Turntable: root free, but THIS input port (by snap id) is blocked.
-    signalStore.set('TT/Conveyor.Occupied', false);
-    signalStore.set('TT/Conveyor.Occupied@tt-port', true);
+    signalStore.set('TT/Flow.Occupied', false);
+    signalStore.set('TT/Flow.Occupied@tt-port', true);
     signalStore.set('ConvA/Sensor', true);          // part held at A
     iterateFixedUpdate(handle, DT);                 // first tick resolves the downstream signal
     expect(A_drive.jogForward).toBe(false);         // per-port block holds the part
@@ -356,8 +356,8 @@ describe('Conveyor behavior — per-port downstream interlock (turntable input)'
   it('falls back to the root signal when no per-port signal is published', () => {
     const signalStore = makeStore();
     const { A_drive, handle } = bindConvToTurntable(signalStore);
-    signalStore.set('ConvA/Conveyor.Run', true);
-    signalStore.set('TT/Conveyor.Occupied', true);  // only the root signal exists (no per-port)
+    signalStore.set('ConvA/Flow.Run', true);
+    signalStore.set('TT/Flow.Occupied', true);  // only the root signal exists (no per-port)
     signalStore.set('ConvA/Sensor', true);
     iterateFixedUpdate(handle, DT);
     expect(A_drive.jogForward).toBe(false);         // fell back to root → blocked
@@ -433,8 +433,8 @@ describe('Conveyor behavior — two-conveyor line (ZPA back-pressure)', () => {
     Conveyor.bind(b.ctx);
 
     // Enable both lines.
-    signalStore.set('ConvA/Conveyor.Run', true);
-    signalStore.set('ConvB/Conveyor.Run', true);
+    signalStore.set('ConvA/Flow.Run', true);
+    signalStore.set('ConvB/Flow.Run', true);
 
     const tick = () => { iterateFixedUpdate(a.handle, DT); iterateFixedUpdate(b.handle, DT); };
 
@@ -445,7 +445,7 @@ describe('Conveyor behavior — two-conveyor line (ZPA back-pressure)', () => {
 
     // A good on B's belt (B occupied, surface-based) that has reached B's sensor,
     // AND a part held at A's sensor.
-    placeGoodOn(B.drive.node);               // B surface occupied → publishes ConvB/Conveyor.Occupied
+    placeGoodOn(B.drive.node);               // B surface occupied → publishes ConvB/Flow.Occupied
     signalStore.set('ConvB/Sensor', true);   // B's local discharge trigger (holds, counts)
     signalStore.set('ConvA/Sensor', true);   // A's part is at its discharge sensor
     tick(); tick();                          // B publishes occupancy, then A reads it (1-tick latency)

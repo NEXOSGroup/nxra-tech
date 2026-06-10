@@ -125,20 +125,20 @@ describe('self toolkit — surfaceOccupied', () => {
   });
 });
 
-// ─── declareConveyorSignals ─────────────────────────────────────────────────
+// ─── declareFlowSignals ─────────────────────────────────────────────────────
 
-describe('self toolkit — declareConveyorSignals', () => {
-  it('declares the 4 conveyor signals into accum (instance-scoped names)', () => {
+describe('self toolkit — declareFlowSignals', () => {
+  it('declares the 4 material-flow signals into accum (instance-scoped names)', () => {
     const root = new Object3D(); root.name = 'Conv';
     root.userData.realvirtual = { LayoutObject: { Label: 'Conv', CatalogId: 'c', Locked: false } };
     const { self, accum } = selfFor({ root });
-    self.declareConveyorSignals();
+    self.declareFlowSignals();
     // signal() forwards to rv.signal → pushes scoped {name,type,initialValue} onto accum.signals.
     const byName = new Map((accum.signals ?? []).map(s => [s.name, s]));
-    expect(byName.get('Conv/Conveyor.Run')).toMatchObject({ type: 'PLCInputBool', initialValue: true });
-    expect(byName.get('Conv/Conveyor.Occupied')).toMatchObject({ type: 'PLCOutputBool', initialValue: false });
-    expect(byName.get('Conv/Conveyor.Running')).toMatchObject({ type: 'PLCOutputBool', initialValue: false });
-    expect(byName.get('Conv/Conveyor.PartCount')).toMatchObject({ type: 'PLCOutputInt', initialValue: 0 });
+    expect(byName.get('Conv/Flow.Run')).toMatchObject({ type: 'PLCInputBool', initialValue: true });
+    expect(byName.get('Conv/Flow.Occupied')).toMatchObject({ type: 'PLCOutputBool', initialValue: false });
+    expect(byName.get('Conv/Flow.Running')).toMatchObject({ type: 'PLCOutputBool', initialValue: false });
+    expect(byName.get('Conv/Flow.PartCount')).toMatchObject({ type: 'PLCOutputInt', initialValue: 0 });
     expect(accum.signals?.length).toBe(4);
   });
 });

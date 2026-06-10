@@ -53,6 +53,13 @@ function lastSegment(path: string): string {
   return i >= 0 ? path.slice(i + 1) : path;
 }
 
+/** Strip a numeric instance suffix ("Drive_1" → "Drive") for schema lookup.
+ *  Kept local (mirrors baseComponentType in rv-inspector-helpers) so this
+ *  module stays free of hmi deps. */
+function baseComponentType(type: string): string {
+  return type.replace(/_\d+$/, '');
+}
+
 // ── Value formatting (THE single formatter) ──────────────────────────────────
 
 export interface FormatOptions {
@@ -236,8 +243,10 @@ export function applyLiveEdit(
   value: unknown,
 ): void {
   // Never push a readonly schema field into the live component — defense in
-  // depth, symmetric to the overlay write guard in rv-extras-editor.
-  if (getFieldDescriptor(componentType, fieldName)?.readonly) return;
+  // depth, symmetric to the overlay write guard in rv-extras-editor. Strip the
+  // instance suffix first (e.g. "Drive_1" → "Drive") so the schema lookup
+  // matches, exactly as updateOverlayField does.
+  if (getFieldDescriptor(baseComponentType(componentType), fieldName)?.readonly) return;
 
   const reg = viewer.registry;
   if (!reg) return;

@@ -10,7 +10,7 @@
  *
  *   - `des.onAccept(self, mu)` — the EVENT-DRIVEN path (private DESRunner, P5):
  *     accept and DESTROY the MU (mark it consumed), and publish
- *     `Conveyor.Occupied = false` so an upstream conveyor reads its successor as
+ *     `Flow.Occupied = false` so an upstream conveyor reads its successor as
  *     clear and discharges its part into the sink. Returns true (always accepts).
  *   - `continuous` — a thin, INERT pass-through marker.
  *
@@ -25,7 +25,7 @@
  * `inert:true` runs setup but registers NO fixedUpdate.
  *
  * One continuous EFFECT it DOES carry (an interop convenience, NOT MU
- * destruction): it publishes `Conveyor.Occupied = false` for its own root once at
+ * destruction): it publishes `Flow.Occupied = false` for its own root once at
  * setup so an upstream conveyor that snaps into a Sink reads a clear successor and
  * discharges its line — the documented "add a Sink at the end to let the line
  * discharge" path from Conveyor.ts. This is a single signal write, not a per-tick
@@ -38,9 +38,9 @@
 
 import { defineLibraryComponent, type RV } from './_shared/behavior-kit';
 
-// Sink publishes the conveyor interop signal `Conveyor.Occupied` (NOT `Sink.*`).
-// `signalNamespace: 'Conveyor'` scopes the signals block to that partner type,
-// so `self.sig.Occupied` reads/writes `Conveyor.Occupied`.
+// Sink publishes the type-neutral material-flow interop signal `Flow.Occupied`
+// (NOT `Sink.*`). `signalNamespace: 'Flow'` scopes the signals block to the
+// shared interop namespace, so `self.sig.Occupied` reads/writes `Flow.Occupied`.
 const SIGNALS = { Occupied: 'PLCOutputBool' } as const;
 type SinkSelf = RV.Self<Record<string, never>, typeof SIGNALS>;
 
@@ -59,9 +59,9 @@ const def = {
   models: ['*Sink*'],
   schema: {},
 
-  // The successor-clear interop signal — published under the `Conveyor` namespace
-  // (cross-type convention), auto-declared as `Conveyor.Occupied`.
-  signalNamespace: 'Conveyor' as const,
+  // The successor-clear interop signal — published under the type-neutral `Flow`
+  // namespace (NOT `Sink.*`), auto-declared as `Flow.Occupied`.
+  signalNamespace: 'Flow' as const,
   signals: SIGNALS,
 
   // ── Mode-agnostic init (continuous AND DES) — publishes the successor-clear

@@ -35,7 +35,8 @@ import type {
 import type { TransportLink } from '../../behaviors/_shared/transport-links';
 import {
   createDownstreamInterlock,
-  declareConveyorSignalsWith,
+  declareFlowSignalsWith,
+  FLOW_OCCUPIED,
 } from '../../behaviors/_shared/transport-links';
 import {
   classifyConnections,
@@ -240,8 +241,8 @@ export interface MaterialFlowSelf<
   attachDrive(node: Object3D | null): DriveHandle;
   /** True when a live MU is physically on a transport surface under `node`. */
   surfaceOccupied(node: Object3D): boolean;
-  /** Declare the public 4-signal conveyor contract (Run/Occupied/Running/PartCount). */
-  declareConveyorSignals(): void;
+  /** Declare the public 4-signal material-flow contract (Flow.Run/Occupied/Running/PartCount). */
+  declareFlowSignals(): void;
   /** Cached single-successor downstream interlock for the continuous hot path. */
   downstreamInterlock(): { occupied(): boolean };
   /** Disable this instance: warn + set local.disabled — the factory then gates setup/fixedUpdate. */
@@ -372,8 +373,9 @@ function portFromPairing(rv: RVBindContext, pr: OutputPairing): Port {
 /**
  * Build the TransportLink fields for a port. This mirrors `makeLink` in
  * transport-links.ts (kept private there) using the same per-port/root
- * `Conveyor.Occupied@<id>` signal convention so the addressing is identical
- * across Plan 196 and Plan 194.
+ * `Flow.Occupied@<id>` signal convention so the addressing is identical
+ * across Plan 196 and Plan 194. The signal name comes from the shared
+ * `FLOW_OCCUPIED` SSOT — no second literal lives here.
  */
 function makeLinkLike(
   rv: RVBindContext,
@@ -381,8 +383,7 @@ function makeLinkLike(
   partnerSnapId: string,
   partnerRoot: Object3D,
 ): TransportLink {
-  const OCCUPIED = 'Conveyor.Occupied';
-  const partnerRootSig = `/${partnerRoot.name}/${OCCUPIED}`;
+  const partnerRootSig = `/${partnerRoot.name}/${FLOW_OCCUPIED}`;
   return {
     mySnapId,
     partnerSnapId,
@@ -397,7 +398,7 @@ function makeLinkLike(
       return rv.signals.get<boolean>(partnerRootSig) === true;
     },
     setOccupied(v: boolean): void {
-      rv.signals.set(`${OCCUPIED}@${mySnapId}`, v);
+      rv.signals.set(`${FLOW_OCCUPIED}@${mySnapId}`, v);
     },
   };
 }
@@ -430,9 +431,10 @@ export interface SelfDef {
   /**
    * Signal-name namespace for the `signals` block / `self.sig` accessors
    * (Plan 197 §2.4b-A). Each signal is scoped `${signalNamespace ?? type}.${key}`.
-   * Defaults to `type`; cross-type components that publish another type's signals
-   * (Turntable/Sink → `Conveyor.*`) set it explicitly so `self.sig.<key>` and the
-   * factory auto-declare resolve to the partner type's signal names.
+   * Defaults to `type`; the material-flow interop components (Conveyor/Turntable/
+   * Sink) set `signalNamespace: 'Flow'` so `self.sig.<key>` and the factory
+   * auto-declare resolve to the shared `Flow.*` interop signal names instead of
+   * the per-component `<type>.*` names.
    */
   readonly signalNamespace?: string;
   /**
@@ -529,9 +531,9 @@ export function createSelf<
   // Build the typed `self.sig` accessor map from the optional `signals` shape.
   // Each accessor reads/writes `self.signals` under the scoped name
   // `${signalNamespace ?? type}.${key}` (the same convention the factory uses to
-  // auto-declare). The namespace defaults to `type`, but a cross-type component
-  // (Turntable/Sink → `Conveyor.*`) overrides it. Empty object when no `signals`
-  // block was passed.
+  // auto-declare). The namespace defaults to `type`, but the material-flow interop
+  // components (Conveyor/Turntable/Sink → `Flow.*`) override it. Empty object when
+  // no `signals` block was passed.
   const signalNamespace = def.signalNamespace ?? def.type;
   // The accessor map uses the explicit `opts.signals` shape when given, else the
   // definition's own `signals` block (so the DES path, which calls createSelf
@@ -611,8 +613,8 @@ export function createSelf<
     surfaceOccupied(node: Object3D): boolean {
       return isSurfaceOccupied(rv.viewer, node);
     },
-    declareConveyorSignals(): void {
-      declareConveyorSignalsWith((n, o) => rv.signal(n, o));
+    declareFlowSignals(): void {
+      declareFlowSignalsWith((n, o) => rv.signal(n, o));
     },
     downstreamInterlock(): { occupied(): boolean } {
       return getInterlock();

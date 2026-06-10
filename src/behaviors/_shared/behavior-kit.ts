@@ -11,7 +11,7 @@
  *
  * and gets the factory plus the `RV` type namespace (Self / MU / Port / Node /
  * BeltHandle / DriveHandle). The common toolkit helpers (findTransport,
- * attachBelt, surfaceOccupied, declareConveyorSignals, downstreamInterlock,
+ * attachBelt, surfaceOccupied, declareFlowSignals, downstreamInterlock,
  * disable, …) live on `self`, so no symbol enumeration is needed.
  *
  * `three` VALUES are deliberately NOT re-exported — `RV.Node` is a pure type

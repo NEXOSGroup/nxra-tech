@@ -70,16 +70,16 @@ describe('collectBehaviorData — signals scoping', () => {
     const root = placedRoot('RollConveyor-3m', 'lid-A');
     const data = collectBehaviorData(makeViewer({
       signals: {
-        'RollConveyor-3m/Conveyor.Run': true,
-        'RollConveyor-3m/Conveyor.Occupied': false,
+        'RollConveyor-3m/Flow.Run': true,
+        'RollConveyor-3m/Flow.Occupied': false,
         'RollConveyor-3m/Sensor': true,
         'RollConveyor-3m_2/Sensor': false,    // different scope — excluded
         'GlobalSignal': true,                 // unscoped — excluded
       },
     }), root);
     expect(data.signalNames.sort()).toEqual([
-      'RollConveyor-3m/Conveyor.Occupied',
-      'RollConveyor-3m/Conveyor.Run',
+      'RollConveyor-3m/Flow.Occupied',
+      'RollConveyor-3m/Flow.Run',
       'RollConveyor-3m/Sensor',
     ]);
   });

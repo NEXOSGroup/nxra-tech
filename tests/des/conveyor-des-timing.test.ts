@@ -155,7 +155,7 @@ describe('Conveyor DES timing — transit delay', () => {
     conv.refreshId();
     sinkId = sink.entityId;
     conv.adapter.nextComponents = [sink];
-    conv.self.signals.set('Conveyor.Run', true); // belt running (ZPA: shouldFlow)
+    conv.self.signals.set('Flow.Run', true); // belt running (ZPA: shouldFlow)
 
     // timeToSensor should equal length/speed = 5 s.
     expect(conv.self.local.timer!.timeToSensor).toBeCloseTo(5, 3);
@@ -222,7 +222,7 @@ describe('Conveyor DES timing — transit delay', () => {
     sinkId = sink.entityId;
     conv.adapter.nextComponents = [sink];
     conv.adapter.previousComponents = [];
-    conv.self.signals.set('Conveyor.Run', true); // belt running (ZPA: shouldFlow)
+    conv.self.signals.set('Flow.Run', true); // belt running (ZPA: shouldFlow)
 
     // Accept → transit 1 s. Downstream refuses → MU parks in blockedMUs.
     const mu = runner.createMU();

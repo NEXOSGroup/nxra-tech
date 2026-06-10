@@ -20,8 +20,9 @@
  * openInputPort, publishOccupied, …) → the `logic` transitions (tryReceive /
  * tryDispatch / onRotationDone) → the `def` (setup, continuous, des).
  *
- * Note `signalNamespace: 'Conveyor'`: a turntable joins a conveyor line, so it
- * speaks the same `Conveyor.*` signal names as its belt neighbours.
+ * Note `signalNamespace: 'Flow'`: a turntable joins a material-flow line, so it
+ * speaks the same type-neutral `Flow.*` interop signal names as its belt
+ * neighbours.
  *
  * Full authoring guide: doc-behavior-modelling.md
  */
@@ -32,9 +33,10 @@ import { defineLibraryComponent, type RV } from './_shared/behavior-kit';
 import { classifyConnections, listOwnSnaps, type PortConnection } from './_shared/snap-graph-helpers';
 import { alignToInputAngle, dispatchToOutputAngle, calibrateBeltNeutralAngle } from './_shared/turntable-angle-math';
 
-// Turntable publishes the conveyor interop signals `Conveyor.*` (NOT `Turntable.*`).
-// `signalNamespace: 'Conveyor'` scopes the signals block to that partner type, so
-// `self.sig.Run/Occupied/Running/PartCount` read/write `Conveyor.<key>`.
+// Turntable publishes the type-neutral material-flow interop signals `Flow.*`
+// (NOT `Turntable.*`). `signalNamespace: 'Flow'` scopes the signals block to the
+// shared interop namespace, so `self.sig.Run/Occupied/Running/PartCount`
+// read/write `Flow.<key>`.
 const SIGNALS = {
   Run:       'PLCInputBool',
   Occupied:  'PLCOutputBool',
@@ -42,7 +44,7 @@ const SIGNALS = {
   PartCount: 'PLCOutputInt',
 } as const;
 
-const OCCUPIED_SIGNAL = 'Conveyor.Occupied';
+const OCCUPIED_SIGNAL = 'Flow.Occupied';
 const CONFIG = {
   neighborRefreshSec: 0.5,
   dischargeClearSec: 0.5,
@@ -289,9 +291,9 @@ const def = {
     MaxCapacity:   { type: 'number' as const, default: 1 },
   },
 
-  // The conveyor interop signals — published under the `Conveyor` namespace
-  // (cross-type convention), auto-declared as `Conveyor.<key>` + typed self.sig.
-  signalNamespace: 'Conveyor' as const,
+  // The material-flow interop signals — published under the type-neutral `Flow`
+  // namespace (NOT `Turntable.*`), auto-declared as `Flow.<key>` + typed self.sig.
+  signalNamespace: 'Flow' as const,
   signals: SIGNALS,
 
   // Per-instance state slot (type-inferred). Used by BOTH the continuous shim and

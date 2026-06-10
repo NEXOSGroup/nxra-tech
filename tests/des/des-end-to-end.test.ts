@@ -154,7 +154,7 @@ describe('DES end-to-end — Source → 2 Conveyors → Sink', () => {
     adapters[3].previousComponents = [adapters[2]];
 
     // Belts running.
-    values.set('Conveyor.Run', true);
+    values.set('Flow.Run', true);
 
     // Start (assigns entityIds, runs def.setup, kicks the source onGenerate).
     runner.start(

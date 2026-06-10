@@ -166,4 +166,23 @@ describe('applyLiveEdit — readonly gate', () => {
 
     expect(inst.Period).toBe(7);
   });
+
+  it('blocks a readonly field even when the component type carries an instance suffix', () => {
+    // Schema is registered under the BASE type, but the inspector passes the
+    // suffixed instance type ("RoSuffixType_1"). The guard must strip the
+    // suffix before the schema lookup — symmetric to updateOverlayField.
+    registerComponentSchema('RoSuffixType', RoLiveComponent.schema);
+
+    const node = new Object3D();
+    const inst = new RoLiveComponent(node);
+    const registry = new NodeRegistry();
+    registry.registerNode('Cell/Suffixed', node);
+    registry.register('RoSuffixType_1', 'Cell/Suffixed', inst);
+
+    const viewer: ResolverViewer = { registry, signalStore: null };
+
+    applyLiveEdit(viewer, 'Cell/Suffixed', 'RoSuffixType_1', 'MaxSpeed', 9999);
+
+    expect(inst.MaxSpeed).toBe(100); // unchanged — readonly blocked despite the suffix
+  });
 });

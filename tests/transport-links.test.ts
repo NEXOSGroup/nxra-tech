@@ -14,7 +14,7 @@ import { EventEmitter } from '../src/core/rv-events';
 import { ContextMenuStore } from '../src/core/hmi/context-menu-store';
 import type { SnapLite, PortConnection } from '../src/behaviors/_shared/snap-graph-helpers';
 import {
-  declareConveyorSignals,
+  declareFlowSignals,
   outputLink,
   outputLinks,
   linkOf,
@@ -112,21 +112,21 @@ describe('TransportLink.occupied — per-port then root', () => {
   // by rv.signals before it reaches the store), so seed without the leading slash.
   it('reads the per-port signal when it is present', () => {
     const { link, store } = makeOutLink('Conv', 'TT', 'C', 'P');
-    store.set('TT/Conveyor.Occupied', false);      // root says free
-    store.set('TT/Conveyor.Occupied@P', true);     // but the per-port says blocked
+    store.set('TT/Flow.Occupied', false);      // root says free
+    store.set('TT/Flow.Occupied@P', true);     // but the per-port says blocked
     expect(link.occupied()).toBe(true);
   });
 
   it('falls back to the root Occupied when no per-port signal exists', () => {
     const { link, store } = makeOutLink('Conv', 'TT', 'C', 'P');
-    store.set('TT/Conveyor.Occupied', true);
+    store.set('TT/Flow.Occupied', true);
     expect(link.occupied()).toBe(true);
   });
 
   it('false/undefined → not occupied (optimistic)', () => {
     const { link, store } = makeOutLink('Conv', 'TT', 'C', 'P');
     expect(link.occupied()).toBe(false);           // unset → false
-    store.set('TT/Conveyor.Occupied', false);
+    store.set('TT/Flow.Occupied', false);
     expect(link.occupied()).toBe(false);           // explicit false → false
   });
 });
@@ -154,7 +154,7 @@ describe('outputLink / outputLinks — no successor', () => {
 });
 
 describe('TransportLink.setOccupied — own scope keyed by mySnapId', () => {
-  it('writes Conveyor.Occupied@<mySnapId> in the instance scope', () => {
+  it('writes Flow.Occupied@<mySnapId> in the instance scope', () => {
     const { rv } = makeRv({ rootName: 'TT', scopeName: 'TT' });
     const partner = new Object3D(); partner.name = 'Conv';
     const conn: PortConnection = {
@@ -165,21 +165,21 @@ describe('TransportLink.setOccupied — own scope keyed by mySnapId', () => {
     };
     const link: TransportLink = linkOf(rv, conn);
     link.setOccupied(true);
-    // rv.signals.set scopes 'Conveyor.Occupied@P' → 'TT/Conveyor.Occupied@P'.
-    expect(rv.signals.get<boolean>('Conveyor.Occupied@P')).toBe(true);
+    // rv.signals.set scopes 'Flow.Occupied@P' → 'TT/Flow.Occupied@P'.
+    expect(rv.signals.get<boolean>('Flow.Occupied@P')).toBe(true);
   });
 });
 
 describe('TransportLink.upstreamWaiting — partner root Occupied', () => {
   it('is true when the connected upstream root publishes Occupied=true', () => {
     const { link, store } = makeOutLink('TT', 'Infeed', 'P', 'I');
-    store.set('Infeed/Conveyor.Occupied', true);   // resolved key (no leading slash)
+    store.set('Infeed/Flow.Occupied', true);   // resolved key (no leading slash)
     expect(link.upstreamWaiting()).toBe(true);
   });
   it('is false when the partner root Occupied is unset/false', () => {
     const { link, store } = makeOutLink('TT', 'Infeed', 'P', 'I');
     expect(link.upstreamWaiting()).toBe(false);
-    store.set('Infeed/Conveyor.Occupied', false);
+    store.set('Infeed/Flow.Occupied', false);
     expect(link.upstreamWaiting()).toBe(false);
   });
 });
@@ -214,8 +214,8 @@ describe('TransportLink — SYMMETRY: turntable setOccupied ↔ conveyor occupie
     if (!cvLink) throw new Error('expected an output link on the conveyor');
 
     // Turntable blocks its port → conveyor must see it as occupied (same resolved key).
-    ttLink.setOccupied(true);                  // writes TT/Conveyor.Occupied@P
-    expect(cvLink.occupied()).toBe(true);      // reads /TT/Conveyor.Occupied@P → TT/Conveyor.Occupied@P
+    ttLink.setOccupied(true);                  // writes TT/Flow.Occupied@P
+    expect(cvLink.occupied()).toBe(true);      // reads /TT/Flow.Occupied@P → TT/Flow.Occupied@P
 
     ttLink.setOccupied(false);
     expect(cvLink.occupied()).toBe(false);
@@ -237,26 +237,26 @@ describe('TransportLink — SYMMETRY: turntable setOccupied ↔ conveyor occupie
     });
     const conns = [conn(A, 'pA', 'iA'), conn(B, 'pB', 'iB'), conn(C, 'pC', 'iC')];
     // Resolved keys (the `/`-escape is stripped by rv.signals before the store).
-    store.set('B/Conveyor.Occupied', true);      // B blocked
-    store.set('C/Conveyor.Occupied', false);     // C explicitly free; A unset
+    store.set('B/Flow.Occupied', true);      // B blocked
+    store.set('C/Flow.Occupied', false);     // C explicitly free; A unset
     const free = conns.filter(c => !linkOf(ttCtx.rv, c).occupied());
     expect(free.map(c => c.ownerRoot)).toEqual([A, C]);
   });
 });
 
-describe('declareConveyorSignals — registers the 4-signal contract', () => {
+describe('declareFlowSignals — registers the 4-signal contract', () => {
   it('registers Run/Occupied/Running/PartCount with correct PLC types and initial values', () => {
     const { rv, root, accum } = makeRv({ rootName: 'Conv' });
-    declareConveyorSignals(rv);
+    declareFlowSignals(rv);
     applyKinematicsSpec(root, accum);
     const list = (root.userData.realvirtual as { __BehaviorSignals: Array<Record<string, unknown>> }).__BehaviorSignals;
     const byName = new Map(list.map(s => [s.Name as string, s]));
 
     expect(byName.size).toBe(4);
-    expect(byName.get('Conveyor.Run')).toMatchObject({ Type: 'PLCInputBool', InitialValue: true });
-    expect(byName.get('Conveyor.Occupied')).toMatchObject({ Type: 'PLCOutputBool', InitialValue: false });
-    expect(byName.get('Conveyor.Running')).toMatchObject({ Type: 'PLCOutputBool', InitialValue: false });
-    expect(byName.get('Conveyor.PartCount')).toMatchObject({ Type: 'PLCOutputInt', InitialValue: 0 });
+    expect(byName.get('Flow.Run')).toMatchObject({ Type: 'PLCInputBool', InitialValue: true });
+    expect(byName.get('Flow.Occupied')).toMatchObject({ Type: 'PLCOutputBool', InitialValue: false });
+    expect(byName.get('Flow.Running')).toMatchObject({ Type: 'PLCOutputBool', InitialValue: false });
+    expect(byName.get('Flow.PartCount')).toMatchObject({ Type: 'PLCOutputInt', InitialValue: 0 });
   });
 });
 

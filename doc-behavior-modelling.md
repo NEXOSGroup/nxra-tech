@@ -147,9 +147,10 @@ states: `idle → aligning_in → receiving → holding → rotating_out → dis
 
 How to read it:
 
-- **`CONFIG` + `SIGNALS`** — constants and the PLC contract. Note `signalNamespace: 'Conveyor'`:
-  a turntable publishes `Conveyor.Run/Occupied/…` (NOT `Turntable.*`) because it joins a conveyor
-  line and must speak the same signal names as its neighbours (see *The interlock* below).
+- **`CONFIG` + `SIGNALS`** — constants and the PLC contract. Note `signalNamespace: 'Flow'`:
+  a turntable publishes `Flow.Run/Occupied/…` (NOT `Turntable.*`) because it joins a material-flow
+  line and must speak the same type-neutral interop signal names as its neighbours (see *The
+  interlock* below).
 - **The small helpers** (`setBelt`, `blockAllInputs`, `openInputPort`, `publishOccupied`, …) — these
   are the FSM's vocabulary. Each is one or two lines.
 - **`logic`** — the FSM transitions: `tryReceive` (pick a waiting input, rotate to it), `tryDispatch`
@@ -183,7 +184,7 @@ Every block receives the same per-instance `self`, a facade over the runtime:
 | `self.attachBelt(node) / attachDrive(node)` | a lazy belt/drive handle (`run`, `moveTo`, `isAtTarget`) |
 | `self.surfaceOccupied(node)` | is a MU physically on this surface? |
 | `self.downstreamInterlock()` | the cached `{ occupied() }` reader for the downstream neighbour |
-| `self.declareConveyorSignals()` | declare the standard 4 conveyor signals (when not using a `signals` block) |
+| `self.declareFlowSignals()` | declare the standard 4 material-flow signals `Flow.*` (when not using a `signals` block) |
 | `self.disable(reason)` | abort binding (warns, skips the adapters) |
 | `self.outputs() / inputs() / freeOutputs()` | port connections from the snap graph |
 | `self.transfer(mu, port?)` | hand a MU downstream (DES handshake; continuous: inert) |
@@ -202,21 +203,52 @@ Components coordinate through **named signals, not object references** — so th
 continuous, live-PLC, and DES modes. There is no compile-time interface; you join the line simply by
 publishing the agreed signal name:
 
-- each component publishes `Conveyor.Occupied` (its root); a router additionally publishes
-  `Conveyor.Occupied@<portId>` per input port, keyed by the **stable snap id**.
-- an upstream component reads its downstream neighbour's `Conveyor.Occupied[@id]`. No successor →
+- each component publishes `Flow.Occupied` (its root); a router additionally publishes
+  `Flow.Occupied@<portId>` per input port, keyed by the **stable snap id**.
+- an upstream component reads its downstream neighbour's `Flow.Occupied[@id]`. No successor →
   treated as **blocked** (a part holds at the end of the line instead of vanishing).
 - the **ZPA release rule**: run unless a part is held locally **and** the downstream zone is occupied.
 
-Any component that publishes `Conveyor.Occupied` joins the line — a conveyor, a turntable, a sink
+The signal name is type-neutral on purpose: it is the generic material-**flow** interlock, not a
+conveyor-specific one. The full interop contract is `Flow.Run` / `Flow.Occupied` / `Flow.Running` /
+`Flow.PartCount`, and the single source of truth for the name is the exported `FLOW_OCCUPIED`
+constant in `transport-links.ts` — no module hand-builds the string.
+
+Any component that publishes `Flow.Occupied` joins the line — a conveyor, a turntable, a sink
 (which publishes `false` so the line discharges into it), or a customer machine. The snap graph
-defines *who* the neighbour is; the signal name defines *how* they coordinate. (This is why a
-turntable uses `signalNamespace: 'Conveyor'`.)
+defines *who* the neighbour is; the signal name defines *how* they coordinate. (This is why
+conveyor, turntable and sink all use `signalNamespace: 'Flow'`.)
+
+### `Flow.Occupied` is a continuous interlock + observability signal — NOT the DES interlock authority
+
+The **internal** DES back-pressure handshake is **topology-/event-based** (`canAccept(mu)` +
+`onDownstreamReady`), not signal-driven. `Flow.Occupied` is the continuous-mode interlock and the
+external/observability surface (a live PLC can read or override it), but inside the DES solver it is
+**not** the authority that decides whether a downstream accepts a part. Reasons:
+
+- **Determinism** — the topology handshake is a synchronous in-event call chain
+  (`releaseMU → onDownstreamReady → tryTransferMU`); a signal path would add a scheduled slip + an
+  extra queue hop + tie-break reordering, meaningless in FastForward and reorder-prone.
+- **Expressiveness** — `canAccept(mu)` carries MU identity, capacity, failure and port routing (a
+  router's aligned port); a boolean `Occupied` bit cannot.
+- **Unblock semantics** — `onDownstreamReady` is per-edge, FIFO, MU-preserving; a signal edge is a
+  broadcast with no MU/edge identity (thundering-herd re-probe).
+- **Snapshot/worker FastForward** — signal subscriptions are in-process closures that are **not**
+  re-subscribed on restore, so a signal-driven interlock would silently fail in the worker.
+
+One exception is read-only and deliberate: the **router output selection** (`Turntable.freeOutputs()`)
+reads the downstream **root** `/${ownerRoot.name}/Flow.Occupied` to pick a free discharge port. The
+back-pressure *authority* is still the `canAccept`/`onDownstreamReady` handshake — the signal only
+informs the routing choice (see `tests/turntable-output-selection.test.ts`).
+
+Consequence: `def.des.onSignalChanged` stays reserved for **external** signals only (live-PLC drives
+the DES: Run/Stop, E-Stop, zone lock, downtime) as a wake-up trigger of the handshake — never as the
+internal interlock itself.
 
 ## Zone occupancy is surface-based
 
 A zone is **occupied** when a MU is physically on its belt surface — not merely at a point sensor.
-`self.surfaceOccupied(beltNode)` detects this, and the component publishes `Conveyor.Occupied` from
+`self.surfaceOccupied(beltNode)` detects this, and the component publishes `Flow.Occupied` from
 it **every tick** (one good per zone). This is distinct from the local point sensor, which drives a
 separate `partAtSensor` discharge trigger (and the part counter) and does **not** publish occupancy:
 
@@ -230,7 +262,7 @@ separate `partAtSensor` discharge trigger (and the part counter) and does **not*
 | `behavior-kit.ts` | the one-stop import: `defineLibraryComponent`, the `RV.*` types, `createTransitTimer` |
 | `define-library-component.ts` | the factory itself (badge, schema registration, the continuous bind) |
 | `transit-timing.ts` | `createTransitTimer(self, belt, sensor)` — conveyor DES transit time + entry/exit tween |
-| `transport-links.ts` | the interlock: `createDownstreamInterlock`, `linkOf`, `portIds`, `declareConveyorSignalsWith` |
+| `transport-links.ts` | the interlock: `FLOW_OCCUPIED` (SSOT), `createDownstreamInterlock`, `linkOf`, `portIds`, `declareFlowSignalsWith` |
 | `lazy-drive.ts` | `attachBelt` / `attachDrive` — drive handles that resolve on demand |
 | `surface-occupancy.ts` | `isSurfaceOccupied(viewer, node)` |
 | `snap-graph-helpers.ts` | port topology: `classifyConnections`, `listOwnSnaps`, `findOutputPairings` |
@@ -250,7 +282,7 @@ bottom); only genuinely reusable, non-trivial machinery goes in `_shared/`.
    - add the event-driven version in **`des`**.
 4. Export both: `export const MyThingFlow = def;` (the DES runner/tests read the raw def) and
    `export default defineLibraryComponent(def);` (the auto-discovered runnable Behavior).
-5. Coordinate with neighbours by publishing/reading `Conveyor.Occupied[@id]`.
+5. Coordinate with neighbours by publishing/reading `Flow.Occupied[@id]` (set `signalNamespace: 'Flow'`).
 6. Add a test under `tests/` (a continuous parity test + a `tests/des/` timing test).
 
 ### What the three bottom lines mean

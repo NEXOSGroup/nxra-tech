@@ -89,8 +89,8 @@ function makeFakeSelf(outputs: Port[]): {
     get currentLoad() { return load; },
     get mus() { return muList; },
     signals: { get: () => undefined, set: () => {}, on: () => {} },
-    // The router publishes Conveyor.Occupied/Running via the typed `self.sig.*`
-    // accessors (signals block, namespace 'Conveyor'); stub them as no-ops here.
+    // The router publishes Flow.Occupied/Running via the typed `self.sig.*`
+    // accessors (signals block, namespace 'Flow'); stub them as no-ops here.
     sig: {
       Run: { get: () => false, set: () => {} },
       Occupied: { get: () => false, set: () => {} },

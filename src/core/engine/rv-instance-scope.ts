@@ -5,7 +5,7 @@
  * Per-instance signal scoping for placed library assets.
  *
  * Signals are keyed globally by name in the SignalStore, so two placed copies of
- * the same library asset would collide on names like `Conveyor.Run` or `Sensor`.
+ * the same library asset would collide on names like `Flow.Run` or `Sensor`.
  * To isolate them, signal names are prefixed with the nearest enclosing
  * LayoutObject root name (which the layout planner de-duplicates per placement,
  * e.g. `RollConveyor2m`, `RollConveyor2m_2`).

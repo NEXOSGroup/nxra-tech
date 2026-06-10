@@ -532,6 +532,11 @@ export interface BindContextHost {
      *  are present in the store before the first onFixedUpdate tick. RVViewer.signalStore
      *  implements it; minimal/test hosts can omit it and the manager falls back to set(). */
     register?(name: string, path: string, initialValue: boolean | number, plcType?: string): void;
+    /** Optional: rebuild the path→name suffix index. Called once after the
+     *  BehaviorManager materialises synthetic signal nodes so a short-name
+     *  `getByPath` resolves against the new node paths (F4). Test/minimal hosts
+     *  may omit it. */
+    buildIndex?(): void;
   } | null;
   simulationLoop?: {
     onFixedUpdateExtra?: ((dt: number) => void) | null;
@@ -544,6 +549,14 @@ export interface BindContextHost {
   drives: Array<{ name: string; node: Object3D; startMove?: (d?: number) => void; stop?: () => void; jogForward?: boolean; jogBackward?: boolean; TargetSpeed?: number; currentPosition?: number; isAtTarget?: boolean }>;
   registry?: {
     getNode?(path: string): Object3D | null;
+    /** Optional write surface — used by the BehaviorManager to materialise
+     *  synthetic signal nodes into the NodeRegistry so `self.signal()` signals
+     *  appear in the hierarchy identically to rv_extras signal nodes (F4).
+     *  All optional, so read-only / `registry: null` hosts stay valid. */
+    registerNode?(path: string, node: Object3D): void;
+    register?(type: string, path: string, data: unknown): void;
+    getPathForNode?(node: Object3D): string | null;
+    unregisterSubtree?(root: Object3D): unknown;
   } | null;
   /** Access another plugin by id (e.g. 'snap-point') — implemented by RVViewer.
    *  Lets behaviors query cross-cutting registries like the snap-point graph. */

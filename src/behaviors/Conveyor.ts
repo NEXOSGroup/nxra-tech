@@ -23,8 +23,10 @@
 
 import { defineLibraryComponent, createTransitTimer, type RV, type TransitTimer } from './_shared/behavior-kit';
 
-// Public 4-signal conveyor contract — auto-declared (by createSelf) as
-// `Conveyor.<key>` and exposed as typed `self.sig.<key>` accessors.
+// Public 4-signal material-flow contract — auto-declared (by createSelf) as
+// `Flow.<key>` (signalNamespace: 'Flow') and exposed as typed `self.sig.<key>`
+// accessors. The namespace is type-neutral (`Flow`, not `Conveyor`) because
+// turntables and sinks publish/read the SAME interop signals to join the line.
 const SIGNALS = {
   Run:       'PLCInputBool',
   Occupied:  'PLCOutputBool',
@@ -51,7 +53,7 @@ interface ConveyorLocal {
 type ConveyorSelf = RV.Self<ConveyorLocal, typeof SIGNALS>;
 
 // ── ZPA rule (shared: continuous + DES) ──
-// partAtSensor is the LOCAL discharge trigger — NOT the published surface-based Conveyor.Occupied.
+// partAtSensor is the LOCAL discharge trigger — NOT the published surface-based Flow.Occupied.
 function shouldFlow(self: ConveyorSelf): boolean {
   const l = self.local;
   // ZPA: run unless a part sits at the sensor AND the downstream zone is occupied.
@@ -86,8 +88,11 @@ const def = {
     CalculatedArcLength: { type: 'number' as const, default: 0 },    // mm (curves; overrides length)
   },
 
-  // Public 4-signal conveyor contract — auto-declared (by createSelf) as
-  // `Conveyor.<key>` and exposed as typed `self.sig.<key>` accessors.
+  // The material-flow interop signals — published under the type-neutral `Flow`
+  // namespace (NOT `Conveyor.*`), auto-declared as `Flow.<key>` + typed self.sig.
+  signalNamespace: 'Flow' as const,
+  // Public 4-signal material-flow contract — auto-declared (by createSelf) as
+  // `Flow.<key>` and exposed as typed `self.sig.<key>` accessors.
   signals: SIGNALS,
 
   // Per-instance state slot (type-inferred). Used by BOTH the continuous shim and
