@@ -32,13 +32,33 @@ import type {
   SignalOpts,
 } from '../behavior-runtime';
 import type { TransportLink } from '../../behaviors/_shared/transport-links';
-import { createDownstreamInterlock } from '../../behaviors/_shared/transport-links';
+import {
+  createDownstreamInterlock,
+  declareConveyorSignalsWith,
+} from '../../behaviors/_shared/transport-links';
 import {
   classifyConnections,
   findOutputPairings,
   type PortConnection,
   type OutputPairing,
 } from '../../behaviors/_shared/snap-graph-helpers';
+import {
+  findTransport,
+  findSensor,
+  findRotaryDrive,
+} from '../library-component-loader';
+import {
+  attachBelt,
+  attachDrive,
+  selfDrives,
+  type BeltHandle,
+  type DriveHandle,
+} from '../../behaviors/_shared/lazy-drive';
+import { isSurfaceOccupied } from '../../behaviors/_shared/surface-occupancy';
+
+// Re-export the handle types the toolkit returns so the behavior-kit `RV`
+// namespace can alias them without importing `_shared/lazy-drive` directly.
+export type { BeltHandle, DriveHandle } from '../../behaviors/_shared/lazy-drive';
 
 // ─── Public value types ─────────────────────────────────────────────────
 
@@ -159,6 +179,29 @@ export interface MaterialFlowSelf<S = Record<string, never>> {
   signal(name: string, opts: SignalOpts): void;
   /** Stamp an inspector/badge companion component (forwards to rv.behavior(rv.root,...)). */
   stamp(type: string, props: Record<string, unknown>): void;
+
+  // ── Toolkit: convention-based node resolution + handles (delegate to the
+  //    _shared/loader helpers with self.root / selfDrives(self) / self.viewer).
+  /** First `Transport-X/Y/Z` belt node under root, or null. */
+  findTransport(): Object3D | null;
+  /** First `Sensor[-id]` node under root, or null. */
+  findSensor(): Object3D | null;
+  /** First `Drive-Rot-X/Y/Z` rotary node under root, or null. */
+  findRotaryDrive(): Object3D | null;
+  /** Lazy belt handle (`run(forward)`) for a transport node. */
+  attachBelt(node: Object3D | null): BeltHandle;
+  /** Lazy positioned-drive handle (`run/moveTo/isAtTarget/stop`) for a drive node. */
+  attachDrive(node: Object3D | null): DriveHandle;
+  /** True when a live MU is physically on a transport surface under `node`. */
+  surfaceOccupied(node: Object3D): boolean;
+  /** Declare the public 4-signal conveyor contract (Run/Occupied/Running/PartCount). */
+  declareConveyorSignals(): void;
+  /** Cached single-successor downstream interlock for the continuous hot path. */
+  downstreamInterlock(): { occupied(): boolean };
+  /** Disable this instance: warn + set local.disabled — the factory then gates setup/fixedUpdate. */
+  disable(reason: string): void;
+  /** True once `self.disable()` has been called (factory gate). */
+  readonly disabled: boolean;
 
   // Scheduling — DES-only. Continuous mode dev-throws.
   in(delay: number, hook: DesHookName, mu?: MU | null, data?: unknown): number;
@@ -401,10 +444,12 @@ export function createSelf<S = Record<string, never>>(
   const prop: Record<string, JsonValue> = {};
   const mus: MU[] = [];
   let state = 'idle';
+  let disabled = false;
 
   // Lazy: only allocate the shared interlock when an instance actually calls
-  // self.downstreamOccupied() without a port (behaviours that build their own
-  // never pay for it).
+  // self.downstreamOccupied() / self.downstreamInterlock() (behaviours that
+  // never gate on the downstream don't pay for it). The SAME cached object backs
+  // both the one-shot `downstreamOccupied()` and the per-tick `downstreamInterlock()`.
   let interlock: { occupied(): boolean } | null = null;
   const getInterlock = (): { occupied(): boolean } =>
     (interlock ??= createDownstreamInterlock(rv));
@@ -433,6 +478,40 @@ export function createSelf<S = Record<string, never>>(
     },
     stamp(type: string, props: Record<string, unknown>): void {
       rv.behavior(rv.root, type, props);
+    },
+
+    // ── Toolkit (delegates to the _shared/loader helpers) ──────────────────
+    findTransport(): Object3D | null {
+      return findTransport(rv.root);
+    },
+    findSensor(): Object3D | null {
+      return findSensor(rv.root);
+    },
+    findRotaryDrive(): Object3D | null {
+      return findRotaryDrive(rv.root);
+    },
+    attachBelt(node: Object3D | null): BeltHandle {
+      return attachBelt(selfDrives(self), node);
+    },
+    attachDrive(node: Object3D | null): DriveHandle {
+      return attachDrive(selfDrives(self), node);
+    },
+    surfaceOccupied(node: Object3D): boolean {
+      return isSurfaceOccupied(rv.viewer, node);
+    },
+    declareConveyorSignals(): void {
+      declareConveyorSignalsWith((n, o) => rv.signal(n, o));
+    },
+    downstreamInterlock(): { occupied(): boolean } {
+      return getInterlock();
+    },
+    disable(reason: string): void {
+      disabled = true;
+      (local as Record<string, unknown>).disabled = true;
+      console.warn(`[material-flow] ${def.type} disabled: ${reason}`);
+    },
+    get disabled(): boolean {
+      return disabled;
     },
 
     in(delay, hook, mu, data): number {

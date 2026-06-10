@@ -96,6 +96,13 @@ export interface MaterialFlowDefinition<S extends MaterialFlowSelf<any> = Materi
    */
   readonly local?: () => S extends MaterialFlowSelf<infer L> ? L : never;
   /**
+   * Inline `self.local` factory — ergonomic alias for `local` (Plan 197 §12.2b,
+   * Schritt-7-C pulled forward). When set it takes precedence over `local` as
+   * the per-instance state seed; the resulting object is typed-inferred so the
+   * author can skip a separate Local interface. Either field works.
+   */
+  readonly state?: () => S extends MaterialFlowSelf<infer L> ? L : never;
+  /**
    * Mode-agnostic per-instance init, called by BOTH the continuous and DES
    * runners. Resolve nodes into `self.local`, declare signals, stamp the
    * inspector/badge companion, build the context menu — everything that is
