@@ -30,6 +30,7 @@
 import type { NodeRegistry } from '../engine/rv-node-registry';
 import type { SignalStore } from '../engine/rv-signal-store';
 import type { RVComponent, ComponentSchema } from '../engine/rv-component-registry';
+import { getFieldDescriptor } from '../engine/rv-component-registry';
 import type { RVDrive } from '../engine/rv-drive';
 
 /** Narrow view of RVViewer the resolver depends on (avoids an import cycle). */
@@ -234,6 +235,10 @@ export function applyLiveEdit(
   fieldName: string,
   value: unknown,
 ): void {
+  // Never push a readonly schema field into the live component — defense in
+  // depth, symmetric to the overlay write guard in rv-extras-editor.
+  if (getFieldDescriptor(componentType, fieldName)?.readonly) return;
+
   const reg = viewer.registry;
   if (!reg) return;
   const inst = reg.getByPath<RVComponent>(componentType, nodePath);

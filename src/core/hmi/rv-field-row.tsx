@@ -17,6 +17,7 @@ import {
 import { Circle } from '@mui/icons-material';
 import type { RVViewer } from '../rv-viewer';
 import type { SignalStore } from '../engine/rv-signal-store';
+import type { FieldDescriptor } from '../engine/rv-component-registry';
 import {
   inferFieldType,
   isComponentRef,
@@ -26,6 +27,21 @@ import {
 } from './rv-inspector-helpers';
 import { FieldEditor } from './rv-field-editors';
 import { ReferenceDisplay, ScriptableObjectDisplay } from './rv-reference-display';
+
+// ── Editability decision (pure, React-free → unit-testable) ─────────────────
+
+/**
+ * Decide whether a field row exposes an editor.
+ * A field is editable only when it is a CONSUMED schema field, is not a
+ * structural reference, and its schema descriptor does not mark it `readonly`.
+ */
+export function isFieldEditable(
+  status: FieldStatus,
+  isReference: boolean,
+  descriptor?: FieldDescriptor,
+): boolean {
+  return status === 'consumed' && !isReference && !descriptor?.readonly;
+}
 
 // ── FieldRow ──────────────────────────────────────────────────────────────
 
@@ -38,13 +54,17 @@ export interface FieldRowProps {
   onReset: () => void;
   viewer: RVViewer | null;
   signalStore: SignalStore | null;
+  /** Schema descriptor for this field — supplies the optional `readonly` flag.
+   *  Looked up and passed by the caller (rv-component-section). */
+  descriptor?: FieldDescriptor;
 }
 
-export function FieldRow({ fieldName, value, status, isOverridden, onEdit, onReset, viewer, signalStore }: FieldRowProps) {
+export function FieldRow({ fieldName, value, status, isOverridden, onEdit, onReset, viewer, signalStore, descriptor }: FieldRowProps) {
   const fieldType = inferFieldType(fieldName, value);
   const isReference = fieldType === 'reference' || fieldType === 'scriptableobject';
-  // References are always read-only (structural links, not user-editable values)
-  const isEditable = status === 'consumed' && !isReference;
+  // References are always read-only (structural links, not user-editable values);
+  // a readonly schema descriptor also forces read-only display.
+  const isEditable = isFieldEditable(status, isReference, descriptor);
   const isBoolField = fieldType === 'boolean';
 
   // Tooltip text

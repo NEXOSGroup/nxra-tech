@@ -19,6 +19,7 @@ import { ExpandMore, ChevronRight } from '@mui/icons-material';
 import type { RVViewer } from '../rv-viewer';
 import type { SignalStore } from '../engine/rv-signal-store';
 import { getConsumedFields } from '../engine/rv-extras-validator';
+import { getFieldDescriptor } from '../engine/rv-component-registry';
 import {
   baseComponentType,
   classifyField,
@@ -157,7 +158,10 @@ export function ComponentSection({ nodePath, componentType, data, overriddenFiel
     for (const [key, value] of Object.entries(data)) {
       if (key.startsWith('_')) continue;
       if (isFieldHidden(base, key)) continue;
-      if (consumed.has(key)) {
+      // A readonly schema field renders its value but never an editor → route it
+      // into the read-only ("other") branch rather than the consumed/editable one.
+      const isReadonly = getFieldDescriptor(base, key)?.readonly === true;
+      if (consumed.has(key) && !isReadonly) {
         consumedRaw.push([key, value]);
       } else {
         otherRaw.push([key, value]);
@@ -301,6 +305,7 @@ export function ComponentSection({ nodePath, componentType, data, overriddenFiel
             onReset={() => onFieldReset(fieldName)}
             viewer={viewer}
             signalStore={signalStore}
+            descriptor={getFieldDescriptor(base, fieldName)}
           />
         );
       })}
@@ -405,6 +410,7 @@ export function ComponentSection({ nodePath, componentType, data, overriddenFiel
               onReset={() => onFieldReset(fieldName)}
               viewer={viewer}
               signalStore={signalStore}
+              descriptor={getFieldDescriptor(base, fieldName)}
             />
           ))}
         </>

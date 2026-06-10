@@ -38,6 +38,9 @@ export interface FieldDescriptor {
   unityCoords?: boolean;
   /** Alternative GLB field names (legacy compat) */
   aliases?: string[];
+  /** When true the field is displayed in the inspector but never editable — and
+   *  the overlay/live-edit write paths refuse to mutate it (defense in depth). */
+  readonly?: boolean;
 }
 
 export type ComponentSchema = Record<string, FieldDescriptor>;
@@ -495,6 +498,24 @@ export function getConsumedFieldsFromSchema(componentType: string): string[] {
  */
 export function getRegisteredSchemaTypes(): string[] {
   return [...registeredSchemas.keys()];
+}
+
+/**
+ * Look up the FieldDescriptor for a single `(componentType, fieldName)` pair
+ * from the registered schemas. Resolves aliases (a descriptor whose `aliases`
+ * include the requested field name matches). Returns undefined when the type
+ * has no schema or the field is not declared. Read-only metadata lookup — used
+ * by the inspector (readonly gate) and the overlay/live-edit write guards.
+ */
+export function getFieldDescriptor(componentType: string, fieldName: string): FieldDescriptor | undefined {
+  const schema = registeredSchemas.get(componentType);
+  if (!schema) return undefined;
+  const direct = schema[fieldName];
+  if (direct) return direct;
+  for (const desc of Object.values(schema)) {
+    if (desc.aliases?.includes(fieldName)) return desc;
+  }
+  return undefined;
 }
 
 /**
