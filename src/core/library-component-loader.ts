@@ -66,6 +66,20 @@ export function findFirst(root: Object3D, test: (node: Object3D) => boolean): Ob
   return found;
 }
 
+/** All nodes in the subtree (root included) for which `test` returns true. */
+export function findAll(root: Object3D, test: (node: Object3D) => boolean): Object3D[] {
+  const out: Object3D[] = [];
+  root.traverse((o) => { if (test(o)) out.push(o); });
+  return out;
+}
+
+/** The node-name predicate for each convention-based node kind. */
+export const NODE_KIND_TESTS = {
+  transport: (n: Object3D): boolean => parseTransportName(n.name) !== null,
+  sensor: (n: Object3D): boolean => isSensorName(n.name),
+  rotary: (n: Object3D): boolean => (parseDriveName(n.name) ?? '').startsWith('Rotation'),
+} as const;
+
 /** First `Transport-X/Y/Z` node — a belt surface (carries a co-located Drive). */
 export function findTransport(root: Object3D): Object3D | null {
   return findFirst(root, (n) => parseTransportName(n.name) !== null);

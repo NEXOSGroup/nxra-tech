@@ -30,6 +30,7 @@ import type {
   BindContextDrive,
   NodeRef,
   SignalOpts,
+  SignalType,
 } from '../behavior-runtime';
 import type { TransportLink } from '../../behaviors/_shared/transport-links';
 import {
@@ -153,9 +154,46 @@ export interface Port extends TransportLink {
   worldAngle?: number;
 }
 
+// ─── Declarative `signals` block + typed `self.sig` (Plan 197 §2.4b-A) ────
+
+/**
+ * The shape of a definition's optional `signals` block: a map from a short key
+ * (e.g. `Run`) to its PLC signal type. The factory auto-declares each as
+ * `${def.type}.${key}` and exposes a typed accessor on `self.sig.<key>`.
+ */
+export type SignalShape = Record<string, SignalType>;
+
+/**
+ * Value type carried by a PLC signal type: Bool → boolean, Int/Float → number.
+ * Drives the `get()`/`set()` typing of every `self.sig.<key>` accessor.
+ */
+export type SignalValue<T extends SignalType> = T extends `${string}Bool`
+  ? boolean
+  : number;
+
+/** A single typed signal accessor — `get()`/`set()` against the scoped store. */
+export interface SignalAccessor<T extends SignalType> {
+  /** Read the current value (boolean for Bool signals, number for Int/Float). */
+  get(): SignalValue<T>;
+  /** Write a new value (boolean for Bool signals, number for Int/Float). */
+  set(value: SignalValue<T>): void;
+}
+
+/**
+ * The `self.sig` surface: one keyed, value-typed accessor per `signals` entry.
+ * A mapped type over the `signals` shape so `self.sig.Run` is key-checked and
+ * `self.sig.Run.get()` returns `boolean` (for `PLCInputBool`), etc.
+ */
+export type SigAccessors<SIG extends SignalShape> = {
+  readonly [K in keyof SIG]: SignalAccessor<SIG[K]>;
+};
+
 // ─── self interface ─────────────────────────────────────────────────────
 
-export interface MaterialFlowSelf<S = Record<string, never>> {
+export interface MaterialFlowSelf<
+  S = Record<string, never>,
+  SIG extends SignalShape = Record<string, never>,
+> {
   readonly type: string;
   readonly kind: MaterialFlowKind;
   readonly root: Object3D;
@@ -175,6 +213,14 @@ export interface MaterialFlowSelf<S = Record<string, never>> {
     set(name: string, value: boolean | number): void;
     on(name: string, cb: (value: boolean | number) => void): void;
   };
+  /**
+   * Typed accessors for the definition's `signals` block (Plan 197 §2.4b-A).
+   * `self.sig.Run.get()` / `self.sig.Run.set(v)` are key-checked and value-typed
+   * (boolean for Bool, number for Int/Float). Empty when no `signals` block is
+   * declared. Each accessor reads/writes through `self.signals` under the scoped
+   * name `${type}.${key}`.
+   */
+  readonly sig: SigAccessors<SIG>;
   /** Declare a signal (setup() only — forwards to rv.signal). */
   signal(name: string, opts: SignalOpts): void;
   /** Stamp an inspector/badge companion component (forwards to rv.behavior(rv.root,...)). */
@@ -378,11 +424,22 @@ export interface SelfDef {
   readonly kind: MaterialFlowKind;
 }
 
-export interface CreateSelfOptions<S = Record<string, never>> {
+export interface CreateSelfOptions<
+  S = Record<string, never>,
+  SIG extends SignalShape = Record<string, never>,
+> {
   /** Simulation mode for this self. Default 'continuous'. */
   mode?: SimulationMode;
   /** DES entity id; -1 in pure continuous (default). */
   entityId?: number;
+  /**
+   * Declarative `signals` block (Plan 197 §2.4b-A). When present, `createSelf`
+   * builds the typed `self.sig.<key>` accessor map (each `get()`/`set()` reads/
+   * writes `self.signals` under the scoped name `${type}.${key}`). Declaration
+   * of the signals in the store is the FACTORY's job (auto-declare), not
+   * createSelf's — `self.sig` is purely the typed accessor surface.
+   */
+  signals?: SIG;
   /**
    * DES scheduling backend (P5). When present, `self.in/at/cancel/now` delegate
    * to it. Absent (continuous) → `in/at` dev-throw, `now` reads the host loop.
@@ -427,11 +484,14 @@ export interface SelfScheduler {
  * behavior. Ports are resolved lazily (the snap-graph mutates as assets are
  * placed); `state`/`prop`/`mus` are local mutable state on the self.
  */
-export function createSelf<S = Record<string, never>>(
+export function createSelf<
+  S = Record<string, never>,
+  SIG extends SignalShape = Record<string, never>,
+>(
   rv: RVBindContext,
   def: SelfDef,
-  opts: CreateSelfOptions<S> = {},
-): MaterialFlowSelf<S> {
+  opts: CreateSelfOptions<S, SIG> = {},
+): MaterialFlowSelf<S, SIG> {
   const mode: SimulationMode = opts.mode ?? 'continuous';
   const entityId = opts.entityId ?? -1;
   const scheduler = opts.scheduler ?? null;
@@ -440,6 +500,25 @@ export function createSelf<S = Record<string, never>>(
   const canAcceptDownstream = opts.canAcceptDownstream ?? null;
   const local = (opts.local ?? {}) as S;
   let localMuId = 0;
+
+  // Build the typed `self.sig` accessor map from the optional `signals` shape.
+  // Each accessor reads/writes `self.signals` under the scoped name
+  // `${type}.${key}` (the same convention the factory uses to auto-declare).
+  // Empty object when no `signals` block was passed.
+  const sig = {} as Record<string, SignalAccessor<SignalType>>;
+  if (opts.signals) {
+    for (const key of Object.keys(opts.signals)) {
+      const scoped = `${def.type}.${key}`;
+      sig[key] = {
+        get(): SignalValue<SignalType> {
+          return rv.signals.get(scoped) as SignalValue<SignalType>;
+        },
+        set(value: SignalValue<SignalType>): void {
+          rv.signals.set(scoped, value);
+        },
+      };
+    }
+  }
 
   const prop: Record<string, JsonValue> = {};
   const mus: MU[] = [];
@@ -461,7 +540,7 @@ export function createSelf<S = Record<string, never>>(
     );
   };
 
-  const self: MaterialFlowSelf<S> = {
+  const self: MaterialFlowSelf<S, SIG> = {
     type: def.type,
     kind: def.kind,
     root: rv.root,
@@ -473,6 +552,7 @@ export function createSelf<S = Record<string, never>>(
     local,
 
     signals: rv.signals,
+    sig: sig as SigAccessors<SIG>,
     signal(name: string, o: SignalOpts): void {
       rv.signal(name, o);
     },

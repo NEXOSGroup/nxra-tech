@@ -24,7 +24,7 @@
  */
 
 import type { Behavior } from '../../core/behaviors';
-import type { RVBindContext } from '../../core/behavior-runtime';
+import type { RVBindContext, SignalType } from '../../core/behavior-runtime';
 import {
   registerComponentSchema,
   getSchemaDefaults,
@@ -33,11 +33,18 @@ import {
 import {
   defineMaterialFlow,
   type MaterialFlowDefinition,
+  type RequiresKind,
 } from '../../core/material-flow/define-material-flow';
 import {
   createSelf,
   type MaterialFlowSelf,
+  type SignalShape,
 } from '../../core/material-flow/material-flow-self';
+import {
+  findAll,
+  NODE_KIND_TESTS,
+} from '../../core/library-component-loader';
+import type { Object3D } from 'three';
 
 /**
  * The standard library-component badge — inline literal, NOT a shared constant.
@@ -54,11 +61,30 @@ const STANDARD_BADGE: ComponentCapabilities = {
 /** Marker types whose schema/capabilities are already registered (guard). */
 const _registeredMarkers = new Set<string>();
 
-export interface LibraryComponentOptions<S> {
+/** Typed initial value for an auto-declared signal: Bool → false, Int/Float → 0. */
+function signalInitialValue(type: SignalType): boolean | number {
+  return type.includes('Bool') ? false : 0;
+}
+
+/** Resolve all convention-named nodes of a `requires` kind under `root`. */
+function resolveRequiredNodes(root: Object3D, kind: RequiresKind): Object3D[] {
+  return findAll(root, NODE_KIND_TESTS[kind]);
+}
+
+/**
+ * Capitalise a `requires` key for the auto-badge marker payload (so
+ * `requires: { belt:'transport', sensor:'sensor' }` stamps `{ Belt, Sensor }`,
+ * matching the explicit `badge` hook the conveyor used before).
+ */
+function badgeKey(key: string): string {
+  return key.length === 0 ? key : key[0].toUpperCase() + key.slice(1);
+}
+
+export interface LibraryComponentOptions<S, SIG extends SignalShape = Record<string, never>> {
   /** Inline badge/inspector caps for the `<Type>Behavior` marker. Default = STANDARD_BADGE. */
   capabilities?: ComponentCapabilities;
   /** Marker payload (e.g. resolved Belt/Sensor names) stamped after setup. Default `{}`. */
-  badge?: (self: MaterialFlowSelf<S>) => Record<string, unknown>;
+  badge?: (self: MaterialFlowSelf<S, SIG>) => Record<string, unknown>;
   /** Engine-owned components (Source/Sink): setup runs, NEVER fixedUpdate (double-spawn guard). */
   inert?: boolean;
 }
@@ -66,14 +92,31 @@ export interface LibraryComponentOptions<S> {
 /**
  * Define a library component from a material-flow definition + factory options.
  *
+ * Both generics are INFERRED from the definition (Plan 197 §2.4b-C / §2.4b-A),
+ * so an author rarely needs an explicit type argument:
+ *   - `S`   (local state) — from `def.state` / `def.local` return type.
+ *   - `SIG` (signals shape) — from the optional `def.signals` block.
+ *
  * The definition's `state` field (when present) is the preferred `self.local`
  * factory (typed-inferred); `local` keeps working as the fallback. The returned
  * `Behavior` is `defineBehavior`-compatible — discovered + dispatched by the
  * existing BehaviorManager exactly like a hand-written behavior.
+ *
+ * Three OPTIONAL declarative blocks layer on top of the core (all additive — a
+ * definition that uses none behaves exactly as before):
+ *   - `signals` (§2.4b-A): auto-declares each as `${type}.${key}` and exposes a
+ *     typed `self.sig.<key>` accessor.
+ *   - `requires` (§2.4b-B): resolves convention nodes, injects `self.<key>`,
+ *     auto-disables on a missing node, and stamps an auto-badge marker.
+ *   - `state` (§2.4b-C): inline local-state factory (the `S` generic is inferred
+ *     from its return type).
  */
-export function defineLibraryComponent<S = Record<string, never>>(
-  def: MaterialFlowDefinition<MaterialFlowSelf<S>>,
-  opts: LibraryComponentOptions<S> = {},
+export function defineLibraryComponent<
+  S = Record<string, never>,
+  SIG extends SignalShape = Record<string, never>,
+>(
+  def: MaterialFlowDefinition<MaterialFlowSelf<S, SIG>, SIG>,
+  opts: LibraryComponentOptions<S, SIG> = {},
 ): Behavior {
   // 1. Dual discovery + schema under `def.type` (idempotent).
   defineMaterialFlow(def);
@@ -91,17 +134,60 @@ export function defineLibraryComponent<S = Record<string, never>>(
   // `state` is the preferred local factory (typed-inferred); `local` is the
   // fallback. Reconcile here so both author styles seed `self.local`.
   const makeLocal = (def.state ?? def.local) as (() => S) | undefined;
+  const signalsBlock = def.signals;
+  const requiresBlock = def.requires;
 
   return {
     models: def.models ?? [`*${def.type}*`],
     bind(rv: RVBindContext): void {
-      const self = createSelf<S>(rv, def, {
+      const self = createSelf<S, SIG>(rv, def, {
         mode: 'continuous',
         local: makeLocal ? makeLocal() : undefined,
+        // Pass the signals shape so `self.sig.<key>` accessors are built.
+        signals: signalsBlock,
       });
 
-      // Mode-agnostic init FIRST. If it disables the instance (missing nodes),
-      // skip ALL continuous wiring (no continuous.setup, no fixedUpdate).
+      // 3a. `signals` block — auto-declare each signal as `${type}.${key}` with a
+      //     typed initial value (replaces `declareConveyorSignalsWith`). Done in
+      //     the mode-agnostic phase (BEFORE def.setup) so setup/sig can use them.
+      if (signalsBlock) {
+        for (const key of Object.keys(signalsBlock)) {
+          const type = signalsBlock[key];
+          self.signal(`${def.type}.${key}`, { type, initialValue: signalInitialValue(type) });
+        }
+      }
+
+      // 3b. `requires` block — resolve convention nodes, inject `self.<key>`,
+      //     auto-disable on a missing node, collect the auto-badge payload. Done
+      //     BEFORE def.setup so setup can rely on the injected nodes.
+      const injected = self as unknown as Record<string, Object3D | null>;
+      const autoBadge: Record<string, unknown> = {};
+      if (requiresBlock) {
+        for (const key of Object.keys(requiresBlock)) {
+          const kind = requiresBlock[key];
+          const matches = resolveRequiredNodes(rv.root, kind);
+          if (matches.length > 1) {
+            console.warn(
+              `[library-component] ${def.type}: multiple '${kind}' nodes for ` +
+                `requires.${key} — using the first ('${matches[0].name}').`,
+            );
+          }
+          const node = matches[0] ?? null;
+          injected[key] = node;
+          if (!node) {
+            self.disable(`missing ${kind} for ${key}`);
+          } else {
+            autoBadge[badgeKey(key)] = node.name;
+          }
+        }
+      }
+
+      // If a required node was missing, the instance is disabled — skip ALL
+      // continuous wiring (no marker stamp, no continuous.setup, no fixedUpdate).
+      if (self.disabled) return;
+
+      // Mode-agnostic init. If it disables the instance (missing nodes), skip
+      // the rest as well (no marker stamp, no continuous wiring).
       def.setup?.(self);
       if (self.disabled) return;
 
@@ -109,10 +195,12 @@ export function defineLibraryComponent<S = Record<string, never>>(
       c.setup?.(self);
 
       // Marker + schema-default stamp: schema defaults render as (editable /
-      // readonly) inspector rows; the badge payload adds the resolved markers.
-      // Both land in userData.realvirtual[<Type>Behavior] (F2/F6).
+      // readonly) inspector rows; the auto-badge (resolved required nodes) and
+      // the explicit `opts.badge` payload add the resolved markers (explicit
+      // wins on a key clash). All land in userData.realvirtual[<Type>Behavior].
       rv.behavior(rv.root, markerType, {
         ...getSchemaDefaults(markerType),
+        ...autoBadge,
         ...(opts.badge ? opts.badge(self) : {}),
       });
 

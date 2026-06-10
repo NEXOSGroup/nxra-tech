@@ -29,10 +29,31 @@ import {
   type MaterialFlowKind,
   type MU,
   type Port,
+  type SignalShape,
 } from './material-flow-self';
 import { registerMaterialFlow } from './registry';
 
 export type { MaterialFlowKind } from './material-flow-self';
+
+// ─── Declarative ergonomy blocks (Plan 197 §2.4b A/B) ────────────────────
+
+/**
+ * Node kinds the optional `requires` block resolves by naming convention.
+ * Each maps to a `library-component-loader` finder:
+ *   - `transport` → `findTransport(self.root)` (`Transport-X/Y/Z`)
+ *   - `sensor`    → `findSensor(self.root)`    (`Sensor[-id]`)
+ *   - `rotary`    → `findRotaryDrive(self.root)` (`Drive-Rot-X/Y/Z`)
+ */
+export type RequiresKind = 'transport' | 'sensor' | 'rotary';
+
+/**
+ * The shape of a definition's optional `requires` block: a map from an
+ * injection key (e.g. `belt`) to the node kind to resolve. The factory
+ * resolves each before `def.setup`, injects the resolved node as `self.<key>`,
+ * auto-disables the instance when any required node is missing, and stamps an
+ * auto-badge marker from the resolved nodes.
+ */
+export type RequiresShape = Record<string, RequiresKind>;
 
 // ─── Layer block types ──────────────────────────────────────────────────
 
@@ -79,7 +100,10 @@ export interface DesBlock<S extends MaterialFlowSelf<any> = MaterialFlowSelf> {
 
 // ─── Definition ─────────────────────────────────────────────────────────
 
-export interface MaterialFlowDefinition<S extends MaterialFlowSelf<any> = MaterialFlowSelf> {
+export interface MaterialFlowDefinition<
+  S extends MaterialFlowSelf<any, any> = MaterialFlowSelf,
+  SIG extends SignalShape = Record<string, never>,
+> {
   /** Stable id: rv_extras key AND DES action namespace ('Conveyor' → 'Conveyor.Arrival'). */
   readonly type: string;
   readonly kind: MaterialFlowKind;
@@ -87,6 +111,26 @@ export interface MaterialFlowDefinition<S extends MaterialFlowSelf<any> = Materi
   readonly models?: string[];
   /** Component schema (same shape as rv-component-registry; applySchema reused). */
   readonly schema: ComponentSchema;
+  /**
+   * Optional declarative `signals` block (Plan 197 §2.4b-A). Maps a short key to
+   * its PLC signal type; the factory auto-declares each as `${type}.${key}`
+   * (replaces `declareConveyorSignalsWith`) and exposes a typed `self.sig.<key>`
+   * accessor. OPTIONAL — a definition without `signals` declares signals
+   * manually exactly as before. Initial value defaults per type (bool→false,
+   * int/float→0).
+   */
+  readonly signals?: SIG;
+  /**
+   * Optional declarative `requires` block (Plan 197 §2.4b-B). Maps an injection
+   * key to a node kind (`transport`/`sensor`/`rotary`). The factory resolves
+   * each (reusing the `library-component-loader` finders) BEFORE `def.setup`,
+   * injects the resolved node as `self.<key>`, auto-disables (warn) the instance
+   * when any required node is missing, and stamps an auto-badge marker from the
+   * resolved nodes. OPTIONAL — a definition without `requires` resolves nodes
+   * manually in `setup` exactly as before. Ambiguous (multiple matches) → first
+   * match + warn.
+   */
+  readonly requires?: RequiresShape;
   /**
    * Per-instance `self.local` factory — the seed for the typed local state slot.
    * Used by BOTH the continuous shim (`toBehavior`) and the DES model-load
@@ -124,9 +168,12 @@ export interface MaterialFlowDefinition<S extends MaterialFlowSelf<any> = Materi
  * discovery and returns the definition (so the module's default export can be
  * both the discovered behavior AND a programmatically-importable definition).
  */
-export function defineMaterialFlow<S extends MaterialFlowSelf<any> = MaterialFlowSelf>(
-  def: MaterialFlowDefinition<S>,
-): MaterialFlowDefinition<S> {
+export function defineMaterialFlow<
+  S extends MaterialFlowSelf<any, any> = MaterialFlowSelf,
+  SIG extends SignalShape = Record<string, never>,
+>(
+  def: MaterialFlowDefinition<S, SIG>,
+): MaterialFlowDefinition<S, SIG> {
   registerMaterialFlow(def as unknown as MaterialFlowDefinition);
   return def;
 }
