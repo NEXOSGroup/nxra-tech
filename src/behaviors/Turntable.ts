@@ -5,22 +5,11 @@
 
 import { Vector3, Quaternion } from 'three';
 import type { Object3D } from 'three';
-import type { Behavior } from '../core/behaviors';
-import { findRotaryDrive, findSensor, findTransport } from '../core/library-component-loader';
-import { registerCapabilities } from '../core/engine/rv-component-registry';
-import { defineMaterialFlow, toBehavior } from '../core/material-flow/define-material-flow';
-import type { MaterialFlowSelf, MU, Port } from '../core/material-flow/material-flow-self';
+import { defineLibraryComponent, type RV } from './_shared/behavior-kit';
+import type { MU, Port } from '../core/material-flow/material-flow-self';
 import { classifyConnections, listOwnSnaps, type PortConnection } from './_shared/snap-graph-helpers';
 import { alignToInputAngle, dispatchToOutputAngle, calibrateBeltNeutralAngle } from './_shared/turntable-angle-math';
-import { attachDrive, attachBelt, selfDrives, type DriveHandle, type BeltHandle } from './_shared/lazy-drive';
-import { isSurfaceOccupied } from './_shared/surface-occupancy';
-
-registerCapabilities('TurntableBehavior', {
-  badgeColor: '#7e57c2',
-  filterLabel: 'Behavior',
-  hierarchyVisible: true,
-  inspectorVisible: true,
-});
+import type { DriveHandle, BeltHandle } from './_shared/lazy-drive';
 
 const CONFIG = {
   runSignal:       'Conveyor.Run',
@@ -42,7 +31,6 @@ type State =
   | 'discharging';
 
 interface TurntableLocal {
-  disabled: boolean;
   rotaryNode: Object3D | null;
   sensorNode: Object3D | null;
   beltNode: Object3D | null;
@@ -65,7 +53,7 @@ interface TurntableLocal {
   _quat: Quaternion;
 }
 
-type TurntableSelf = MaterialFlowSelf<TurntableLocal>;
+type TurntableSelf = RV.Self<TurntableLocal>;
 
 function portOccupiedSignal(portId: string): string {
   return `${CONFIG.occupiedSignal}@${portId}`;
@@ -97,7 +85,7 @@ const openInputPort = (self: TurntableSelf, openId: string | null): void => {
 };
 
 const surfaceOccupied = (self: TurntableSelf): boolean =>
-  self.local.beltNode ? isSurfaceOccupied(self.viewer, self.local.beltNode) : self.local.sensorOccupied;
+  self.local.beltNode ? self.surfaceOccupied(self.local.beltNode) : self.local.sensorOccupied;
 
 const publishOccupied = (self: TurntableSelf, surf = surfaceOccupied(self)): void => {
   self.signals.set(CONFIG.occupiedSignal, surf || self.state !== 'idle');
@@ -262,21 +250,20 @@ function desSelectOutput(self: TurntableSelf): Port | null {
   return free.length > 0 ? free[0] : null;
 }
 
-const def = defineMaterialFlow<TurntableSelf>({
-  type: 'Turntable',
-  kind: 'router',
+const def = {
+  type: 'Turntable' as const,
+  kind: 'router' as const,
   models: ['*Turntable*'],
   // DES router params (Plan 194 §2.4). RotationSpeed drives the rotate-time
   // schedule (|Δang|/RotationSpeed); MaxCapacity gates acceptance.
   schema: {
-    RotationSpeed: { type: 'number', default: 45 }, // deg/s
-    MaxCapacity:   { type: 'number', default: 1 },
+    RotationSpeed: { type: 'number' as const, default: 45 }, // deg/s
+    MaxCapacity:   { type: 'number' as const, default: 1 },
   },
 
   // Per-instance state slot — used by BOTH the continuous shim and the DES
   // model-load binding so a directly-created self gets its local fields.
   local: (): TurntableLocal => ({
-    disabled: false,
     rotaryNode: null,
     sensorNode: null,
     beltNode: null,
@@ -302,28 +289,21 @@ const def = defineMaterialFlow<TurntableSelf>({
   logic: { enter, tryReceive, tryDispatch, onPartAtCenter, onRotationDone, finishCycle, abortToIdle },
 
   // Mode-agnostic init (continuous AND DES): resolve nodes into self.local,
-  // declare signals, stamp the badge, build the Reset context menu.
+  // declare signals, build the Reset context menu.
   setup(self: TurntableSelf): void {
     const l = self.local;
     const rootTag = self.root.name || '<unnamed>';
-    const rotaryNode = findRotaryDrive(self.root);
-    const sensorNode = findSensor(self.root);
-    const beltNode = findTransport(self.root);
-    if (!rotaryNode) { console.warn(`[Turntable:${rootTag}] no Drive-Rot-* node found`); l.disabled = true; return; }
-    if (!sensorNode) { console.warn(`[Turntable:${rootTag}] no Sensor node found`); l.disabled = true; return; }
+    const rotaryNode = self.findRotaryDrive();
+    const sensorNode = self.findSensor();
+    const beltNode = self.findTransport();
+    if (!rotaryNode) return self.disable('no Drive-Rot-* node');
+    if (!sensorNode) return self.disable('no Sensor node');
     if (!beltNode)   console.warn(`[Turntable:${rootTag}] no Transport-* node found — belt stop/start will be a no-op`);
 
     l.rotaryNode = rotaryNode;
     l.sensorNode = sensorNode;
     l.beltNode = beltNode;
     l.driveAxis = axisFromDriveNodeName(rotaryNode.name);
-
-    console.info(`[Turntable:${rootTag}] attached — drive "${rotaryNode.name}", sensor "${sensorNode.name}"${beltNode ? `, belt "${beltNode.name}"` : ''}`);
-    self.stamp('TurntableBehavior', {
-      Drive: rotaryNode.name,
-      Sensor: sensorNode.name,
-      ...(beltNode ? { Belt: beltNode.name } : {}),
-    });
 
     self.signal(CONFIG.runSignal,       { type: 'PLCInputBool',  initialValue: true });
     self.signal(CONFIG.occupiedSignal,  { type: 'PLCOutputBool', initialValue: false });
@@ -360,10 +340,8 @@ const def = defineMaterialFlow<TurntableSelf>({
     // per-port interlock state, and the AABB-sensor subscription.
     setup(self: TurntableSelf): void {
       const l = self.local;
-      if (l.disabled) return;
-
-      l.drive = attachDrive(selfDrives(self), l.rotaryNode!);
-      l.belt = l.beltNode ? attachBelt(selfDrives(self), l.beltNode) : null;
+      l.drive = self.attachDrive(l.rotaryNode!);
+      l.belt = l.beltNode ? self.attachBelt(l.beltNode) : null;
 
       self.prop['alignedPort'] = null;
       self.prop['selectedOutput'] = null;
@@ -502,11 +480,17 @@ const def = defineMaterialFlow<TurntableSelf>({
       desRotateTo(self, target, 'rotating_out', held);
     },
   },
-});
+};
 
-// The local-state factory lives on the def (`def.local`) so both the continuous
-// shim and the DES binding seed `self.local` identically.
-const TurntableBehavior: Behavior = toBehavior(def);
+/** Turntable — multi-port router (factory-built; behaviour identical to the def). */
+const TurntableBehavior = defineLibraryComponent<TurntableLocal>(def, {
+  capabilities: { badgeColor: '#7e57c2', filterLabel: 'Behavior', hierarchyVisible: true, inspectorVisible: true },
+  badge: (self) => ({
+    Drive: self.local.rotaryNode!.name,
+    Sensor: self.local.sensorNode!.name,
+    ...(self.local.beltNode ? { Belt: self.local.beltNode.name } : {}),
+  }),
+});
 
 /** The material-flow definition (schema + logic + continuous + des) — for DES tests / runner. */
 export const TurntableFlow = def;

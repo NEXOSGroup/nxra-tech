@@ -42,11 +42,11 @@ import { ContextMenuStore } from '../../src/core/hmi/context-menu-store';
 
 const ConveyorDef = ConveyorFlow as unknown as MaterialFlowDefinition;
 
-/** The conveyor's DES-relevant local fields (private to Conveyor.ts — re-stated). */
+/** The conveyor's DES-relevant local fields (private to Conveyor.ts — re-stated).
+ *  The transit-timing model lives on `local.timer` (createTransitTimer); the
+ *  `speed`/`length`/`timeToSensor` values are identical to the prior inline fields. */
 interface ConvLocalView {
-  timeToSensor: number;
-  desSpeed: number;
-  desLength: number;
+  timer: { timeToSensor: number; speed: number; length: number } | null;
   blockedMUs: MU[];
 }
 type ConvSelf = MaterialFlowSelf<ConvLocalView>;
@@ -158,7 +158,7 @@ describe('Conveyor DES timing — transit delay', () => {
     conv.self.signals.set('Conveyor.Run', true); // belt running (ZPA: shouldFlow)
 
     // timeToSensor should equal length/speed = 5 s.
-    expect(conv.self.local.timeToSensor).toBeCloseTo(5, 3);
+    expect(conv.self.local.timer!.timeToSensor).toBeCloseTo(5, 3);
 
     // Accept an MU → schedule arrival in 5 s; NOT released yet.
     const mu = runner.createMU();
@@ -185,14 +185,14 @@ describe('Conveyor DES timing — transit delay', () => {
     // to resolve timing with the seeded prop.
     const fast = buildConveyor(runner, 'ConvFast', { ConveyorLength: 2000, ConveyorSpeed: 500 });
     ConveyorDef.setup?.(fast.self as unknown as MaterialFlowSelf);
-    expect(fast.self.local.timeToSensor).toBeCloseTo(4, 3);
+    expect(fast.self.local.timer!.timeToSensor).toBeCloseTo(4, 3);
 
     // speed = 0 → guarded by Math.max(0.001, …): timeToSensor stays finite & > 0.
     const stalled = buildConveyor(runner, 'ConvStalled', { ConveyorLength: 1000, ConveyorSpeed: 0 });
     ConveyorDef.setup?.(stalled.self as unknown as MaterialFlowSelf);
-    expect(Number.isFinite(stalled.self.local.timeToSensor)).toBe(true);
-    expect(stalled.self.local.timeToSensor).toBeGreaterThan(0);
-    expect(stalled.self.local.desSpeed).toBeGreaterThanOrEqual(0.001);
+    expect(Number.isFinite(stalled.self.local.timer!.timeToSensor)).toBe(true);
+    expect(stalled.self.local.timer!.timeToSensor).toBeGreaterThan(0);
+    expect(stalled.self.local.timer!.speed).toBeGreaterThanOrEqual(0.001);
   });
 
   it('back-pressure: holds the MU when the downstream is full, releases on ready', () => {
