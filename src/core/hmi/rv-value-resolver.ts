@@ -30,7 +30,7 @@
 import type { NodeRegistry } from '../engine/rv-node-registry';
 import type { SignalStore } from '../engine/rv-signal-store';
 import type { RVComponent, ComponentSchema } from '../engine/rv-component-registry';
-import { getFieldDescriptor } from '../engine/rv-component-registry';
+import { getFieldDescriptor, isFieldDisplayReadonly } from '../engine/rv-component-registry';
 import type { RVDrive } from '../engine/rv-drive';
 
 /** Narrow view of RVViewer the resolver depends on (avoids an import cycle). */
@@ -242,11 +242,11 @@ export function applyLiveEdit(
   fieldName: string,
   value: unknown,
 ): void {
-  // Never push a readonly schema field into the live component — defense in
-  // depth, symmetric to the overlay write guard in rv-extras-editor. Strip the
-  // instance suffix first (e.g. "Drive_1" → "Drive") so the schema lookup
-  // matches, exactly as updateOverlayField does.
-  if (getFieldDescriptor(baseComponentType(componentType), fieldName)?.readonly) return;
+  // Never push a read-only schema field (readonly:true OR scope:'des') into the
+  // live component — defense in depth, symmetric to the overlay write guard in
+  // rv-extras-editor. Strip the instance suffix first (e.g. "Drive_1" → "Drive")
+  // so the schema lookup matches, exactly as updateOverlayField does.
+  if (isFieldDisplayReadonly(getFieldDescriptor(baseComponentType(componentType), fieldName))) return;
 
   const reg = viewer.registry;
   if (!reg) return;

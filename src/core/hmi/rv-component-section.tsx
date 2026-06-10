@@ -19,7 +19,7 @@ import { ExpandMore, ChevronRight } from '@mui/icons-material';
 import type { RVViewer } from '../rv-viewer';
 import type { SignalStore } from '../engine/rv-signal-store';
 import { getConsumedFields } from '../engine/rv-extras-validator';
-import { getFieldDescriptor } from '../engine/rv-component-registry';
+import { getFieldDescriptor, isFieldDisplayReadonly } from '../engine/rv-component-registry';
 import {
   baseComponentType,
   classifyField,
@@ -158,9 +158,10 @@ export function ComponentSection({ nodePath, componentType, data, overriddenFiel
     for (const [key, value] of Object.entries(data)) {
       if (key.startsWith('_')) continue;
       if (isFieldHidden(base, key)) continue;
-      // A readonly schema field renders its value but never an editor → route it
-      // into the read-only ("other") branch rather than the consumed/editable one.
-      const isReadonly = getFieldDescriptor(base, key)?.readonly === true;
+      // A read-only schema field (readonly:true OR scope:'des') renders its value
+      // but never an editor → route it into the read-only ("other") branch rather
+      // than the consumed/editable one. The "(DES)" tag is added by FieldRow.
+      const isReadonly = isFieldDisplayReadonly(getFieldDescriptor(base, key));
       if (consumed.has(key) && !isReadonly) {
         consumedRaw.push([key, value]);
       } else {

@@ -51,12 +51,18 @@ const def = {
   type: 'Source' as const,
   kind: 'source' as const,
   models: ['*Source*'],
-  // Mode-agnostic spawn config — the SAME fields the engine RVSource reads.
+  // Spawn config — the SAME field names the engine RVSource consumes. This
+  // behavior is inert:true (no continuous fixedUpdate) and only the `des` block
+  // reads them (generationInterval → self.prop['Interval']); the LIVE spawn driver
+  // is the engine RVSource component (its own editable "Source" inspector section).
+  // Editing these on the SourceBehavior marker has NO live effect and would
+  // duplicate/contradict the real Source section, so all are scope:'des'
+  // (read-only, "(DES)" tag) — edit the live values in the Source section instead.
   schema: {
-    AutomaticGeneration: { type: 'boolean' as const, default: true },
-    Interval:            { type: 'number' as const,  default: 0, aliases: ['SpawnInterval'] },
-    GenerateIfDistance:  { type: 'number' as const,  default: 300, aliases: ['SpawnDistance'] },
-    ThisObjectAsMU:      { type: 'string' as const,  default: '' },
+    AutomaticGeneration: { type: 'boolean' as const, default: true, scope: 'des' as const },
+    Interval:            { type: 'number' as const,  default: 0, aliases: ['SpawnInterval'], scope: 'des' as const },
+    GenerateIfDistance:  { type: 'number' as const,  default: 300, aliases: ['SpawnDistance'], scope: 'des' as const },
+    ThisObjectAsMU:      { type: 'string' as const,  default: '', scope: 'des' as const },
   },
 
   // ── Continuous adapter — INERT. The engine RVSource owns continuous spawning. ──

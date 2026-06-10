@@ -81,11 +81,16 @@ const def = {
   kind: 'conveyor' as const,
   models: ['*Conveyor*'],
   // DES timing params (Plan 194 §2.5 / F12). Mirror the C#-DES `DESConveyor`
-  // schema; read from rv_extras via the binding wiring into self.prop.
+  // schema; read by the DES transit timer from self.prop. All three are
+  // scope:'des' — inert in the continuous/live view (the belt surface + the
+  // Transport-Z Drive own real motion there), so they show read-only with a
+  // "(DES)" tag instead of pretending to be editable live fields. In particular
+  // ConveyorSpeed is only the DES fallback for the real Drive.TargetSpeed, so it
+  // must NOT appear as a second, contradicting editor.
   schema: {
-    ConveyorLength:      { type: 'number' as const, default: 1000 }, // mm
-    ConveyorSpeed:       { type: 'number' as const, default: 200 },  // mm/s
-    CalculatedArcLength: { type: 'number' as const, default: 0 },    // mm (curves; overrides length)
+    ConveyorLength:      { type: 'number' as const, default: 1000, scope: 'des' as const }, // mm
+    ConveyorSpeed:       { type: 'number' as const, default: 200, scope: 'des' as const },  // mm/s (DES fallback for Drive.TargetSpeed)
+    CalculatedArcLength: { type: 'number' as const, default: 0, scope: 'des' as const },    // mm (curves; overrides length)
   },
 
   // The material-flow interop signals — published under the type-neutral `Flow`

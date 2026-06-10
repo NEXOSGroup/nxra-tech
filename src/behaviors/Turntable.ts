@@ -285,10 +285,13 @@ const def = {
   kind: 'router' as const,
   models: ['*Turntable*'],
   // DES router params (Plan 194 §2.4). RotationSpeed drives the rotate-time
-  // schedule (|Δang|/RotationSpeed); MaxCapacity gates acceptance.
+  // schedule (|Δang|/RotationSpeed); MaxCapacity gates acceptance. BOTH are read
+  // only by the `des` block (desRotateTo / canAccept) — the continuous FSM drives
+  // the real rotary Drive and reads neither — so both are scope:'des' (read-only,
+  // "(DES)" tag) rather than inert pseudo-editable rows in the live view.
   schema: {
-    RotationSpeed: { type: 'number' as const, default: 45 }, // deg/s
-    MaxCapacity:   { type: 'number' as const, default: 1 },
+    RotationSpeed: { type: 'number' as const, default: 45, scope: 'des' as const }, // deg/s
+    MaxCapacity:   { type: 'number' as const, default: 1, scope: 'des' as const },
   },
 
   // The material-flow interop signals — published under the type-neutral `Flow`

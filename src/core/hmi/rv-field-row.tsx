@@ -18,6 +18,7 @@ import { Circle } from '@mui/icons-material';
 import type { RVViewer } from '../rv-viewer';
 import type { SignalStore } from '../engine/rv-signal-store';
 import type { FieldDescriptor } from '../engine/rv-component-registry';
+import { isFieldDisplayReadonly } from '../engine/rv-component-registry';
 import {
   inferFieldType,
   isComponentRef,
@@ -33,14 +34,15 @@ import { ReferenceDisplay, ScriptableObjectDisplay } from './rv-reference-displa
 /**
  * Decide whether a field row exposes an editor.
  * A field is editable only when it is a CONSUMED schema field, is not a
- * structural reference, and its schema descriptor does not mark it `readonly`.
+ * structural reference, and its schema descriptor does not mark it read-only for
+ * display (`readonly:true` OR `scope:'des'` — DES-only config is never editable).
  */
 export function isFieldEditable(
   status: FieldStatus,
   isReference: boolean,
   descriptor?: FieldDescriptor,
 ): boolean {
-  return status === 'consumed' && !isReference && !descriptor?.readonly;
+  return status === 'consumed' && !isReference && !isFieldDisplayReadonly(descriptor);
 }
 
 // ── FieldRow ──────────────────────────────────────────────────────────────
@@ -66,6 +68,9 @@ export function FieldRow({ fieldName, value, status, isOverridden, onEdit, onRes
   // a readonly schema descriptor also forces read-only display.
   const isEditable = isFieldEditable(status, isReference, descriptor);
   const isBoolField = fieldType === 'boolean';
+  // DES-only config: shown read-only with a "(DES)" tag so the user knows the
+  // value is consumed by the discrete-event scheduler, not the live view.
+  const isDes = descriptor?.scope === 'des';
 
   // Tooltip text
   let tooltipText = '';
@@ -126,9 +131,17 @@ export function FieldRow({ fieldName, value, status, isOverridden, onEdit, onRes
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
           }}
-          title={fieldName}
+          title={isDes ? `${fieldName} — DES-only config (read-only in live view)` : fieldName}
         >
           {fieldName}
+          {isDes && (
+            <Box
+              component="span"
+              sx={{ ml: 0.5, fontSize: 9, color: 'text.disabled', fontStyle: 'italic' }}
+            >
+              (DES)
+            </Box>
+          )}
         </Typography>
 
         {/* Editor, reference display, or read-only display */}

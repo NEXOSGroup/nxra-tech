@@ -19,7 +19,7 @@ import { materialise as materialiseEdits, freshOpId } from './scene/rv-scene-edi
 import { getSceneStore } from './scene/scene-store-singleton';
 import { isHiddenComponentType, baseComponentType } from './rv-inspector-helpers';
 import { isEphemeralField } from './rv-value-resolver';
-import { getFieldDescriptor } from '../engine/rv-component-registry';
+import { getFieldDescriptor, isFieldDisplayReadonly } from '../engine/rv-component-registry';
 import { openSetPositionDialog } from './SetPositionDialog';
 
 // ─── Layout Object Helpers (for context menu) ──────────────────────────
@@ -373,9 +373,10 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
    * SceneStore-driven sessions persist via the per-base draft autosave.
    */
   updateOverlayField(nodePath: string, componentType: string, fieldName: string, value: unknown): boolean {
-    // Never write a field its schema marks readonly — defense in depth in case
-    // the inspector UI (which already hides the editor) is bypassed.
-    if (getFieldDescriptor(baseComponentType(componentType), fieldName)?.readonly) {
+    // Never write a field its schema marks read-only for display (readonly:true
+    // OR scope:'des') — defense in depth in case the inspector UI (which already
+    // hides the editor) is bypassed.
+    if (isFieldDisplayReadonly(getFieldDescriptor(baseComponentType(componentType), fieldName))) {
       console.warn(`[rvExtrasEditor] Refusing to edit readonly field ${componentType}.${fieldName}`);
       return false;
     }

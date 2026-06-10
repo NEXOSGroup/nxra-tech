@@ -41,6 +41,31 @@ export interface FieldDescriptor {
   /** When true the field is displayed in the inspector but never editable — and
    *  the overlay/live-edit write paths refuse to mutate it (defense in depth). */
   readonly?: boolean;
+  /**
+   * Where the field has meaning. Default `'live'` = today's behavior. Orthogonal
+   * to `readonly` (which only toggles editability of a field that is shown).
+   *   'live' → editable inspector row, takes effect live (the rv_extras default).
+   *   'des'  → DES-only config: shown as a read-only row tagged "(DES)" — inert in
+   *            the continuous/live view, so editing it would be a lie. Treated
+   *            exactly like `readonly` for editability + write guards, plus the
+   *            "(DES)" label.
+   *   'none' → no inspector row at all: not stamped as a default and not reported
+   *            as a "consumed" field (no overlay path).
+   */
+  scope?: 'live' | 'des' | 'none';
+}
+
+/**
+ * True when a field must be shown as read-only in the inspector: either the
+ * descriptor explicitly marks it `readonly`, or its `scope` is `'des'` (DES-only
+ * config has no live effect, so it is never editable). The single predicate the
+ * inspector editability gate and the overlay/live-edit write guards share, so
+ * `scope:'des'` blocks writes exactly like `readonly:true`. A `scope:'none'`
+ * field is filtered out upstream (never stamped, never consumed) and never reaches
+ * this predicate. Undefined descriptor → not read-only (backward compatible).
+ */
+export function isFieldDisplayReadonly(desc?: FieldDescriptor): boolean {
+  return desc?.readonly === true || desc?.scope === 'des';
 }
 
 export type ComponentSchema = Record<string, FieldDescriptor>;
@@ -484,6 +509,9 @@ export function getConsumedFieldsFromSchema(componentType: string): string[] {
 
   const fields: string[] = [];
   for (const [key, desc] of Object.entries(schema)) {
+    // scope:'none' fields are not part of the inspector at all — never reported
+    // as consumed, so they get no editable row and no overlay path.
+    if (desc.scope === 'none') continue;
     fields.push(key);
     if (desc.aliases) {
       fields.push(...desc.aliases);
@@ -530,6 +558,9 @@ export function getSchemaDefaults(componentType: string): Record<string, unknown
   if (!schema) return {};
   const out: Record<string, unknown> = {};
   for (const [key, desc] of Object.entries(schema)) {
+    // scope:'none' fields are never stamped — they have no inspector presence,
+    // so seeding a default would create an orphan row with no overlay path.
+    if (desc.scope === 'none') continue;
     if (desc.default !== undefined) out[key] = desc.default;
   }
   return out;
