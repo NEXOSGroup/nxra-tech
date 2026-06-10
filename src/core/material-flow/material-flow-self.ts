@@ -402,6 +402,11 @@ function makeLinkLike(
   };
 }
 
+/** Typed initial value for an auto-declared signal: Bool → false, Int/Float → 0. */
+function signalInitialValue(type: SignalType): boolean | number {
+  return type.includes('Bool') ? false : 0;
+}
+
 /**
  * Read a numeric config value from `self.prop` (the rv_extras bag the binding
  * wiring fills) with a default fallback. Non-finite / missing → `def`.
@@ -422,6 +427,24 @@ export function readConfigNumber(
 export interface SelfDef {
   readonly type: string;
   readonly kind: MaterialFlowKind;
+  /**
+   * Signal-name namespace for the `signals` block / `self.sig` accessors
+   * (Plan 197 §2.4b-A). Each signal is scoped `${signalNamespace ?? type}.${key}`.
+   * Defaults to `type`; cross-type components that publish another type's signals
+   * (Turntable/Sink → `Conveyor.*`) set it explicitly so `self.sig.<key>` and the
+   * factory auto-declare resolve to the partner type's signal names.
+   */
+  readonly signalNamespace?: string;
+  /**
+   * The definition's optional `signals` block (Plan 197 §2.4b-A). `createSelf`
+   * builds the typed `self.sig.<key>` accessor map from it (when `opts.signals`
+   * is not given) AND auto-declares each signal into the store, so the DES path
+   * (which calls `createSelf` directly, without the library-component factory)
+   * gets identical `self.sig` accessors and declared signals as the continuous
+   * path. Each accessor reads/writes the scoped name
+   * `${signalNamespace ?? type}.${key}`.
+   */
+  readonly signals?: SignalShape;
 }
 
 export interface CreateSelfOptions<
@@ -433,11 +456,13 @@ export interface CreateSelfOptions<
   /** DES entity id; -1 in pure continuous (default). */
   entityId?: number;
   /**
-   * Declarative `signals` block (Plan 197 §2.4b-A). When present, `createSelf`
-   * builds the typed `self.sig.<key>` accessor map (each `get()`/`set()` reads/
-   * writes `self.signals` under the scoped name `${type}.${key}`). Declaration
-   * of the signals in the store is the FACTORY's job (auto-declare), not
-   * createSelf's — `self.sig` is purely the typed accessor surface.
+   * Declarative `signals` block (Plan 197 §2.4b-A). When present (or taken from
+   * `def.signals`), `createSelf` BOTH builds the typed `self.sig.<key>` accessor
+   * map AND auto-declares each signal into the store under the scoped name
+   * `${signalNamespace ?? type}.${key}` with a typed default (Bool→false,
+   * Int/Float→0). Declaration happens here — on whichever path (continuous
+   * factory or DES runner) builds the self — so behaviours never re-declare in
+   * `setup`; they only override non-default initial values via `self.sig.set()`.
    */
   signals?: SIG;
   /**
@@ -503,12 +528,19 @@ export function createSelf<
 
   // Build the typed `self.sig` accessor map from the optional `signals` shape.
   // Each accessor reads/writes `self.signals` under the scoped name
-  // `${type}.${key}` (the same convention the factory uses to auto-declare).
-  // Empty object when no `signals` block was passed.
+  // `${signalNamespace ?? type}.${key}` (the same convention the factory uses to
+  // auto-declare). The namespace defaults to `type`, but a cross-type component
+  // (Turntable/Sink → `Conveyor.*`) overrides it. Empty object when no `signals`
+  // block was passed.
+  const signalNamespace = def.signalNamespace ?? def.type;
+  // The accessor map uses the explicit `opts.signals` shape when given, else the
+  // definition's own `signals` block (so the DES path, which calls createSelf
+  // without opts.signals, still gets a populated `self.sig`).
+  const sigShape = opts.signals ?? def.signals;
   const sig = {} as Record<string, SignalAccessor<SignalType>>;
-  if (opts.signals) {
-    for (const key of Object.keys(opts.signals)) {
-      const scoped = `${def.type}.${key}`;
+  if (sigShape) {
+    for (const key of Object.keys(sigShape)) {
+      const scoped = `${signalNamespace}.${key}`;
       sig[key] = {
         get(): SignalValue<SignalType> {
           return rv.signals.get(scoped) as SignalValue<SignalType>;
@@ -671,6 +703,22 @@ export function createSelf<
 
     prop,
   };
+
+  // Auto-declare the `signals` block into the store, ONCE, on whichever path
+  // built this self (continuous factory `bind()` OR the DES runner's direct
+  // `createSelf`). Each signal is registered under the scoped name
+  // `${signalNamespace ?? type}.${key}` with a typed default (Bool→false,
+  // Int/Float→0). Behaviours therefore never re-declare in `setup` — they only
+  // override the non-default initial values via `self.sig.<key>.set(...)`.
+  if (sigShape) {
+    for (const key of Object.keys(sigShape)) {
+      const type = sigShape[key];
+      self.signal(`${signalNamespace}.${key}`, {
+        type,
+        initialValue: signalInitialValue(type),
+      });
+    }
+  }
 
   return self;
 }

@@ -1,21 +1,49 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
-/** Turntable — multi-port router. Authoring model: doc-behavior-modelling.md */
+/**
+ * Turntable — a multi-port router (a rotating platform that re-routes parts).
+ *
+ * A part arrives on one side; the table ROTATES to line up with a free output, then
+ * DISCHARGES. Because that's a sequence of steps, this component is a state machine
+ * (FSM) with seven states:
+ *   idle → aligning_in → receiving → holding → rotating_out → discharging
+ *        → discharge_clearing → idle
+ *
+ * One definition, two simulations (see doc-behavior-modelling.md):
+ *   • Continuous — `continuous.fixedUpdate` is the FSM driver: it polls the real
+ *     drive (`isAtTarget`) to detect a finished rotation and switches on the state.
+ *   • DES — `des.onAccept`/`onRotateComplete` are the same router as events: a
+ *     rotation just consumes TIME (|Δangle| / RotationSpeed), no physical drive.
+ *
+ * How to read this file: CONFIG + SIGNALS → the small FSM helpers (setBelt,
+ * openInputPort, publishOccupied, …) → the `logic` transitions (tryReceive /
+ * tryDispatch / onRotationDone) → the `def` (setup, continuous, des).
+ *
+ * Note `signalNamespace: 'Conveyor'`: a turntable joins a conveyor line, so it
+ * speaks the same `Conveyor.*` signal names as its belt neighbours.
+ *
+ * Full authoring guide: doc-behavior-modelling.md
+ */
 
 import { Vector3, Quaternion } from 'three';
 import type { Object3D } from 'three';
 import { defineLibraryComponent, type RV } from './_shared/behavior-kit';
-import type { MU, Port } from '../core/material-flow/material-flow-self';
 import { classifyConnections, listOwnSnaps, type PortConnection } from './_shared/snap-graph-helpers';
 import { alignToInputAngle, dispatchToOutputAngle, calibrateBeltNeutralAngle } from './_shared/turntable-angle-math';
-import type { DriveHandle, BeltHandle } from './_shared/lazy-drive';
 
+// Turntable publishes the conveyor interop signals `Conveyor.*` (NOT `Turntable.*`).
+// `signalNamespace: 'Conveyor'` scopes the signals block to that partner type, so
+// `self.sig.Run/Occupied/Running/PartCount` read/write `Conveyor.<key>`.
+const SIGNALS = {
+  Run:       'PLCInputBool',
+  Occupied:  'PLCOutputBool',
+  Running:   'PLCOutputBool',
+  PartCount: 'PLCOutputInt',
+} as const;
+
+const OCCUPIED_SIGNAL = 'Conveyor.Occupied';
 const CONFIG = {
-  runSignal:       'Conveyor.Run',
-  occupiedSignal:  'Conveyor.Occupied',
-  runningSignal:   'Conveyor.Running',
-  partCountSignal: 'Conveyor.PartCount',
   neighborRefreshSec: 0.5,
   dischargeClearSec: 0.5,
   emptyResetSec: 0.75,
@@ -34,8 +62,8 @@ interface TurntableLocal {
   rotaryNode: Object3D | null;
   sensorNode: Object3D | null;
   beltNode: Object3D | null;
-  drive: DriveHandle | null;
-  belt: BeltHandle | null;
+  drive: RV.DriveHandle | null;
+  belt: RV.BeltHandle | null;
   driveAxis: Vector3;
 
   sensorOccupied: boolean;
@@ -53,10 +81,10 @@ interface TurntableLocal {
   _quat: Quaternion;
 }
 
-type TurntableSelf = RV.Self<TurntableLocal>;
+type TurntableSelf = RV.Self<TurntableLocal, typeof SIGNALS>;
 
 function portOccupiedSignal(portId: string): string {
-  return `${CONFIG.occupiedSignal}@${portId}`;
+  return `${OCCUPIED_SIGNAL}@${portId}`;
 }
 
 function axisFromDriveNodeName(name: string): Vector3 {
@@ -88,10 +116,10 @@ const surfaceOccupied = (self: TurntableSelf): boolean =>
   self.local.beltNode ? self.surfaceOccupied(self.local.beltNode) : self.local.sensorOccupied;
 
 const publishOccupied = (self: TurntableSelf, surf = surfaceOccupied(self)): void => {
-  self.signals.set(CONFIG.occupiedSignal, surf || self.state !== 'idle');
+  self.sig.Occupied.set(surf || self.state !== 'idle');
 };
 const publishRunning = (self: TurntableSelf): void => {
-  self.signals.set(CONFIG.runningSignal, self.state !== 'idle');
+  self.sig.Running.set(self.state !== 'idle');
 };
 
 const componentRegistry = (self: TurntableSelf): ComponentRegistryShape | null => {
@@ -128,7 +156,7 @@ const outputs = (l: TurntableLocal): PortConnection[] => l.connections.filter(c 
 const freeOutputs = (self: TurntableSelf): PortConnection[] => {
   const out: PortConnection[] = [];
   for (const c of outputs(self.local)) {
-    const sigName = `/${c.ownerRoot.name}/${CONFIG.occupiedSignal}`;
+    const sigName = `/${c.ownerRoot.name}/${OCCUPIED_SIGNAL}`;
     if (self.signals.get(sigName) === true) continue;
     out.push(c);
   }
@@ -147,10 +175,10 @@ function enter(self: TurntableSelf, next: State): void {
 function tryReceive(self: TurntableSelf): void {
   const l = self.local;
   if (self.state !== 'idle') return;
-  if (self.signals.get<boolean>(CONFIG.runSignal) !== true) return;
+  if (!self.sig.Run.get()) return;
 
   const ready = inputs(l).filter(c =>
-    self.signals.get(`/${c.ownerRoot.name}/${CONFIG.occupiedSignal}`) === true);
+    self.signals.get(`/${c.ownerRoot.name}/${OCCUPIED_SIGNAL}`) === true);
   if (ready.length === 0) return;
   const waiting = ready[Math.floor(Math.random() * ready.length)];
 
@@ -164,7 +192,7 @@ function tryReceive(self: TurntableSelf): void {
 
 function tryDispatch(self: TurntableSelf): void {
   const l = self.local;
-  if (self.signals.get<boolean>(CONFIG.runSignal) !== true) { setBelt(l, false); enter(self, 'holding'); return; }
+  if (!self.sig.Run.get()) { setBelt(l, false); enter(self, 'holding'); return; }
   const candidates = freeOutputs(self);
   if (candidates.length === 0) { setBelt(l, false); enter(self, 'holding'); return; }
 
@@ -235,7 +263,7 @@ function maxCapacity(self: TurntableSelf): number {
  * `RotateComplete` after `|Δang|/RotationSpeed` seconds (NO physical drive).
  * Records the new commanded angle and the tween coupling target.
  */
-function desRotateTo(self: TurntableSelf, targetAngle: number, next: State, mu: MU | null): void {
+function desRotateTo(self: TurntableSelf, targetAngle: number, next: State, mu: RV.MU | null): void {
   const l = self.local;
   const dt = Math.abs(targetAngle - l.lastCommandedAngle) / rotationSpeed(self);
   l.lastCommandedAngle = targetAngle;
@@ -245,7 +273,7 @@ function desRotateTo(self: TurntableSelf, targetAngle: number, next: State, mu: 
 }
 
 /** Pick a free output port for the DES router (first not-occupied output). */
-function desSelectOutput(self: TurntableSelf): Port | null {
+function desSelectOutput(self: TurntableSelf): RV.Port | null {
   const free = self.freeOutputs();
   return free.length > 0 ? free[0] : null;
 }
@@ -261,9 +289,14 @@ const def = {
     MaxCapacity:   { type: 'number' as const, default: 1 },
   },
 
-  // Per-instance state slot — used by BOTH the continuous shim and the DES
-  // model-load binding so a directly-created self gets its local fields.
-  local: (): TurntableLocal => ({
+  // The conveyor interop signals — published under the `Conveyor` namespace
+  // (cross-type convention), auto-declared as `Conveyor.<key>` + typed self.sig.
+  signalNamespace: 'Conveyor' as const,
+  signals: SIGNALS,
+
+  // Per-instance state slot (type-inferred). Used by BOTH the continuous shim and
+  // the DES model-load binding so a directly-created self gets its local fields.
+  state: (): TurntableLocal => ({
     rotaryNode: null,
     sensorNode: null,
     beltNode: null,
@@ -289,7 +322,8 @@ const def = {
   logic: { enter, tryReceive, tryDispatch, onPartAtCenter, onRotationDone, finishCycle, abortToIdle },
 
   // Mode-agnostic init (continuous AND DES): resolve nodes into self.local,
-  // declare signals, build the Reset context menu.
+  // declare signals (the rotary drive + sensor are HARD-required; the belt is
+  // OPTIONAL), build the Reset context menu.
   setup(self: TurntableSelf): void {
     const l = self.local;
     const rootTag = self.root.name || '<unnamed>';
@@ -305,10 +339,17 @@ const def = {
     l.beltNode = beltNode;
     l.driveAxis = axisFromDriveNodeName(rotaryNode.name);
 
-    self.signal(CONFIG.runSignal,       { type: 'PLCInputBool',  initialValue: true });
-    self.signal(CONFIG.occupiedSignal,  { type: 'PLCOutputBool', initialValue: false });
-    self.signal(CONFIG.runningSignal,   { type: 'PLCOutputBool', initialValue: false });
-    self.signal(CONFIG.partCountSignal, { type: 'PLCOutputInt',  initialValue: 0 });
+    // Run defaults TRUE — the only signal whose initial value differs from the
+    // type-default. createSelf already declared the Conveyor.* contract (both
+    // paths, Bool→false); override Run here.
+    self.sig.Run.set(true);
+    // Stamp the inspector/hierarchy marker with the resolved nodes (the factory
+    // also stamps TurntableBehavior with the schema defaults — these deep-merge).
+    self.stamp('TurntableBehavior', {
+      Drive: rotaryNode.name,
+      Sensor: sensorNode.name,
+      ...(beltNode ? { Belt: beltNode.name } : {}),
+    });
 
     // Mode-agnostic shared-state init (B2): ALL self.prop fields both adapters
     // read MUST be initialised here so the DES path (which never runs
@@ -357,7 +398,7 @@ const def = {
         const present = v === true;
         if (present && !l.sensorOccupied) {
           l.partCount += 1;
-          self.signals.set(CONFIG.partCountSignal, l.partCount);
+          self.sig.PartCount.set(l.partCount);
         }
         l.sensorOccupied = present;
         publishOccupied(self);
@@ -430,7 +471,7 @@ const def = {
     // which case capacity alone gates acceptance — an idle table receives the
     // part, then aligns to the chosen OUTPUT during onAccept (B2: alignedPort is
     // initialised to null in setup(), the table is idle so it accepts).
-    canAccept(self: TurntableSelf, _mu: MU, port?: Port): boolean {
+    canAccept(self: TurntableSelf, _mu: RV.MU, port?: RV.Port): boolean {
       if (self.currentLoad >= maxCapacity(self)) return false;
       if (self.state !== 'idle' && self.state !== 'receiving') return false;
       if (port && self.prop['alignedPort'] != null && port.id !== self.prop['alignedPort']) {
@@ -441,7 +482,7 @@ const def = {
     // The part is on the platform. Pick a free output, rotate to it (time-based),
     // and schedule RotateComplete. With no free output, HOLD the MU (parked on
     // self.prop['heldMU']) until onDownstreamReady retries.
-    onAccept(self: TurntableSelf, mu: MU, port?: Port): boolean {
+    onAccept(self: TurntableSelf, mu: RV.MU, port?: RV.Port): boolean {
       self.prop['alignedPort'] = port?.id ?? null;
       const out = desSelectOutput(self);
       if (!out) {
@@ -457,7 +498,7 @@ const def = {
     },
     // Rotation to the chosen output is done — discharge: transfer the MU to the
     // selected output port (the native handshake blocks if the output is full).
-    onRotateComplete(self: TurntableSelf, mu: MU): void {
+    onRotateComplete(self: TurntableSelf, mu: RV.MU): void {
       const outId = self.prop['selectedOutput'] as string | null;
       const out = outId != null ? self.outputs().find(p => p.id === outId) : undefined;
       enter(self, 'discharging');
@@ -483,14 +524,7 @@ const def = {
 };
 
 /** Turntable — multi-port router (factory-built; behaviour identical to the def). */
-const TurntableBehavior = defineLibraryComponent<TurntableLocal>(def, {
-  capabilities: { badgeColor: '#7e57c2', filterLabel: 'Behavior', hierarchyVisible: true, inspectorVisible: true },
-  badge: (self) => ({
-    Drive: self.local.rotaryNode!.name,
-    Sensor: self.local.sensorNode!.name,
-    ...(self.local.beltNode ? { Belt: self.local.beltNode.name } : {}),
-  }),
-});
+const TurntableBehavior = defineLibraryComponent(def);
 
 /** The material-flow definition (schema + logic + continuous + des) — for DES tests / runner. */
 export const TurntableFlow = def;

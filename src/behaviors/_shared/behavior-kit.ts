@@ -26,6 +26,7 @@ import type {
   Port as MaterialFlowPort,
   BeltHandle as MaterialFlowBeltHandle,
   DriveHandle as MaterialFlowDriveHandle,
+  SignalShape as MaterialFlowSignalShape,
 } from '../../core/material-flow/material-flow-self';
 
 // ── Factory + options ──────────────────────────────────────────────────────
@@ -45,8 +46,13 @@ export {
  * `type { RV }` pulls in NO runtime code.
  */
 export namespace RV {
-  /** The shared `self` context, parameterised by the local-state slot `L`. */
-  export type Self<L = Record<string, never>> = MaterialFlowSelf<L>;
+  /**
+   * The shared `self` context, parameterised by the local-state slot `L` and the
+   * optional signals shape `SIG` (so `self.sig.<key>` is key-checked + typed when
+   * the definition declares a `signals` block).
+   */
+  export type Self<L = Record<string, never>, SIG extends MaterialFlowSignalShape = Record<string, never>> =
+    MaterialFlowSelf<L, SIG>;
   /** A movable unit as seen by the material-flow layers. */
   export type MU = MaterialFlowMU;
   /** A unified material-flow port. */

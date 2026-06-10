@@ -105,7 +105,7 @@ describe('DES end-to-end — Source → 2 Conveyors → Sink', () => {
       onTransfer: (mu) => runner.makeTransfer(adapters[0])(mu),
       canAcceptDownstream: (mu) => adapters[0].nextComponents.some(c => c.canAccept(mu as never)),
       spawnMU: () => runner.createMU(),
-      local: SourceDef.local ? SourceDef.local() : undefined,
+      local: (SourceDef.state ?? SourceDef.local)?.(),
     });
     srcSelf.prop['Interval'] = 3;
     adapters.push(runner.addInstance(SourceDef, srcSelf, srcCtx.root));
@@ -117,7 +117,7 @@ describe('DES end-to-end — Source → 2 Conveyors → Sink', () => {
       scheduler: runner.makeScheduler(ConveyorDef, idAt(1)),
       onTransfer: (mu) => runner.makeTransfer(adapters[1])(mu),
       canAcceptDownstream: (mu) => adapters[1].nextComponents.some(c => c.canAccept(mu as never)),
-      local: ConveyorDef.local!(),
+      local: (ConveyorDef.state ?? ConveyorDef.local)!(),
     });
     c1Self.prop['ConveyorLength'] = 1000; c1Self.prop['ConveyorSpeed'] = 1000;
     adapters.push(runner.addInstance(ConveyorDef, c1Self, c1.root));
@@ -129,7 +129,7 @@ describe('DES end-to-end — Source → 2 Conveyors → Sink', () => {
       scheduler: runner.makeScheduler(ConveyorDef, idAt(2)),
       onTransfer: (mu) => runner.makeTransfer(adapters[2])(mu),
       canAcceptDownstream: (mu) => adapters[2].nextComponents.some(c => c.canAccept(mu as never)),
-      local: ConveyorDef.local!(),
+      local: (ConveyorDef.state ?? ConveyorDef.local)!(),
     });
     c2Self.prop['ConveyorLength'] = 2000; c2Self.prop['ConveyorSpeed'] = 1000;
     adapters.push(runner.addInstance(ConveyorDef, c2Self, c2.root));

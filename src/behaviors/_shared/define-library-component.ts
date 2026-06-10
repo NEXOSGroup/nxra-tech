@@ -24,7 +24,7 @@
  */
 
 import type { Behavior } from '../../core/behaviors';
-import type { RVBindContext, SignalType } from '../../core/behavior-runtime';
+import type { RVBindContext } from '../../core/behavior-runtime';
 import {
   registerComponentSchema,
   getSchemaDefaults,
@@ -60,11 +60,6 @@ const STANDARD_BADGE: ComponentCapabilities = {
 
 /** Marker types whose schema/capabilities are already registered (guard). */
 const _registeredMarkers = new Set<string>();
-
-/** Typed initial value for an auto-declared signal: Bool → false, Int/Float → 0. */
-function signalInitialValue(type: SignalType): boolean | number {
-  return type.includes('Bool') ? false : 0;
-}
 
 /** Resolve all convention-named nodes of a `requires` kind under `root`. */
 function resolveRequiredNodes(root: Object3D, kind: RequiresKind): Object3D[] {
@@ -143,23 +138,16 @@ export function defineLibraryComponent<
       const self = createSelf<S, SIG>(rv, def, {
         mode: 'continuous',
         local: makeLocal ? makeLocal() : undefined,
-        // Pass the signals shape so `self.sig.<key>` accessors are built.
+        // Pass the signals shape so `self.sig.<key>` accessors are built AND the
+        // `signals` block is auto-declared into the store. `createSelf` does both
+        // (on BOTH the continuous and DES paths), so the factory no longer needs
+        // a separate auto-declare step here.
         signals: signalsBlock,
       });
 
-      // 3a. `signals` block — auto-declare each signal as `${type}.${key}` with a
-      //     typed initial value (replaces `declareConveyorSignalsWith`). Done in
-      //     the mode-agnostic phase (BEFORE def.setup) so setup/sig can use them.
-      if (signalsBlock) {
-        for (const key of Object.keys(signalsBlock)) {
-          const type = signalsBlock[key];
-          self.signal(`${def.type}.${key}`, { type, initialValue: signalInitialValue(type) });
-        }
-      }
-
-      // 3b. `requires` block — resolve convention nodes, inject `self.<key>`,
-      //     auto-disable on a missing node, collect the auto-badge payload. Done
-      //     BEFORE def.setup so setup can rely on the injected nodes.
+      // `requires` block — resolve convention nodes, inject `self.<key>`,
+      // auto-disable on a missing node, collect the auto-badge payload. Done
+      // BEFORE def.setup so setup can rely on the injected nodes.
       const injected = self as unknown as Record<string, Object3D | null>;
       const autoBadge: Record<string, unknown> = {};
       if (requiresBlock) {

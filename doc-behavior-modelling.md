@@ -1,143 +1,274 @@
-# Behavior Modelling — Continuous & DES
+# Behavior Modelling — Continuous & DES (a beginner's guide)
 
-realvirtual WEB models material-flow components — conveyors, turntables, sources, sinks,
-stations, storages — as **component definitions** that run in two simulation paradigms from
-a single source of truth:
+This guide explains how the material-flow components in `src/behaviors/` work — conveyors,
+turntables, sources, sinks — so you can **read** them and **write** your own. No prior knowledge
+of the engine is assumed; read it top to bottom once and the code will make sense.
 
-- **Continuous** — fixed 60 Hz step, MUs move over transport surfaces, sensors are AABB
-  overlaps, drives jog belts and axes.
-- **DES (discrete-event)** — an event queue jumps time between events; flow is driven by a
-  `canAccept → accept → transfer` handshake instead of physics.
+## The big idea: one definition, two simulations
 
-The same component definition serves both. The decision logic is written once; only the way it
-is *triggered* and the *effect* it produces differ per paradigm.
+A factory line can be simulated two very different ways:
 
-## defineMaterialFlow — three layers
+- **Continuous** — time advances in tiny fixed steps (60 times a second). Parts physically slide
+  along belt surfaces, sensors fire when a part's box overlaps them, drives jog motors. This is
+  what you see when you press play.
+- **DES (discrete-event)** — time *jumps* from one event to the next ("part arrives in 4.2 s",
+  "rotation finishes in 0.8 s"). Nothing moves frame-by-frame; the simulation asks each component
+  *"can you accept this part?"* and hands parts along a chain. This runs thousands of times faster
+  and is used for throughput analysis.
 
-A component is one `defineMaterialFlow({ type, kind, models, schema, logic, continuous, des })`
-in one file:
+The clever part: **you write the component once and it runs in both.** The decision logic ("should
+the belt run?", "which output port do I send this part to?") is written a single time. Only *how
+that decision is triggered* (a 60 Hz tick vs. a scheduled event) and *what effect it has* (jog a
+belt vs. schedule an arrival) differ — and those live in two small adapter blocks.
+
+**Supporting both is optional — it depends on the use case.** The `continuous` and `des` blocks are
+independent; implement only the one(s) you need:
+
+- **Both** — for a conveyor/turntable you want to run live in play mode *and* fast-forward for
+  throughput analysis. (Conveyor, Turntable.)
+- **Continuous only** — a purely visual or play-mode component that never participates in DES.
+  Leave out the `des` block.
+- **DES only** — a component whose continuous behaviour is already owned by a dedicated engine
+  object, so the behavior must NOT also drive it. Source/Sink use `inert: true` with only a `des`
+  block; the engine `RVSource`/`RVSink` runs play mode.
+
+A component with only one adapter simply does nothing in the other paradigm — no harm done. Add the
+second adapter later if a use case needs it.
+
+## Anatomy of a component
+
+A component is **one call** to `defineLibraryComponent(def)` in one file. The `def` is a plain
+object with named blocks. Here is the skeleton (Conveyor, simplified):
 
 ```ts
-defineMaterialFlow({
-  type: 'Conveyor',           // stable id: rv_extras key AND DES action namespace
-  kind: 'conveyor',           // conveyor | router | station | source | sink | storage
-  models: ['*Conveyor*'],     // GLB / placed-asset name matcher (glob)
-  schema: { /* mode-agnostic params from rv_extras */ },
-  setup(self),                          // mode-agnostic init: nodes, signals, badge, menu — BOTH runners
-  logic:      { /* shared: state machine + routing decisions — no time, no physics */ },
-  continuous: { setup, fixedUpdate },   // adapter: trigger = sensor/surface/poll, effect = physics
-  des:        { onAccept, onArrival, /* ... */ }, // adapter: trigger = events, effect = time
-})
+import { defineLibraryComponent, createTransitTimer, type RV } from './_shared/behavior-kit';
+
+const SIGNALS = { Run:'PLCInputBool', Occupied:'PLCOutputBool' } as const;  // the PLC contract
+
+interface ConveyorLocal { belt: RV.Node | null; partAtSensor: boolean; /* … */ }
+type ConveyorSelf = RV.Self<ConveyorLocal, typeof SIGNALS>;
+
+const def = {
+  type:   'Conveyor',          // stable id — the rv_extras key AND the DES action namespace
+  kind:   'conveyor',          // family: conveyor | router | source | sink | …
+  models: ['*Conveyor*'],      // which placed assets bind this (glob on the GLB/asset name)
+  schema:  { ConveyorSpeed: { type:'number', default:200 } },  // params read from the GLB
+  signals: SIGNALS,            // auto-declared PLC signals → typed self.sig.X accessors
+  state:   () => ({ belt:null, partAtSensor:false /* … */ }),  // per-instance memory → self.local
+
+  logic:   { shouldFlow, onPartAtSensor },          // shared brain — no time, no physics
+  setup(self)              { /* mode-agnostic init: find nodes, set defaults, build menu */ },
+  continuous: { setup, fixedUpdate },               // adapter: 60 Hz physics
+  des:        { onAccept, onArrival, onDownstreamReady }, // adapter: scheduled events
+};
+
+export const ConveyorFlow = def;                    // the raw def — DES runner & tests read it
+export default defineLibraryComponent(def);         // the runnable Behavior — auto-discovered
 ```
 
-- **schema** — parameters parsed from the GLB `rv_extras`, identical in both worlds.
-- **setup** — mode-agnostic per-instance init, called by BOTH runners before the mode-specific
-  wiring: resolve nodes into `self.local`, declare signals, stamp the inspector badge, build the
-  context menu. The DES runner needs all of this too — it just interprets the resolved nodes and
-  signals differently — so it lives here, not inside `continuous`.
-- **logic** — the paradigm-independent brain: routing (`selectInput`/`selectOutput`),
-  the flow decision (`shouldFlow`), and state-machine transitions (`enter`, `onPartArrived`,
-  `onRotationDone`, …). It reads and mutates `self` only; it never touches time or geometry.
-- **continuous** — a thin adapter over the shared init. `setup(self)` adds the continuous-only
-  trigger wiring (drive/belt handles, the downstream interlock, the AABB sensor subscription).
-  `fixedUpdate(self, dt)` reads triggers (sensor edges, surface occupancy, `drive.isAtTarget`)
-  and applies physical effects (belt jog, drive moveTo).
-- **des** — a thin adapter consumed by the DES runner. Hooks (`canAccept`, `onAccept`,
-  `onArrival`, `onRotateComplete`, `onDownstreamReady`, …) react to scheduled events and apply
-  time-based effects (`self.in(delay, 'Arrival', mu)`, `self.transfer(mu, port)`).
+### The blocks, one by one
 
-The `logic` block is the shared core both adapters call; `continuous` and `des` are only the
-edges where the same decisions meet 60 Hz physics or an event queue.
+| Block | What it is | Runs in |
+|---|---|---|
+| `type` / `kind` / `models` | identity + which assets bind it | — |
+| `schema` | parameters parsed from the GLB `rv_extras` (`value ?? default`) | both |
+| `signals` | the PLC signal contract — auto-declared, reachable as typed `self.sig.<key>` | both |
+| `state` | a factory for the component's per-instance memory → `self.local` (typed) | both |
+| `logic` | the **shared brain**: flow decisions + state-machine transitions. Touches only `self` — never time or geometry | both |
+| `setup(self)` | **mode-agnostic init**, run by BOTH simulations before their adapter: resolve nodes, set signal defaults, stamp the inspector badge, build the right-click menu | both |
+| `continuous` | the **physics adapter**: `setup` wires triggers (sensor subscription, drive handles); `fixedUpdate(self, dt)` reads triggers and applies physical effects (jog belt, move drive) | continuous only |
+| `des` | the **event adapter**: hooks (`onAccept`, `onArrival`, `onDownstreamReady`, …) react to scheduled events and schedule effects (`self.in(delay, 'Arrival', mu)`) | DES only |
 
-## The `self` context
+The golden rule: **decisions go in `logic`, init goes in `setup`, and the two adapters are as thin
+as possible.** If you find yourself writing the same decision in `continuous` and `des`, it belongs
+in `logic`.
 
-Every layer receives the same per-instance `self` — a facade over the runtime:
+## Why `setup` is "mode-agnostic" — the two run paths
+
+This trips up newcomers, so read carefully. The same `def` is started two different ways:
+
+```
+CONTINUOUS                                  DES
+──────────                                  ───
+factory bind(rv):                           DESRunner:
+  createSelf(rv, def)   ← declares signals    createSelf(rv, def)   ← declares signals
+  def.setup(self)       ← YOUR setup          def.setup(self)       ← YOUR setup (same!)
+  def.continuous.setup(self)                  (no continuous block)
+  rv.onFixedUpdate(() => def.continuous.fixedUpdate(self, dt))
+                                              events call def.des.onAccept / onArrival / …
+```
+
+Both paths call `createSelf` (which declares your `signals`) and then `def.setup`. **Only the
+continuous path runs `continuous.*`; only the DES path runs `des.*`.** That is why anything BOTH
+simulations need — resolving the belt node, setting `Run = true`, building the timing model — must
+live in `setup`, not in `continuous.setup`. If you put it in `continuous.setup`, the DES path never
+sees it.
+
+`inert: true` (Source/Sink) is a special case: `setup` still runs, but **no `fixedUpdate` is
+registered** — because for those the continuous physics is owned by a different engine object
+(`RVSource`/`RVSink`), and the behavior would otherwise double up. They carry only a `des` adapter.
+
+## Reading `Conveyor.ts`
+
+A conveyor is a **zone-accumulation** belt: one part per zone. It runs unless a part is sitting at
+its exit sensor *and* the next zone downstream is still full — then it stops so parts queue up
+instead of crashing into each other. That rule is called **ZPA** (Zoned Part Accumulation).
+
+Walk the file:
+
+1. **`SIGNALS`** — the four PLC signals (`Run`, `Occupied`, `Running`, `PartCount`). Declared once;
+   used everywhere through `self.sig.Run.get()` etc. (typed: `get()` returns a real `boolean`, so
+   no `=== true` noise).
+2. **`logic.shouldFlow`** — the ZPA rule, one line:
+   `self.sig.Run.get() && !(partAtSensor && downstreamOccupied)`. This is the shared brain; both
+   adapters call it.
+3. **`setup`** — finds the belt + sensor node (`self.findTransport()/findSensor()`), bails out with
+   `self.disable(...)` if they're missing, sets `Run = true` (the one non-default), builds the DES
+   timing model with `createTransitTimer`, and adds the Run/Stop right-click menu. Runs on **both**
+   paths.
+4. **`continuous.setup`** — the physics wiring: a belt handle, the downstream interlock object, and
+   a subscription to the sensor so `partAtSensor` updates when a part arrives.
+5. **`continuous.fixedUpdate`** — every tick: publish surface occupancy, ask `shouldFlow`, jog the
+   belt accordingly.
+6. **`des`** — the event version of the same flow. `onAccept` schedules an `Arrival` after the part's
+   transit time (`createTransitTimer` computed it); `onArrival` marks the part at the sensor and
+   tries to release it; `onDownstreamReady` retries a part that was parked because the next zone was
+   full.
+
+Notice `continuous.fixedUpdate` and `des.onArrival` both end in the **same** `shouldFlow` /
+`tryRelease` logic — that's the "write once" payoff.
+
+## Reading `Turntable.ts`
+
+A turntable is a **router**: a part arrives, the table rotates to align with a free output, then
+discharges. It's bigger than a conveyor because it's a genuine **state machine** (FSM) with seven
+states: `idle → aligning_in → receiving → holding → rotating_out → discharging → discharge_clearing
+→ idle`.
+
+How to read it:
+
+- **`CONFIG` + `SIGNALS`** — constants and the PLC contract. Note `signalNamespace: 'Conveyor'`:
+  a turntable publishes `Conveyor.Run/Occupied/…` (NOT `Turntable.*`) because it joins a conveyor
+  line and must speak the same signal names as its neighbours (see *The interlock* below).
+- **The small helpers** (`setBelt`, `blockAllInputs`, `openInputPort`, `publishOccupied`, …) — these
+  are the FSM's vocabulary. Each is one or two lines.
+- **`logic`** — the FSM transitions: `tryReceive` (pick a waiting input, rotate to it), `tryDispatch`
+  (pick a free output, rotate to it), `onRotationDone`, `finishCycle`, `abortToIdle`. These are the
+  decisions both simulations share.
+- **`setup`** — resolves the rotary drive + sensor (hard-required) and the belt (optional), sets
+  `Run = true`, initialises the shared `self.prop` fields the DES path reads, builds the Reset menu.
+- **`continuous.fixedUpdate`** — the FSM *driver*: it polls `drive.isAtTarget()` to detect when a
+  rotation finished, refreshes the neighbour topology periodically, and `switch`es on `self.state`
+  to apply the per-state effect (jog belt on/off, advance the clear timer).
+- **`des`** — the same router as scheduled events: `onAccept` picks the output and schedules a
+  `RotateComplete` after `|Δangle| / RotationSpeed` seconds (no physical drive — DES only consumes
+  *time*); `onRotateComplete` discharges; `onDownstreamReady` retries a held part.
+
+The angle math (`alignToInputAngle`, `dispatchToOutputAngle`) and the snap-graph topology
+(`classifyConnections`, `listOwnSnaps`) live in `_shared/` because they are real, reusable geometry
+— not trivial one-liners.
+
+## The `self` context (quick reference)
+
+Every block receives the same per-instance `self`, a facade over the runtime:
 
 | Member | Purpose |
 |---|---|
-| `signals.get/set/on`, `signal(name, opts)` | instance-scoped PLC signals; live signals override local behavior |
-| `drive(ref)` | resolved drive handle (`moveTo`, `jogForward`, `isAtTarget`, `currentSpeed`) |
-| `ports`, `inputs()`, `outputs()`, `freeOutputs()` | connections resolved from the snap graph |
-| `state`, `setState(name)` | the FSM string |
-| `prop` | snapshot-safe key/value bag (survives DES snapshots) |
-| `transfer(mu, fromPort?)` | hand a MU to a downstream component |
-| `in(delay, hook, mu?)`, `at(time, hook, mu?)` | DES scheduling (continuous: inert) |
-| `contextMenu(target, items)` | right-click actions |
+| `self.sig.<Key>.get() / .set(v)` | typed access to a `signals`-block signal (from the `signals` block) |
+| `self.signals.get/set/on`, `self.signal(name, opts)` | raw signal bus (for dynamic / cross-type names) |
+| `self.local` | your per-instance memory (typed by the `state` factory) |
+| `self.prop` | snapshot-safe key/value bag (survives DES snapshots; used for cross-adapter shared state) |
+| `self.state`, `self.setState(name)` | the FSM string |
+| `self.findTransport() / findSensor() / findRotaryDrive()` | resolve a convention node under the root |
+| `self.attachBelt(node) / attachDrive(node)` | a lazy belt/drive handle (`run`, `moveTo`, `isAtTarget`) |
+| `self.surfaceOccupied(node)` | is a MU physically on this surface? |
+| `self.downstreamInterlock()` | the cached `{ occupied() }` reader for the downstream neighbour |
+| `self.declareConveyorSignals()` | declare the standard 4 conveyor signals (when not using a `signals` block) |
+| `self.disable(reason)` | abort binding (warns, skips the adapters) |
+| `self.outputs() / inputs() / freeOutputs()` | port connections from the snap graph |
+| `self.transfer(mu, port?)` | hand a MU downstream (DES handshake; continuous: inert) |
+| `self.spawn()` | mint a new MU (Source) |
+| `self.in(delay, hook, mu?) / at(time, hook, mu?)` | schedule a DES event (continuous: inert) |
+| `self.stamp(type, fields)` | write the inspector/hierarchy badge |
+| `self.contextMenu(target, items)` | right-click actions |
 
-Signals are always available and runner-independent: in continuous mode they are live
-subscriptions; in DES mode signal edges become events. This is what lets one logic layer run
-unchanged in both worlds — and what lets a live PLC override local behavior in either.
+Because signals work the same in both runners (live subscriptions in continuous, edge-events in
+DES), the `logic` layer runs unchanged in both — and a **live PLC can override** any signal in
+either mode.
+
+## The interlock is a name convention (not an interface)
+
+Components coordinate through **named signals, not object references** — so the same logic works in
+continuous, live-PLC, and DES modes. There is no compile-time interface; you join the line simply by
+publishing the agreed signal name:
+
+- each component publishes `Conveyor.Occupied` (its root); a router additionally publishes
+  `Conveyor.Occupied@<portId>` per input port, keyed by the **stable snap id**.
+- an upstream component reads its downstream neighbour's `Conveyor.Occupied[@id]`. No successor →
+  treated as **blocked** (a part holds at the end of the line instead of vanishing).
+- the **ZPA release rule**: run unless a part is held locally **and** the downstream zone is occupied.
+
+Any component that publishes `Conveyor.Occupied` joins the line — a conveyor, a turntable, a sink
+(which publishes `false` so the line discharges into it), or a customer machine. The snap graph
+defines *who* the neighbour is; the signal name defines *how* they coordinate. (This is why a
+turntable uses `signalNamespace: 'Conveyor'`.)
 
 ## Zone occupancy is surface-based
 
-A conveyor or turntable zone is **occupied** when a MU is physically on its belt surface —
-not merely at a point sensor. `isSurfaceOccupied(viewer, beltNode)` detects this, and the
-component publishes `Conveyor.Occupied` from it **every tick**, reflecting "a good anywhere on
-the belt" (one good per zone).
-
-This is distinct from the local point sensor. The sensor drives a separate `partAtSensor`
-discharge trigger (and the part counter); it does not publish occupancy. So:
+A zone is **occupied** when a MU is physically on its belt surface — not merely at a point sensor.
+`self.surfaceOccupied(beltNode)` detects this, and the component publishes `Conveyor.Occupied` from
+it **every tick** (one good per zone). This is distinct from the local point sensor, which drives a
+separate `partAtSensor` discharge trigger (and the part counter) and does **not** publish occupancy:
 
 - **published occupancy** (surface) = what the upstream neighbour reads as back-pressure.
 - **local sensor trigger** = what gates discharge in the ZPA rule.
 
-## The interlock is a name convention
-
-Components coordinate through **named signals, not object references** — so the same logic
-works in continuous, live-PLC, and DES modes. There is no compile-time interface; participation
-is by publishing the agreed signal name:
-
-- each component publishes `Conveyor.Occupied` (root), and a multi-port router additionally
-  publishes `Conveyor.Occupied@<portId>` per input port, keyed by the **stable snap id**.
-- an upstream component reads its downstream neighbour's `Conveyor.Occupied[@id]` — the per-port
-  signal for the exact port it mates to, falling back to the root signal. No successor → treated
-  as **blocked** (a part holds at the end of the line instead of discharging into nothing).
-- the **ZPA release rule**: run unless a part is held locally **and** the downstream zone is
-  occupied.
-
-Any component that publishes `Conveyor.Occupied` joins the line: a conveyor, a turntable, a sink
-(which publishes `false` so the line discharges into it), or a customer machine. The snap graph
-defines *who* the downstream neighbour is; the signal name defines *how* they coordinate.
-
-## Continuous modelling
-
-- `continuous.fixedUpdate(self, dt)` runs at a fixed 60 Hz after transport surfaces advance MUs.
-- belt/axis motion is commanded through drive handles; topology (downstream neighbour, router
-  ports) is resolved from the snap graph and refreshed periodically as the layout changes.
-- back-pressure is physical: when the flow decision is false, the belt stops and parts queue.
-
-## DES modelling
-
-- a downstream component is reached by reference through its port: `port.ownerComponent`.
-- flow is a blocking handshake: an upstream offers a MU (`canAccept(mu)`); if accepted it
-  `transfer`s; if refused the MU is held (`blockedMUs`) and released later via
-  `onDownstreamReady`. Durations are scheduled (`self.in(transitTime, 'Arrival', mu)`).
-- in DES the published `Conveyor.Occupied` signal becomes an observability / overlay value
-  (keeping HMI and live overlays consistent) while the handshake drives the actual flow.
-- the simulation kernel switches Continuous ↔ DES with a clean restart (reset-on-switch); animated
-  parity comes from a central sim-time tween registry, so the same layout looks identical and
-  can be fast-forwarded for throughput analysis.
-
 ## Shared building blocks
 
-| Module | Provides |
+| Module (in `_shared/`) | Provides |
 |---|---|
-| `_shared/transport-links.ts` | the interlock: `createDownstreamInterlock`, `outputLink(s)`, `linkOf`, `portIds`, `declareConveyorSignalsWith` |
-| `_shared/lazy-drive.ts` | `attachBelt` / `attachDrive` — drive handles that resolve on demand |
-| `_shared/surface-occupancy.ts` | `isSurfaceOccupied(viewer, node)` |
-| `_shared/snap-graph-helpers.ts` | port topology: `findOutputPairings`, `classifyConnections`, `listOwnSnaps` |
-| `_shared/turntable-angle-math.ts` | rotary alignment / dispatch angles |
+| `behavior-kit.ts` | the one-stop import: `defineLibraryComponent`, the `RV.*` types, `createTransitTimer` |
+| `define-library-component.ts` | the factory itself (badge, schema registration, the continuous bind) |
+| `transit-timing.ts` | `createTransitTimer(self, belt, sensor)` — conveyor DES transit time + entry/exit tween |
+| `transport-links.ts` | the interlock: `createDownstreamInterlock`, `linkOf`, `portIds`, `declareConveyorSignalsWith` |
+| `lazy-drive.ts` | `attachBelt` / `attachDrive` — drive handles that resolve on demand |
+| `surface-occupancy.ts` | `isSurfaceOccupied(viewer, node)` |
+| `snap-graph-helpers.ts` | port topology: `classifyConnections`, `listOwnSnaps`, `findOutputPairings` |
+| `turntable-angle-math.ts` | rotary alignment / dispatch angles |
 
-## Authoring a new component
+Trivial one-line rules and small constants stay **inline in the component** (so it reads top to
+bottom); only genuinely reusable, non-trivial machinery goes in `_shared/`.
 
-1. add `src/behaviors/MyComponent.ts` → `defineMaterialFlow({ type, kind, models, schema, setup, logic, continuous, des })`.
-2. put routing and state-machine decisions in `logic` (so both paradigms share them).
-3. `setup(self)` resolves nodes into `self.local`, declares signals, stamps the badge and builds
-   the context menu (mode-agnostic). `continuous.setup` adds the AABB sensor wiring + drive handles;
-   `continuous.fixedUpdate` publishes surface occupancy and applies physical effects.
-4. add `des` hooks for the event-driven path.
-5. coordinate with neighbours by publishing/reading `Conveyor.Occupied[@id]`.
-6. add tests under `tests/`.
+## Authoring a new component (step by step)
+
+1. Create `src/behaviors/MyThing.ts`. Import from `./_shared/behavior-kit`.
+2. Declare your `SIGNALS` contract and a `state` shape (with an interface for typed handles).
+3. Write the `def`: `type` / `kind` / `models`, `schema`, `signals`, `state`, then:
+   - put flow + state-machine decisions in **`logic`** (shared by both simulations);
+   - resolve nodes + set defaults + build the menu in **`setup`** (runs on both paths);
+   - wire triggers + apply physical effects in **`continuous`**;
+   - add the event-driven version in **`des`**.
+4. Export both: `export const MyThingFlow = def;` (the DES runner/tests read the raw def) and
+   `export default defineLibraryComponent(def);` (the auto-discovered runnable Behavior).
+5. Coordinate with neighbours by publishing/reading `Conveyor.Occupied[@id]`.
+6. Add a test under `tests/` (a continuous parity test + a `tests/des/` timing test).
+
+### What the three bottom lines mean
+
+```ts
+export const MyThingFlow = def;                 // 1
+const MyThingBehavior = defineLibraryComponent(def);  // 2
+export default MyThingBehavior;                 // 3
+```
+
+1. exports the **raw definition** — the DES runner and the unit tests reach into `def.logic` /
+   `def.des` / `def.setup` directly (they don't go through the runnable Behavior).
+2. `defineLibraryComponent(def)` turns the data `def` into a runnable **Behavior**: it registers the
+   schema + inspector badge and builds the `bind()` the continuous runner calls. Pass
+   `{ inert: true }` for a source/sink, or `{ badge, capabilities }` to override the defaults.
+3. the **default export** is what auto-discovery picks up — the BehaviorManager globs
+   `behaviors/*.ts`, takes the default-exported Behavior, and binds it to any placed asset whose
+   name matches `models[]`.
 
 ## See also
 

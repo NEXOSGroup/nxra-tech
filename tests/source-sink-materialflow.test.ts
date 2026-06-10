@@ -81,6 +81,14 @@ function makeMockSelf(opts: {
       set: (n: string, v: boolean | number) => { writes.set(n, v); },
       on: () => { /* not used by des hooks */ },
     },
+    // Sink's signals block publishes `Conveyor.Occupied` via `self.sig.Occupied`
+    // (namespace 'Conveyor'). Mirror that here so the des hook resolves it.
+    sig: {
+      Occupied: {
+        get: (): boolean => writes.get('Conveyor.Occupied') === true,
+        set: (v: boolean | number): void => { writes.set('Conveyor.Occupied', v); },
+      },
+    },
     signal: () => { /* declare — irrelevant in mock */ },
     in: (delay: number, hook: string) => { schedules.push({ delay, hook }); return schedules.length; },
     at: (time: number, hook: string) => { schedules.push({ delay: time, hook }); return schedules.length; },

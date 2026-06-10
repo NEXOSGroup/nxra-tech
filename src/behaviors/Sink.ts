@@ -38,7 +38,11 @@
 
 import { defineLibraryComponent, type RV } from './_shared/behavior-kit';
 
-const OCCUPIED_SIGNAL = 'Conveyor.Occupied';
+// Sink publishes the conveyor interop signal `Conveyor.Occupied` (NOT `Sink.*`).
+// `signalNamespace: 'Conveyor'` scopes the signals block to that partner type,
+// so `self.sig.Occupied` reads/writes `Conveyor.Occupied`.
+const SIGNALS = { Occupied: 'PLCOutputBool' } as const;
+type SinkSelf = RV.Self<Record<string, never>, typeof SIGNALS>;
 
 /** Mark an MU consumed (destroyed). Mirrors RVSink's `markedForRemoval` flag
  *  when the visual carries it; always tags the structural MU's prop bag. */
@@ -55,13 +59,17 @@ const def = {
   models: ['*Sink*'],
   schema: {},
 
-  // ── Mode-agnostic init (continuous AND DES) — declares + publishes the
-  //    successor-clear interlock signal so an upstream conveyor that snaps into
-  //    the sink discharges its line. A Sink is ALWAYS a clear successor; this is
-  //    a single signal write at init, never per-tick, and never touches MUs.
-  setup(self: RV.Self): void {
-    self.signal(OCCUPIED_SIGNAL, { type: 'PLCOutputBool', initialValue: false });
-    self.signals.set(OCCUPIED_SIGNAL, false);
+  // The successor-clear interop signal — published under the `Conveyor` namespace
+  // (cross-type convention), auto-declared as `Conveyor.Occupied`.
+  signalNamespace: 'Conveyor' as const,
+  signals: SIGNALS,
+
+  // ── Mode-agnostic init (continuous AND DES) — publishes the successor-clear
+  //    interlock signal so an upstream conveyor that snaps into the sink
+  //    discharges its line. A Sink is ALWAYS a clear successor; this is a single
+  //    signal write at init, never per-tick, and never touches MUs.
+  setup(self: SinkSelf): void {
+    self.sig.Occupied.set(false);
   },
 
   // ── Continuous adapter — INERT for MU destruction. The engine RVSink owns
@@ -76,11 +84,11 @@ const def = {
      * the upstream line discharges. Always accepts (a sink has infinite
      * capacity). Runs only under the DESRunner, never on the continuous path.
      */
-    onAccept(self: RV.Self, mu: RV.MU): boolean {
+    onAccept(self: SinkSelf, mu: RV.MU): boolean {
       destroyMu(mu);
       // A sink is never a back-pressure point — publish clear so the upstream
       // conveyor reads its successor as free and pushes the next part.
-      self.signals.set(OCCUPIED_SIGNAL, false);
+      self.sig.Occupied.set(false);
       return true;
     },
   },

@@ -1,12 +1,40 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
-/** Conveyor — zone-accumulation conveyor. Authoring model: doc-behavior-modelling.md */
+/**
+ * Conveyor — a zone-accumulation belt (one part per zone).
+ *
+ * The rule, in one sentence: the belt RUNS, unless a part is sitting at its exit
+ * sensor AND the next zone downstream is still full — then it STOPS so parts queue
+ * up instead of crashing together. (This is "ZPA" — Zoned Part Accumulation.)
+ *
+ * Like every material-flow component this ONE definition runs two ways:
+ *   • Continuous — 60 Hz physics: the belt surface slides the part, the sensor
+ *     fires on overlap, `continuous.fixedUpdate` jogs the belt.
+ *   • DES — events: `des.onAccept` schedules the part's arrival after its transit
+ *     time (length / speed) and the handshake hands it downstream.
+ * The shared decision (`logic.shouldFlow`) is written once and used by both.
+ *
+ * How to read this file: SIGNALS (the PLC contract) → the `logic` functions (the
+ * shared brain) → the `def` object (schema, signals, state, setup, continuous, des).
+ *
+ * Full authoring guide: doc-behavior-modelling.md
+ */
 
 import { defineLibraryComponent, createTransitTimer, type RV, type TransitTimer } from './_shared/behavior-kit';
 
-const RUN = 'Conveyor.Run', OCCUPIED = 'Conveyor.Occupied', RUNNING = 'Conveyor.Running', PARTCOUNT = 'Conveyor.PartCount';
+// Public 4-signal conveyor contract — auto-declared (by createSelf) as
+// `Conveyor.<key>` and exposed as typed `self.sig.<key>` accessors.
+const SIGNALS = {
+  Run:       'PLCInputBool',
+  Occupied:  'PLCOutputBool',
+  Running:   'PLCOutputBool',
+  PartCount: 'PLCOutputInt',
+} as const;
 
+// Local state slot (type-inferred from `state`). `belt`/`sensor` are resolved
+// path-agnostically in setup() (the finders work on BOTH the continuous and DES
+// paths) and stored here.
 interface ConveyorLocal {
   belt: RV.Node | null;
   sensor: RV.Node | null;
@@ -20,18 +48,18 @@ interface ConveyorLocal {
   /** MUs currently in transit → their DES arrival event id (cancel-on-reset). */
   transitMUs: Map<number, number>;
 }
-type ConveyorSelf = RV.Self<ConveyorLocal>;
+type ConveyorSelf = RV.Self<ConveyorLocal, typeof SIGNALS>;
 
 // ── ZPA rule (shared: continuous + DES) ──
 // partAtSensor is the LOCAL discharge trigger — NOT the published surface-based Conveyor.Occupied.
 function shouldFlow(self: ConveyorSelf): boolean {
   const l = self.local;
   // ZPA: run unless a part sits at the sensor AND the downstream zone is occupied.
-  return self.signals.get<boolean>(RUN) === true && !(l.partAtSensor && (l.interlock?.occupied() ?? true));
+  return self.sig.Run.get() && !(l.partAtSensor && (l.interlock?.occupied() ?? true));
 }
 function onPartAtSensor(self: ConveyorSelf, present: boolean): void {
   const l = self.local;
-  if (present && !l.partAtSensor) self.signals.set(PARTCOUNT, ++l.partCount);
+  if (present && !l.partAtSensor) self.sig.PartCount.set(++l.partCount);
   l.partAtSensor = present;
 }
 function tryRelease(self: ConveyorSelf, mu: RV.MU): boolean {
@@ -40,7 +68,7 @@ function tryRelease(self: ConveyorSelf, mu: RV.MU): boolean {
   // retried on onDownstreamReady / run-signal. The object handshake is the
   // authority and parks the MU when the downstream is full.
   const out = self.outputs()[0];
-  if (self.signals.get<boolean>(RUN) === true && self.downstreamCanAccept(mu, out)) {
+  if (self.sig.Run.get() && self.downstreamCanAccept(mu, out)) {
     self.transfer(mu, out); self.local.partAtSensor = false; return true;
   }
   self.local.blockedMUs.push(mu); return false;
@@ -58,17 +86,23 @@ const def = {
     CalculatedArcLength: { type: 'number' as const, default: 0 },    // mm (curves; overrides length)
   },
 
-  // Per-instance state slot — used by BOTH the continuous shim and the DES
-  // model-load binding so a directly-created self gets its local fields.
-  local: (): ConveyorLocal => ({
+  // Public 4-signal conveyor contract — auto-declared (by createSelf) as
+  // `Conveyor.<key>` and exposed as typed `self.sig.<key>` accessors.
+  signals: SIGNALS,
+
+  // Per-instance state slot (type-inferred). Used by BOTH the continuous shim and
+  // the DES model-load binding so a directly-created self gets its local fields.
+  state: (): ConveyorLocal => ({
     belt: null, sensor: null, beltHandle: null, interlock: null,
     partAtSensor: false, partCount: 0, blockedMUs: [], timer: null, transitMUs: new Map(),
   }),
 
   logic: { shouldFlow, onPartAtSensor },
 
-  // Mode-agnostic init (continuous AND DES): resolve nodes, declare signals,
-  // resolve the DES timing model, build the context menu.
+  // Mode-agnostic init (continuous AND DES): resolve nodes, set the Run=true
+  // default, resolve the DES timing model, stamp the marker, build the context
+  // menu. The signals are already declared (by createSelf, both paths); the
+  // finders are path-agnostic, so this is the single resolve point for belt/sensor.
   setup(self: ConveyorSelf): void {
     const l = self.local;
     l.belt = self.findTransport();
@@ -81,15 +115,21 @@ const def = {
     l.blockedMUs.length = 0;
     l.transitMUs.clear();
 
-    self.declareConveyorSignals();
+    // Run defaults TRUE (the belt runs unless told to stop) — the only signal
+    // whose initial value differs from the type-default (createSelf declares
+    // Run=false with the rest); override it here on both paths.
+    self.sig.Run.set(true);
+    // Stamp the inspector/hierarchy marker with the resolved nodes (the factory
+    // also stamps ConveyorBehavior with the schema defaults — these deep-merge).
+    self.stamp('ConveyorBehavior', { Belt: l.belt.name, Sensor: l.sensor.name });
     // Resolve the DES timing model once (speed/length/timeToSensor + tween
     // endpoints). Mode-agnostic: harmless in continuous (the belt physics owns
     // motion there), authoritative for the DES transit schedule.
     l.timer = createTransitTimer(self, l.belt, l.sensor);
     self.contextMenu(l.belt, [
-      { id: 'run',  label: 'Run',  action: () => self.signals.set(RUN, true) },
+      { id: 'run',  label: 'Run',  action: () => self.sig.Run.set(true) },
       { id: 'stop', label: 'Stop', danger: true, dividerBefore: true,
-        action: () => self.signals.set(RUN, false) },
+        action: () => self.sig.Run.set(false) },
     ]);
   },
 
@@ -105,9 +145,9 @@ const def = {
     },
     fixedUpdate(self: ConveyorSelf): void {
       const l = self.local;
-      self.signals.set(OCCUPIED, self.surfaceOccupied(l.belt!));
+      self.sig.Occupied.set(self.surfaceOccupied(l.belt!));
       const moving = shouldFlow(self);
-      self.signals.set(RUNNING, moving);
+      self.sig.Running.set(moving);
       l.beltHandle!.run(moving);
     },
   },
@@ -139,10 +179,7 @@ const def = {
 };
 
 /** Conveyor — zone-accumulation conveyor (factory-built; behaviour identical to the def). */
-const ConveyorBehavior = defineLibraryComponent<ConveyorLocal>(def, {
-  capabilities: { badgeColor: '#7e57c2', filterLabel: 'Behavior', hierarchyVisible: true, inspectorVisible: true },
-  badge: (self) => ({ Belt: self.local.belt!.name, Sensor: self.local.sensor!.name }),
-});
+const ConveyorBehavior = defineLibraryComponent(def);
 
 /** The material-flow definition (schema + logic + continuous + des) — for DES tests / runner. */
 export const ConveyorFlow = def;

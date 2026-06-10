@@ -110,7 +110,7 @@ function buildConveyor(runner: DESRunner, name: string, cfg: Record<string, numb
     canAcceptDownstream: (mu) =>
       adapter.nextComponents.length > 0 &&
       adapter.nextComponents.some(c => c.canAccept(mu as never)),
-    local: ConveyorDef.local ? ConveyorDef.local() : undefined,
+    local: (ConveyorDef.state ?? ConveyorDef.local)?.(),
   });
   for (const k of Object.keys(cfg)) self.prop[k] = cfg[k];
   const adapter = runner.addInstance(ConveyorDef, self, root);

@@ -107,6 +107,15 @@ export interface MaterialFlowDefinition<
   /** Stable id: rv_extras key AND DES action namespace ('Conveyor' → 'Conveyor.Arrival'). */
   readonly type: string;
   readonly kind: MaterialFlowKind;
+  /**
+   * Signal-name namespace for the `signals` block (Plan 197 §2.4b-A). The factory
+   * auto-declares each signal as `${signalNamespace ?? type}.${key}` and the
+   * `self.sig.<key>` accessors read/write the same scoped name. Defaults to
+   * `type`. Cross-type components that publish another type's signals by interop
+   * convention (Turntable/Sink → `Conveyor.*`, NOT `Turntable.*`/`Sink.*`) set
+   * this so the signals block produces the partner type's signal names.
+   */
+  readonly signalNamespace?: string;
   /** Continuous-matcher globs; default `['*' + type + '*']`. */
   readonly models?: string[];
   /** Component schema (same shape as rv-component-registry; applySchema reused). */
