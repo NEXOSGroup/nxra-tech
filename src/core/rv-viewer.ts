@@ -131,6 +131,7 @@ import { BehaviorManager } from './behaviors';
 import { isUnifiedSimEnabled } from './rv-app-config';
 import { ContinuousRunner } from './material-flow/continuous-runner';
 import { SimulationKernel } from './material-flow/simulation-kernel';
+import { StatisticsManager } from './material-flow/rv-statistics-manager';
 // Plan 194 P5 — the DES runner factory is INJECTED, never imported concretely:
 // `@rv-private/plugins/des/register-des-runner` resolves to the private factory
 // when the private folder is present, and to the public stub (`createDesRunner
@@ -341,6 +342,14 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   /** Unified raycast manager (replaces the old driveHover). */
   raycastManager: RaycastManager | null = null;
   transportManager: RVTransportManager | null = null;
+
+  /**
+   * Plan 201 — shared per-component statistics registry. Components register
+   * their `StateStatistics` here (keyed by node path); the DES + continuous paths
+   * feed the SAME registry so a single source backs all stats UI. Always present;
+   * `clear()`ed on model unload, `resetAll()`ed on `resetSimulation()`.
+   */
+  readonly statisticsManager = new StatisticsManager();
   logicEngine: RVLogicEngine | null = null;
   tankFillManager: TankFillManager | null = null;
   pipeFlowManager: PipeFlowManager | null = null;
@@ -1154,6 +1163,8 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
    * a while and has accumulated MUs on conveyors.
    */
   resetSimulation(): void {
+    this._simTime = 0; // Plan 201 (E2): restart the sim clock
+    this.statisticsManager.resetAll(); // Plan 201: reset accumulators (registrations persist)
     if (this.transportManager) this.transportManager.reset();
     if (this.logicEngine) this.logicEngine.reset();
     // Plan 194 P1 (K3): when the unified kernel is active, also reset the active
@@ -1175,6 +1186,18 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
    */
   get simulationKernel(): SimulationKernel | null {
     return this._getKernel();
+  }
+
+  /**
+   * Plan 201 (E2) — the single authoritative simulation clock in seconds.
+   * Continuous path: accumulated `dt` per fixed step. Unified DES mode: the DES
+   * executor's event time (so time jumps are reflected). This is the clock every
+   * component's `StateStatistics` reads (`clockFn = () => viewer.simTime`).
+   */
+  get simTime(): number {
+    const des = this._kernel?.desControl();
+    if (des) return des.simTime;
+    return this._simTime;
   }
 
   /**
@@ -1322,6 +1345,14 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   private resizeHandler: (() => void) | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private simTickCount = 0;
+  /**
+   * Plan 201 (E2) — single authoritative simulation clock in seconds. Advanced
+   * by `dt` each fixed step in the continuous path; in unified DES mode the
+   * `simTime` getter returns the DES executor's event time instead. Reset to 0
+   * on model load / clear / resetSimulation. Injected into every component's
+   * `StateStatistics` (`clockFn = () => viewer.simTime`).
+   */
+  private _simTime = 0;
   private fpsFrameCount = 0;
   private fpsAccumTime = 0;
   private rendererInfoFrameCount = 0;
@@ -1990,6 +2021,8 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this.currentModel.userData._rvModelRoot = true;
     this.drives = result.drives;
     this.transportManager = result.transportManager;
+    this._simTime = 0; // Plan 201 (E2): fresh sim clock for the new model
+    this.statisticsManager.clear(); // Plan 201: drop prior model's registrations (components re-register on bind)
     // Plan 194 P1: invalidate the unified kernel so it rebuilds against the new
     // transportManager on the next tick (no-op when the flag is OFF — _kernel
     // stays null in that case anyway).
@@ -2294,6 +2327,7 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       this.transportManager.reset();
       this.transportManager = null;
     }
+    this.statisticsManager.clear(); // Plan 201: drop all component stats registrations
     // Plan 194 P1: drop the unified kernel with the model it was built against
     // (no-op when the flag is OFF — _kernel is already null).
     this._kernel = null;
@@ -2673,7 +2707,10 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     const maxDim = Math.max(size.x, size.y, size.z, 0.1);
     const fovRad = this.perspCamera.fov * (Math.PI / 180);
     const halfTanFov = Math.tan(fovRad / 2);
-    const margin = 1.8;
+    // Breathing room on top of the exact fit. Panels are cleared separately by
+    // `_panelFitScale`, so this is purely framing padding — keep it modest so
+    // "frame selected" (F / double-click) lands close, not far away.
+    const margin = 1.25;
     const aspect = this.perspCamera.aspect;
 
     // Distance to fit vertically (full height) and horizontally (full width).
@@ -3271,6 +3308,10 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
 
   private fixedUpdate(dt: number): void {
     this.simTickCount++;
+    // Plan 201 (E2): advance the continuous sim clock. In unified DES mode the
+    // `simTime` getter overrides this with the executor's event time, so the
+    // accumulation is harmless there.
+    this._simTime += dt;
     const isConnected = this._connectionState === 'Connected';
 
     // Recording playback — guarded by DrivesRecorder.Active
@@ -3862,7 +3903,10 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       e.preventDefault();
       const primary = snap.primaryPath ?? snap.selectedPaths[0];
       const primaryNode = this.registry.getNode(primary);
-      if (primaryNode) this.emit('object-focus', { path: primary, node: primaryNode });
+      // F frames the camera on the existing selection — it must NOT open/reveal
+      // the hierarchy (the node is already selected). `openInspector: false`
+      // tells the hierarchy listener to skip; other object-focus consumers run.
+      if (primaryNode) this.emit('object-focus', { path: primary, node: primaryNode, openInspector: false });
       this.fitToNodes(nodes);
     });
 

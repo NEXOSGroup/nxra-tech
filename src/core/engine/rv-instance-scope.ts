@@ -38,9 +38,14 @@ export function instanceScope(node: Object3D): string {
  * Apply an instance scope to a signal name.
  *   - `''` scope (standalone) → name unchanged (backward compatible).
  *   - leading `/` → global signal: strip the `/`, never prefix (shared E-stop etc.).
- *   - otherwise → `${scope}/${name}`.
+ *   - otherwise → `${scope}.${name}`.
+ *
+ * The scoped name is the PLC-facing SYMBOL (`SignalStore.byName`), which is
+ * `.`-separated throughout (`RollConveyor-1m.Flow.Occupied`) so the symbol is a
+ * single dotted token. The scene-graph NODE path stays `/`-separated and is built
+ * elsewhere (it is the technical hierarchy address, not the PLC symbol).
  */
 export function scopeSignalName(scope: string, name: string): string {
   if (name.startsWith('/')) return name.slice(1);
-  return scope ? `${scope}/${name}` : name;
+  return scope ? `${scope}.${name}` : name;
 }

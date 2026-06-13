@@ -153,7 +153,7 @@ function setup(opts?: { inputs?: number; downstreams?: number; missingBelt?: boo
   Turntable.bind(ctx);
 
   // Convenience helpers for the common signal names.
-  const setInputWaiting = (i: number, v: boolean) => signalStore.set(`Infeed${i}/Flow.Occupied`, v);
+  const setInputWaiting = (i: number, v: boolean) => signalStore.set(`Infeed${i}.Flow.Occupied`, v);
   // Per-port interlock is keyed by the snap id (e.g. 'tt-in0', 'tt-out1').
   const portOcc = (portId: string) => signalStore.get(`Flow.Occupied@${portId}`);
 
@@ -173,7 +173,9 @@ describe('Turntable behavior — hierarchy badge', () => {
   it('registers a TurntableBehavior badge capability', () => {
     const caps = getCapabilities('TurntableBehavior');
     expect(caps.hierarchyVisible).toBe(true);
-    expect(caps.inspectorVisible).toBe(true);
+    // plan-200 C1: marker section hidden in inspector; badge + filterLabel stay.
+    expect(caps.inspectorVisible).toBe(false);
+    expect(caps.filterLabel).toBe('Behavior');
     expect(caps.badgeColor).toBe('#7e57c2');
   });
 
@@ -239,7 +241,7 @@ describe('Turntable behavior — multi-input cycle', () => {
   it('sensor rising during RECEIVING → re-block all inputs, dispatch to a free output', () => {
     const s = setup({ inputs: 1, downstreams: 1 });
     receiveFromInput(s, 0);
-    s.signalStore.set('Conv0/Flow.Occupied', false);        // output free
+    s.signalStore.set('Conv0.Flow.Occupied', false);        // output free
     s.signalStore.set('Sensor', true);                          // good captured (handler runs synchronously)
     expect(s.portOcc('tt-in0')).toBe(true);                    // input re-blocked
     expect(s.rotary.running).toBe(true);                        // dispatch rotation commanded
@@ -250,7 +252,7 @@ describe('Turntable behavior — multi-input cycle', () => {
   it('dispatch rotation reaches target → DISCHARGING (belt on), then dwell → IDLE', () => {
     const s = setup({ inputs: 1, downstreams: 1 });
     receiveFromInput(s, 0);
-    s.signalStore.set('Conv0/Flow.Occupied', false);
+    s.signalStore.set('Conv0.Flow.Occupied', false);
     s.signalStore.set('Sensor', true);                          // → ROTATING_OUT
     s.rotary.isAtTarget = true;
     iterateFixedUpdate(s.handle, DT);                           // → DISCHARGING
@@ -269,22 +271,22 @@ describe('Turntable behavior — multi-input cycle', () => {
   it('HOLDING: good captured but every output blocked → belt off; releases when one frees', () => {
     const s = setup({ inputs: 1, downstreams: 2 });
     receiveFromInput(s, 0);
-    s.signalStore.set('Conv0/Flow.Occupied', true);
-    s.signalStore.set('Conv1/Flow.Occupied', true);
+    s.signalStore.set('Conv0.Flow.Occupied', true);
+    s.signalStore.set('Conv1.Flow.Occupied', true);
     const alignTarget = s.rotary.targetPosition;                // angle from aligning to the input
     s.signalStore.set('Sensor', true);                          // captured, but no free output
     expect(s.rotary.targetPosition).toBe(alignTarget);          // no dispatch rotation commanded
     expect(s.belt.jogForward).toBe(false);                      // belt stopped — good waits on the platform
     expect(s.signalStore.get('Flow.Occupied')).toBe(true);  // still busy
 
-    s.signalStore.set('Conv1/Flow.Occupied', false);        // an output frees
+    s.signalStore.set('Conv1.Flow.Occupied', false);        // an output frees
     pump(s.handle, 0.6);                                        // refresh tick retries dispatch
     expect(s.rotary.targetPosition).not.toBe(alignTarget);      // dispatch rotation now commanded
   });
 
   it('multiple inputs: a second waiting input is served on the next cycle', () => {
     const s = setup({ inputs: 2, downstreams: 1 });
-    s.signalStore.set('Conv0/Flow.Occupied', false);
+    s.signalStore.set('Conv0.Flow.Occupied', false);
     s.signalStore.set('Flow.Run', true);
     s.setInputWaiting(0, true);
     s.setInputWaiting(1, true);
@@ -314,7 +316,7 @@ describe('Turntable behavior — fair input selection', () => {
 
   /** Drive idle → ALIGNING_IN → RECEIVING with both inputs already waiting. */
   function receiveWithBothWaiting(s: ReturnType<typeof setup>): void {
-    s.signalStore.set('Conv0/Flow.Occupied', false);
+    s.signalStore.set('Conv0.Flow.Occupied', false);
     s.signalStore.set('Flow.Run', true);
     s.setInputWaiting(0, true);
     s.setInputWaiting(1, true);
@@ -353,7 +355,7 @@ describe('Turntable behavior — part-deletion recovery', () => {
   it('frees the turntable when a part held on the platform is deleted (no discharge)', () => {
     const s = setup({ inputs: 1, downstreams: 1 });
     receiveFromInput(s, 0);                                     // → RECEIVING
-    s.signalStore.set('Conv0/Flow.Occupied', true);        // output blocked
+    s.signalStore.set('Conv0.Flow.Occupied', true);        // output blocked
     s.signalStore.set('Sensor', true);                         // captured → no free output → HOLDING
     expect(s.signalStore.get('Flow.Occupied')).toBe(true); // latched busy
 
@@ -376,7 +378,7 @@ describe('Turntable behavior — part-deletion recovery', () => {
   it('does NOT abort a normal discharge — the dwell re-idles first', () => {
     const s = setup({ inputs: 1, downstreams: 1 });
     receiveFromInput(s, 0);
-    s.signalStore.set('Conv0/Flow.Occupied', false);       // output free
+    s.signalStore.set('Conv0.Flow.Occupied', false);       // output free
     s.signalStore.set('Sensor', true);                         // captured → ROTATING_OUT
     s.rotary.isAtTarget = true; iterateFixedUpdate(s.handle, DT); // → DISCHARGING
     s.setInputWaiting(0, false);
@@ -401,7 +403,7 @@ describe('Turntable behavior — back-pressure across the cycle', () => {
     s.rotary.isAtTarget = true; iterateFixedUpdate(s.handle, DT); // RECEIVING
     expect(s.signalStore.get('Flow.Occupied')).toBe(true);
 
-    s.signalStore.set('Conv0/Flow.Occupied', false);
+    s.signalStore.set('Conv0.Flow.Occupied', false);
     s.signalStore.set('Sensor', true);                          // ROTATING_OUT
     expect(s.signalStore.get('Flow.Occupied')).toBe(true);
     s.rotary.isAtTarget = true; iterateFixedUpdate(s.handle, DT); // DISCHARGING

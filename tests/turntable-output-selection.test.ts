@@ -6,7 +6,7 @@
  *
  * The Turntable DES router picks its discharge output via `self.freeOutputs()`,
  * which filters the resolved output ports by the downstream interlock signal
- * `/<downstreamRoot>/Flow.Occupied` (per-port `@<id>` else root). This pins that
+ * `/<downstreamRoot>.Flow.Occupied` (per-port `@<id>` else root). This pins that
  * the rename `Conveyor.Occupied → Flow.Occupied` keeps the routing correct: with
  * one downstream free and one busy, the router routes to the FREE port only.
  *
@@ -76,7 +76,7 @@ function buildRouterScene() {
   return { self, values };
 }
 
-describe('Turntable output selection — routes via /<root>/Flow.Occupied', () => {
+describe('Turntable output selection — routes via /<root>.Flow.Occupied', () => {
   it('both outputs resolve, both free → freeOutputs returns both', () => {
     const { self } = buildRouterScene();
     expect(self.outputs().length).toBe(2);
@@ -86,8 +86,8 @@ describe('Turntable output selection — routes via /<root>/Flow.Occupied', () =
   it('one downstream busy (Flow.Occupied=true) → routes to the FREE port only', () => {
     const { self, values } = buildRouterScene();
     // ConvFree open, ConvBusy blocked — via the root interlock signal.
-    values.set('ConvFree/Flow.Occupied', false);
-    values.set('ConvBusy/Flow.Occupied', true);
+    values.set('ConvFree.Flow.Occupied', false);
+    values.set('ConvBusy.Flow.Occupied', true);
 
     const free = self.freeOutputs();
     expect(free.length).toBe(1);
@@ -98,8 +98,8 @@ describe('Turntable output selection — routes via /<root>/Flow.Occupied', () =
 
   it('both downstream busy → no free output (router would HOLD)', () => {
     const { self, values } = buildRouterScene();
-    values.set('ConvFree/Flow.Occupied', true);
-    values.set('ConvBusy/Flow.Occupied', true);
+    values.set('ConvFree.Flow.Occupied', true);
+    values.set('ConvBusy.Flow.Occupied', true);
     expect(self.freeOutputs().length).toBe(0);
   });
 });

@@ -21,6 +21,7 @@
 
 import type { Object3D } from 'three';
 import type { ContextMenuItem } from './hmi/context-menu-store';
+import type { StatisticsManager } from './material-flow/rv-statistics-manager';
 import { getSchemaDefaults } from './engine/rv-component-registry';
 import { instanceScope, scopeSignalName } from './engine/rv-instance-scope';
 
@@ -561,6 +562,18 @@ export interface BindContextHost {
   /** Access another plugin by id (e.g. 'snap-point') — implemented by RVViewer.
    *  Lets behaviors query cross-cutting registries like the snap-point graph. */
   getPlugin?(id: string): unknown;
+  /**
+   * Plan 201 (E2) — authoritative simulation clock in seconds. RVViewer provides
+   * it (`get simTime`); minimal/test hosts may omit it (treated as 0). Read by the
+   * per-component `StateStatistics` (`clockFn = () => host.simTime ?? 0`).
+   */
+  readonly simTime?: number;
+  /**
+   * Plan 201 (Phase 3) — per-component statistics registry. RVViewer provides a
+   * shared `StatisticsManager`; minimal/test hosts may omit it (then no stats are
+   * collected). The continuous bind path registers each component's accumulator here.
+   */
+  statisticsManager?: StatisticsManager | null;
 }
 
 /** Minimal drive interface the context exposes (subset of RVDrive). */

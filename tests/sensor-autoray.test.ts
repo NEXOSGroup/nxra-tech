@@ -67,7 +67,7 @@ describe('RVSensor — per-instance signal scoping', () => {
     const sensor = new RVSensor(sensorNode, new AABB());
     const { ctx, registered } = makeCtx();
     sensor.init(ctx);
-    expect(registered[0].name).toBe('RollConveyor2m_2/Sensor');
+    expect(registered[0].name).toBe('RollConveyor2m_2.Sensor');
   });
 
   it('keeps the bare sensor name when standalone (no LayoutObject)', () => {

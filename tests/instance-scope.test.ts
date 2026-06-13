@@ -30,8 +30,9 @@ describe('instanceScope', () => {
 });
 
 describe('scopeSignalName', () => {
-  it('prefixes with the scope', () => {
-    expect(scopeSignalName('Inst', 'Flow.Run')).toBe('Inst/Flow.Run');
+  it('prefixes with the scope using the dot-symbol separator', () => {
+    expect(scopeSignalName('Inst', 'Flow.Run')).toBe('Inst.Flow.Run');
+    expect(scopeSignalName('RollConveyor-1m', 'Flow.Occupied')).toBe('RollConveyor-1m.Flow.Occupied');
   });
   it('passes through unchanged when scope is empty', () => {
     expect(scopeSignalName('', 'Flow.Run')).toBe('Flow.Run');

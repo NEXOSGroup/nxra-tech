@@ -27,6 +27,22 @@ import { findOutputPairings, listOwnSnaps, type OutputPairing, type PortConnecti
  */
 export const FLOW_OCCUPIED = 'Flow.Occupied';
 
+/**
+ * Build the fully-qualified (`/`-prefixed) per-root Occupied interlock SYMBOL for
+ * a partner LayoutObject root. The leading `/` is the "already-qualified" marker
+ * (scopeSignalName strips it, never re-prefixes); the root name and the
+ * `Flow.Occupied` token are joined by the SAME `.`-separator the dot-symbol
+ * convention uses (`/RollConveyor-1m.Flow.Occupied`).
+ *
+ * SSOT for the interlock symbol: makeLink, createDownstreamInterlock AND
+ * material-flow-self's makeLinkLike ALL address through this — no module
+ * hand-builds the `/${root}.${FLOW_OCCUPIED}` literal, so producer and consumer
+ * can never diverge on the separator (a silent self-deadlock otherwise).
+ */
+export function flowOccupiedRootSignal(rootName: string): string {
+  return `/${rootName}.${FLOW_OCCUPIED}`;
+}
+
 export interface TransportLink {
   /** Stable snap id on my side (Object3D.uuid). */
   readonly mySnapId: string;
@@ -48,7 +64,7 @@ export interface TransportLink {
 }
 
 function makeLink(rv: RVBindContext, mySnapId: string, partnerSnapId: string, partnerRoot: Object3D): TransportLink {
-  const partnerRootSig = `/${partnerRoot.name}/${FLOW_OCCUPIED}`;
+  const partnerRootSig = flowOccupiedRootSignal(partnerRoot.name);
   return {
     mySnapId, partnerSnapId, partnerRoot,
     partnerComponent: null,    // Plan 194 fills this for the DES handshake
@@ -123,7 +139,7 @@ export function createDownstreamInterlock(rv: InterlockHost): { occupied(): bool
       // pairing, read per-port-then-root; no successor → blocked.
       const pairing = findOutputPairings(rv.viewer as { getPlugin?(id: string): unknown }, rv.root)[0];   // small/no alloc; 1-4 snaps
       if (!pairing) return true;
-      const rootSig = `/${pairing.ownerRoot.name}/${FLOW_OCCUPIED}`;
+      const rootSig = flowOccupiedRootSignal(pairing.ownerRoot.name);
       const perPort = `${rootSig}@${pairing.pairedSnap.id}`;
       const name = rv.signals.get(perPort) !== undefined ? perPort : rootSig;
       return rv.signals.get<boolean>(name) === true;

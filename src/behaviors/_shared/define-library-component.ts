@@ -40,6 +40,7 @@ import {
   type MaterialFlowSelf,
   type SignalShape,
 } from '../../core/material-flow/material-flow-self';
+import { StateStatistics } from '../../core/material-flow/rv-state-statistics';
 import {
   findAll,
   NODE_KIND_TESTS,
@@ -50,12 +51,18 @@ import type { Object3D } from 'three';
  * The standard library-component badge — inline literal, NOT a shared constant.
  * Used as the default for `opts.capabilities` so every factory-built component
  * shows the same purple "Behavior" badge unless the author overrides it.
+ *
+ * `inspectorVisible: false` hides the stamped marker SECTION (the raw
+ * CONVEYORBEHAVIOR field dump) from the inspector — the behavior is presented
+ * instead through the design-consistent States + Hardware section. The
+ * `filterLabel: 'Behavior'` stays so the hierarchy badge AND the States/Hardware
+ * gate still detect the component (plan-200 C1).
  */
 const STANDARD_BADGE: ComponentCapabilities = {
   badgeColor: '#7e57c2',
   filterLabel: 'Behavior',
   hierarchyVisible: true,
-  inspectorVisible: true,
+  inspectorVisible: false,
 };
 
 /** Marker types whose schema/capabilities are already registered (guard). */
@@ -135,6 +142,19 @@ export function defineLibraryComponent<
   return {
     models: def.models ?? [`*${def.type}*`],
     bind(rv: RVBindContext): void {
+      // Plan 201 — per-component state statistics, fed by `self.setState` and
+      // aggregated by the viewer's shared StatisticsManager. Created up front so
+      // `createSelf` can wire it as the `setState` sink; registered only once the
+      // instance survives the disable checks (so a missing-node component leaves
+      // no dead registry entry). No-op when the host has no manager (test hosts).
+      const mgr = rv.viewer.statisticsManager ?? null;
+      let stats: StateStatistics | undefined;
+      let statsPath: string | undefined;
+      if (mgr) {
+        statsPath = rv.viewer.registry?.getPathForNode?.(rv.root) ?? rv.root.name;
+        stats = new StateStatistics(() => rv.viewer.simTime ?? 0);
+      }
+
       const self = createSelf<S, SIG>(rv, def, {
         mode: 'continuous',
         local: makeLocal ? makeLocal() : undefined,
@@ -143,6 +163,7 @@ export function defineLibraryComponent<
         // (on BOTH the continuous and DES paths), so the factory no longer needs
         // a separate auto-declare step here.
         signals: signalsBlock,
+        statistics: stats,
       });
 
       // `requires` block — resolve convention nodes, inject `self.<key>`,
@@ -179,6 +200,11 @@ export function defineLibraryComponent<
       def.setup?.(self);
       if (self.disabled) return;
 
+      // Instance is live — now register its statistics for aggregation. (Done
+      // here, after the disable checks, so disabled instances leave no dead entry.
+      // `self.setState` during def.setup already booked into `stats` regardless.)
+      if (mgr && stats && statsPath) mgr.register(statsPath, stats);
+
       const c = def.continuous;
       c.setup?.(self);
 
@@ -202,8 +228,11 @@ export function defineLibraryComponent<
         });
       }
 
-      if (c.teardown) {
-        rv.onDispose(() => c.teardown!(self));
+      if (c.teardown || (mgr && statsPath)) {
+        rv.onDispose(() => {
+          c.teardown?.(self);
+          if (mgr && statsPath) mgr.unregister(statsPath);
+        });
       }
     },
   };

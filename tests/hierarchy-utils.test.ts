@@ -21,6 +21,8 @@ import {
   signalBadgeColor,
   formatSignalValue,
   formatContainerProgress,
+  snapLabel,
+  signalOwnerLabel,
   type TreeNode,
 } from '../src/core/hmi/hierarchy-utils';
 import { StepState } from '../src/core/engine/rv-logic-step';
@@ -161,6 +163,70 @@ describe('buildTree', () => {
     const tree = buildTree([info('Asset', ['LayoutObject'])], null, mockViewer, new Set(['Asset']));
     const plain = tree[0].children.find(c => c.name === 'Plain')!;
     expect(plain.canExpandLazy).toBeUndefined();
+  });
+
+  // ── plan-200 §9.4: snap marker skip + readable snap label ──────────────
+  it('does NOT inject the _rvGizmo snap-marker sprite as a hierarchy child (A1)', () => {
+    const root = new Object3D(); root.name = 'Conv';
+    root.userData.realvirtual = { LayoutObject: {} } as Record<string, unknown>;
+    const snap = new Object3D(); snap.name = 'Snap-ZN-convroll'; root.add(snap);
+    // The marker sprite is parented to the snap Empty (attachToNode) and tagged.
+    const marker = new Object3D(); marker.userData._rvGizmo = true; snap.add(marker);
+
+    const mockViewer = {
+      registry: { getNode: (p: string) => (p === 'Conv' ? root : null), registerNode: () => {} },
+    } as unknown as Parameters<typeof buildTree>[2];
+
+    // Expand both the LayoutObject and the snap Empty so injection would reach
+    // the marker if it weren't skipped.
+    const tree = buildTree([info('Conv', ['LayoutObject'])], null, mockViewer, new Set(['Conv', 'Conv/Snap-ZN-convroll']));
+    const snapNode = tree[0].children.find(c => c.path === 'Conv/Snap-ZN-convroll');
+    expect(snapNode).toBeDefined();
+    // The UUID-marker node must NOT appear under the snap.
+    expect(snapNode!.children).toEqual([]);
+    expect(snapNode!.canExpandLazy).toBeUndefined();
+  });
+
+  it('gives a snap Empty a readable label, keeping the real path (A2)', () => {
+    const root = new Object3D(); root.name = 'Conv';
+    root.userData.realvirtual = { LayoutObject: {} } as Record<string, unknown>;
+    const snap = new Object3D(); snap.name = 'Snap-ZN-convroll'; root.add(snap);
+    const mockViewer = {
+      registry: { getNode: (p: string) => (p === 'Conv' ? root : null), registerNode: () => {} },
+    } as unknown as Parameters<typeof buildTree>[2];
+    const tree = buildTree([info('Conv', ['LayoutObject'])], null, mockViewer, new Set(['Conv']));
+    const snapNode = tree[0].children.find(c => c.path === 'Conv/Snap-ZN-convroll')!;
+    expect(snapNode.name).toBe('Snap in (Z) · convroll');     // readable label
+    expect(snapNode.path).toBe('Conv/Snap-ZN-convroll');      // real path unchanged
+  });
+});
+
+// ── snapLabel ────────────────────────────────────────────────────────────
+
+describe('snapLabel (plan-200 A2)', () => {
+  it('maps the sign letter to flow and keeps axis + typeId', () => {
+    expect(snapLabel('Snap-ZN-convroll')).toBe('Snap in (Z) · convroll');
+    expect(snapLabel('Snap-ZP-convroll')).toBe('Snap out (Z) · convroll');
+    expect(snapLabel('Snap-XB-flange-1')).toBe('Snap bidi (X) · flange-1');
+  });
+
+  it('returns null for a non-snap node name', () => {
+    expect(snapLabel('Transport-Z')).toBeNull();
+    expect(snapLabel('')).toBeNull();
+  });
+});
+
+// ── signalOwnerLabel ───────────────────────────────────────────────────────
+
+describe('signalOwnerLabel (plan-200 §9.2 / B1)', () => {
+  it('builds the dot-symbol Owner.Leaf from a scoped signal node path', () => {
+    expect(signalOwnerLabel('RollConveyor-1m/Signals/Flow.Occupied')).toBe('RollConveyor-1m.Flow.Occupied');
+    expect(signalOwnerLabel('Turntable_2/Signals/Flow.Run')).toBe('Turntable_2.Flow.Run');
+  });
+
+  it('falls back to the bare leaf for a non-Signals path', () => {
+    expect(signalOwnerLabel('Robot/Arm/Joint1')).toBe('Joint1');
+    expect(signalOwnerLabel('Standalone')).toBe('Standalone');
   });
 });
 

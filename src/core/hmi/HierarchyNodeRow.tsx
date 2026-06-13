@@ -21,7 +21,7 @@ import { ExpandMore, ChevronRight } from '@mui/icons-material';
 import type { EditableNodeInfo } from './rv-extras-editor';
 import type { SignalStore } from '../engine/rv-signal-store';
 import type { RVLogicEngine } from '../engine/rv-logic-engine';
-import { getStepInfoForPath, isLogicStepType, type TreeNode } from './hierarchy-utils';
+import { getStepInfoForPath, isLogicStepType, isSignalType, signalOwnerLabel, type TreeNode } from './hierarchy-utils';
 import { NodeBadges, StepStateDot } from './hierarchy-badge-components';
 import { useLongPress } from '../../hooks/use-long-press';
 
@@ -247,7 +247,13 @@ export const FlatNodeRow = memo(function FlatNodeRow({
   depth = 0,
   virtualStyle,
 }: FlatNodeRowProps) {
-  const name = info.path.split('/').pop() ?? info.path;
+  const leaf = info.path.split('/').pop() ?? info.path;
+  // Signal nodes in the flat list get an owner-qualified dot-symbol label so the
+  // same leaf on different instances ("Flow.Occupied") is distinguishable; the
+  // full node path stays in the tooltip. Non-signal rows keep the bare leaf.
+  const isSignal = info.types.some(isSignalType);
+  const name = isSignal ? signalOwnerLabel(info.path) : leaf;
+  const tooltipTitle = isSignal ? info.path : leaf;
   const isSelected = selectedPaths.has(info.path);
 
   const hasLogicStep = info.types.some(isLogicStepType);
@@ -328,7 +334,7 @@ export const FlatNodeRow = memo(function FlatNodeRow({
       {/* Status dot for LogicStep nodes — only Active/Waiting */}
       {stepInfo && <StepStateDot stepState={stepInfo.state} />}
 
-      <Tooltip title={name} placement="top" enterDelay={400} slotProps={{ tooltip: { sx: { fontSize: 10 } } }}>
+      <Tooltip title={tooltipTitle} placement="top" enterDelay={400} slotProps={{ tooltip: { sx: { fontSize: 10 } } }}>
         <Typography
           sx={{
             fontSize: 12,

@@ -5,10 +5,10 @@
  * conveyor-des-timing.test.ts — Plan 194 P5b (Conveyor DES transit timing).
  *
  * Verifies the unified Conveyor `des` block under the private DESRunner:
- *  - an accepted MU is NOT released immediately — it is held for `timeToSensor`
- *    of SIM time, then released to the downstream;
- *  - `transitTime = length / speed` (and the C#-DES `Math.max(0.001, …)` guard
- *    means `speed = 0` never divides by zero);
+ *  - an accepted MU is NOT released immediately — it is held for the full-belt
+ *    transit time of SIM time, then released to the downstream;
+ *  - `transitTime = length / speed` (length from the belt geometry, speed from
+ *    the Transport Drive; the `Math.max(0.001, …)` guard keeps transit finite);
  *  - back-pressure: when the downstream cannot accept, the MU is parked in
  *    `blockedMUs` and released once the downstream frees (onDownstreamReady).
  *
@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { Object3D } from 'three';
+import { Object3D, Mesh, BoxGeometry } from 'three';
 import { DESRunner } from '@rv-private/plugins/des/des-runner';
 import { _resetDesHookCache } from '@rv-private/plugins/des/des-hook-adapter';
 import { resetDESMUCounter } from '@rv-private/plugins/des/rv-des-mu';
@@ -43,19 +43,30 @@ import { ContextMenuStore } from '../../src/core/hmi/context-menu-store';
 const ConveyorDef = ConveyorFlow as unknown as MaterialFlowDefinition;
 
 /** The conveyor's DES-relevant local fields (private to Conveyor.ts — re-stated).
- *  The transit-timing model lives on `local.timer` (createTransitTimer); the
- *  `speed`/`length`/`timeToSensor` values are identical to the prior inline fields. */
+ *  The transit-timing model lives on `local.timer` (createTransitTimer);
+ *  `speed`/`length`/`transitTime` come from the Transport Drive + belt geometry. */
 interface ConvLocalView {
-  timer: { timeToSensor: number; speed: number; length: number } | null;
+  timer: { transitTime: number; speed: number; length: number } | null;
   blockedMUs: MU[];
 }
 type ConvSelf = MaterialFlowSelf<ConvLocalView>;
 
 // ─── Minimal bind context with a Conveyor node (Transport-X + Sensor) ─────
 
-function makeConveyorContext(name: string): { ctx: RVBindContext; root: Object3D } {
+function makeConveyorContext(
+  name: string,
+  lengthMm: number,
+  speedMmS: number,
+): { ctx: RVBindContext; root: Object3D } {
   const events = new EventEmitter<Record<string, unknown>>();
   const values = new Map<string, boolean | number>();
+  const root = new Object3D(); root.name = name;
+  // Belt geometry in METRES (the scene unit): lengthMm/1000 → world-bounds
+  // extent; resolveLength scales it back ×1000 to mm. A real Mesh so
+  // Box3.expandByObject yields finite bounds.
+  const belt = new Mesh(new BoxGeometry(lengthMm / 1000, 0.1, 0.2));
+  belt.name = 'Transport-X'; belt.updateMatrixWorld(true); root.add(belt);
+  const sensor = new Object3D(); sensor.name = 'Sensor'; root.add(sensor);
   const host: BindContextHost = {
     signalStore: {
       get: (n: string) => values.get(n),
@@ -64,13 +75,11 @@ function makeConveyorContext(name: string): { ctx: RVBindContext; root: Object3D
     } as never,
     on: (e, cb) => events.on(e, cb as never),
     contextMenu: new ContextMenuStore(),
-    drives: [] as never,
+    // The Transport Drive provides the belt speed (mm/s) the DES timer reads.
+    drives: [{ name: 'Transport-X', node: belt, TargetSpeed: speedMmS }] as never,
     registry: null,
     getPlugin: () => undefined,
   };
-  const root = new Object3D(); root.name = name;
-  const belt = new Object3D(); belt.name = 'Transport-X'; root.add(belt);
-  const sensor = new Object3D(); sensor.name = 'Sensor'; root.add(sensor);
   const accum: KinematicsSpec = {};
   const { ctx } = createBindContext(root, host, accum);
   return { ctx, root };
@@ -97,9 +106,10 @@ function makeBareContext(name: string): RVBindContext {
   return ctx;
 }
 
-/** Build a conveyor instance with the given length/speed config seeded in prop. */
-function buildConveyor(runner: DESRunner, name: string, cfg: Record<string, number>) {
-  const { ctx, root } = makeConveyorContext(name);
+/** Build a conveyor instance whose belt geometry (length, mm) and Transport
+ *  Drive (speed, mm/s) drive the DES transit timing. */
+function buildConveyor(runner: DESRunner, name: string, cfg: { length: number; speed: number }) {
+  const { ctx, root } = makeConveyorContext(name, cfg.length, cfg.speed);
   let entityId = -1;
   const self = createSelf(ctx, ConveyorDef, {
     mode: 'des',
@@ -112,7 +122,6 @@ function buildConveyor(runner: DESRunner, name: string, cfg: Record<string, numb
       adapter.nextComponents.some(c => c.canAccept(mu as never)),
     local: (ConveyorDef.state ?? ConveyorDef.local)?.(),
   });
-  for (const k of Object.keys(cfg)) self.prop[k] = cfg[k];
   const adapter = runner.addInstance(ConveyorDef, self, root);
   entityId = adapter.entityId; // assigned lazily after start(); refreshed below
   return {
@@ -132,7 +141,7 @@ describe('Conveyor DES timing — transit delay', () => {
     resetDESMUCounter();
   });
 
-  it('holds the MU for timeToSensor (length/speed), then releases it', () => {
+  it('holds the MU for the transit time (length/speed), then releases it', () => {
     const runner = new DESRunner({ subMode: 'animated' });
 
     // Downstream sink records transferred MUs.
@@ -149,7 +158,7 @@ describe('Conveyor DES timing — transit delay', () => {
     const sink = runner.addInstance(sinkDef as MaterialFlowDefinition, sinkSelf, sinkNode);
 
     // 1000 mm @ 200 mm/s → transit 5 s.
-    const conv = buildConveyor(runner, 'Conveyor', { ConveyorLength: 1000, ConveyorSpeed: 200 });
+    const conv = buildConveyor(runner, 'Conveyor', { length: 1000, speed: 200 });
 
     runner.start([ConveyorDef, sinkDef as MaterialFlowDefinition], { root: conv.root });
     conv.refreshId();
@@ -157,8 +166,8 @@ describe('Conveyor DES timing — transit delay', () => {
     conv.adapter.nextComponents = [sink];
     conv.self.signals.set('Flow.Run', true); // belt running (ZPA: shouldFlow)
 
-    // timeToSensor should equal length/speed = 5 s.
-    expect(conv.self.local.timer!.timeToSensor).toBeCloseTo(5, 3);
+    // transitTime should equal length/speed = 5 s.
+    expect(conv.self.local.timer!.transitTime).toBeCloseTo(5, 3);
 
     // Accept an MU → schedule arrival in 5 s; NOT released yet.
     const mu = runner.createMU();
@@ -177,21 +186,22 @@ describe('Conveyor DES timing — transit delay', () => {
     expect(consumed[0].id).toBe(mu.id);
   });
 
-  it('transit time follows length/speed and guards speed = 0', () => {
+  it('transit time follows length/speed and guards a non-positive drive speed', () => {
     const runner = new DESRunner({ subMode: 'animated' });
     runner.start([ConveyorDef], { root: new Object3D() });
 
     // 2000 mm @ 500 mm/s → 4 s. Built AFTER start(), so re-run the shared setup
-    // to resolve timing with the seeded prop.
-    const fast = buildConveyor(runner, 'ConvFast', { ConveyorLength: 2000, ConveyorSpeed: 500 });
+    // to resolve timing from the belt geometry + drive.
+    const fast = buildConveyor(runner, 'ConvFast', { length: 2000, speed: 500 });
     ConveyorDef.setup?.(fast.self as unknown as MaterialFlowSelf);
-    expect(fast.self.local.timer!.timeToSensor).toBeCloseTo(4, 3);
+    expect(fast.self.local.timer!.transitTime).toBeCloseTo(4, 3);
 
-    // speed = 0 → guarded by Math.max(0.001, …): timeToSensor stays finite & > 0.
-    const stalled = buildConveyor(runner, 'ConvStalled', { ConveyorLength: 1000, ConveyorSpeed: 0 });
+    // A non-positive drive speed falls back to the default (200 mm/s) and the
+    // Math.max(0.001, …) guard keeps the transit time finite & > 0.
+    const stalled = buildConveyor(runner, 'ConvStalled', { length: 1000, speed: 0 });
     ConveyorDef.setup?.(stalled.self as unknown as MaterialFlowSelf);
-    expect(Number.isFinite(stalled.self.local.timer!.timeToSensor)).toBe(true);
-    expect(stalled.self.local.timer!.timeToSensor).toBeGreaterThan(0);
+    expect(Number.isFinite(stalled.self.local.timer!.transitTime)).toBe(true);
+    expect(stalled.self.local.timer!.transitTime).toBeGreaterThan(0);
     expect(stalled.self.local.timer!.speed).toBeGreaterThanOrEqual(0.001);
   });
 
@@ -215,7 +225,7 @@ describe('Conveyor DES timing — transit delay', () => {
     });
     const sink = runner.addInstance(sinkDef as MaterialFlowDefinition, sinkSelf, sinkNode);
 
-    const conv = buildConveyor(runner, 'Conveyor', { ConveyorLength: 1000, ConveyorSpeed: 1000 }); // 1 s
+    const conv = buildConveyor(runner, 'Conveyor', { length: 1000, speed: 1000 }); // 1 s
 
     runner.start([ConveyorDef, sinkDef as MaterialFlowDefinition], { root: conv.root });
     conv.refreshId();

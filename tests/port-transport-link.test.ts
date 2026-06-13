@@ -98,7 +98,7 @@ describe('Port extends TransportLink (Plan 194 §2.8)', () => {
     // Same signal name convention as Plan 196: per-port then root. The `/`-prefixed
     // read uses the global escape (leading slash stripped), so the stored key is
     // the un-prefixed per-port name.
-    values.set('ConvB/Flow.Occupied@b-in-snap', true);
+    values.set('ConvB.Flow.Occupied@b-in-snap', true);
     expect(link.occupied()).toBe(true);
   });
 

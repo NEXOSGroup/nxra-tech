@@ -281,6 +281,12 @@ export class SnapPointPlugin implements RVViewerPlugin {
   getRegistry(): SnapPointRegistry | null { return this.registry; }
   getPlacement(): SnapPlacementService | null { return this.placement; }
   getMarkerRenderer(): SnapMarkerRenderer | null { return this.markerRenderer; }
+
+  /** Highlight a single snap in 3D (hierarchy hover/select), or clear with null.
+   *  Forwards to the marker renderer's hierarchy-highlight. Safe before init. */
+  highlightSnap(snapId: string | null): void {
+    this.markerRenderer?.highlight(snapId);
+  }
   getMagnetic(): SnapMagneticController | null { return this.magnetic; }
   isActive(): boolean { return this.controller?.isActive() ?? false; }
 
@@ -292,10 +298,10 @@ export class SnapPointPlugin implements RVViewerPlugin {
     return id ? (id as import('../../core/engine/rv-snap-point-registry').PlacedComponentId) : null;
   }
 
-  /** Read the magnetic-snap toggle from the planner store (default on). */
+  /** Snap-point magnetic snapping is always on — it's core placement behavior.
+   *  (The former per-tool toggle was removed from the magnetic-snap popover.) */
   private _isMagnetEnabled(): boolean {
-    const planner = this.viewer?.getPlugin<LayoutPlannerPlugin>('layout-planner');
-    return planner?.store?.snapPointMagnetEnabled ?? true;
+    return true;
   }
 
   /** Read the chain-mode toggle from the planner store (default on). */

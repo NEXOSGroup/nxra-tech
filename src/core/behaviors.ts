@@ -245,7 +245,9 @@ export class BehaviorManager {
     const registerComp = reg?.register?.bind(reg);
     const materialise = !!(registerNode && registerComp);
 
-    // `sig.name` is already instance-scoped by ctx.signal (`${scope}/${name}`).
+    // `sig.name` is already instance-scoped by ctx.signal (`${scope}.${name}` —
+    // the dot-separated PLC SYMBOL). The scene-graph node path below stays
+    // `/`-separated (the technical hierarchy address, not the symbol).
     const scope = instanceScope(root);
 
     // One render-free `Signals` container per root (idempotent), created lazily
@@ -256,7 +258,9 @@ export class BehaviorManager {
     for (const sig of accum.signals) {
       if (registerNode && registerComp) {
         // Strip the scope back off for the readable node name + the path's leaf.
-        const local = scope && sig.name.startsWith(`${scope}/`) ? sig.name.slice(scope.length + 1) : sig.name;
+        // The symbol is dot-scoped (`${scope}.${local}`), so split on `.`; the
+        // node path/name below is rebuilt `/`-separated.
+        const local = scope && sig.name.startsWith(`${scope}.`) ? sig.name.slice(scope.length + 1) : sig.name;
         const seed = store.get(sig.name) ?? sig.initialValue ?? (sig.type.includes('Bool') ? false : 0);
         container ??= this.getOrCreateSignalsContainer(root);
         const path = scope ? `${scope}/${SIGNALS_CONTAINER_NAME}/${local}` : `${SIGNALS_CONTAINER_NAME}/${local}`;

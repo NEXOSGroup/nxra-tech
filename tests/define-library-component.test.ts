@@ -23,6 +23,7 @@ import {
 } from '../src/behaviors/_shared/define-library-component';
 import type { MaterialFlowSelf } from '../src/core/material-flow/material-flow-self';
 import type { MaterialFlowDefinition } from '../src/core/material-flow/define-material-flow';
+import { StatisticsManager } from '../src/core/material-flow/rv-statistics-manager';
 
 const DT = 1 / 60;
 
@@ -80,7 +81,9 @@ describe('defineLibraryComponent — badge registration', () => {
     defineLibraryComponent<FooLocal>(makeDef());
     const caps = getCapabilities('FooBehavior');
     expect(caps.hierarchyVisible).toBe(true);
-    expect(caps.inspectorVisible).toBe(true);
+    // plan-200 C1: the stamped marker section is hidden in the inspector; the
+    // hierarchy badge and the 'Behavior' filterLabel gate remain.
+    expect(caps.inspectorVisible).toBe(false);
     expect(caps.badgeColor).toBe('#7e57c2');
     expect(caps.filterLabel).toBe('Behavior');
   });
@@ -174,6 +177,67 @@ describe('defineLibraryComponent — self.disable() gating', () => {
     expect(mockRv.counts.onFixedUpdate).toBe(0);
     expect(mockRv.counts.behavior).toBe(0); // skipped before the stamp
     warn.mockRestore();
+  });
+});
+
+describe('defineLibraryComponent — statistics registration (Plan 201)', () => {
+  it('registers stats with the manager and books state time via self.setState', () => {
+    const mgr = new StatisticsManager();
+    let simTime = 0;
+    const root = new Object3D(); root.name = 'Foo';
+    const { host } = makeHost(root);
+    (host as unknown as { statisticsManager: StatisticsManager }).statisticsManager = mgr;
+    Object.defineProperty(host, 'simTime', { get: () => simTime, configurable: true });
+
+    const behavior = defineLibraryComponent<FooLocal>(makeDef({
+      continuous: {
+        setup(self) { self.setState('Working'); },
+        fixedUpdate(self) { self.local.ticks += 1; },
+      },
+    }));
+    const { ctx, handle } = createBindContext(root, host, {} as KinematicsSpec);
+    behavior.bind(ctx);
+
+    expect(mgr.size).toBe(1);
+    simTime = 10;
+    iterateFixedUpdate(handle, DT);
+
+    const agg = mgr.getAggregate();
+    expect(agg.components).toHaveLength(1);
+    expect(agg.components[0].state).toBe('Working');
+    expect(mgr.get('Foo')!.getStatePercentage('Working')).toBeGreaterThan(99);
+    expect(agg.bottleneck?.path).toBe('Foo');
+  });
+
+  it('does NOT register a disabled component (no dead registry entry)', () => {
+    const mgr = new StatisticsManager();
+    const root = new Object3D(); root.name = 'Foo';
+    const { host } = makeHost(root);
+    (host as unknown as { statisticsManager: StatisticsManager }).statisticsManager = mgr;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const behavior = defineLibraryComponent<FooLocal>(makeDef({
+      setup(self) { self.disable('missing node'); },
+    }));
+    const { ctx } = createBindContext(root, host, {} as KinematicsSpec);
+    behavior.bind(ctx);
+
+    expect(mgr.size).toBe(0);
+    warn.mockRestore();
+  });
+
+  it('unregisters on dispose', () => {
+    const mgr = new StatisticsManager();
+    const root = new Object3D(); root.name = 'Foo';
+    const { host } = makeHost(root);
+    (host as unknown as { statisticsManager: StatisticsManager }).statisticsManager = mgr;
+
+    const behavior = defineLibraryComponent<FooLocal>(makeDef());
+    const { ctx, handle } = createBindContext(root, host, {} as KinematicsSpec);
+    behavior.bind(ctx);
+    expect(mgr.size).toBe(1);
+    handle.dispose();
+    expect(mgr.size).toBe(0);
   });
 });
 

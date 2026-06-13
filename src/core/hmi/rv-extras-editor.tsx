@@ -800,8 +800,11 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
     // inspector itself decides what to render (empty state for nodes without
     // rv_extras components).
     this._eventUnsubs.push(
-      viewer.on('object-focus', ({ path }) => {
+      viewer.on('object-focus', ({ path, openInspector }) => {
         if (!path) return;
+        // F-key "frame selected" sets openInspector=false — frame the camera but
+        // do NOT open/reveal the hierarchy (the node is already selected).
+        if (openInspector === false) return;
         this.selectAndReveal(path, true);
       }),
     );

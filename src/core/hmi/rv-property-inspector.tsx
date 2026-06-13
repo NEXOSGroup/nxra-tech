@@ -59,12 +59,13 @@ import { INSPECTOR_PANEL_WIDTH } from './layout-constants';
 import {
   isHiddenComponentType,
   componentColor,
+  extractComponentTypes,
   type ReverseReference,
 } from './rv-inspector-helpers';
-import { getPrimaryDisplayValue, applyLiveEdit, getLiveStateFor, formatValue } from './rv-value-resolver';
+import { getPrimaryDisplayValue, applyLiveEdit } from './rv-value-resolver';
 import { navigateToRef } from './rv-reference-display';
-import { ComponentSection } from './rv-component-section';
-import { BehaviorLiveStateSections } from './inspector-behavior-section';
+import { ComponentSection, runtimeRow } from './rv-component-section';
+import { buildBehaviorVirtualComponent, type BehaviorViewerSnapshot } from './inspector-behavior-section';
 import { findLayoutRoot } from './layout-root-utils';
 import { getCapabilities } from '../engine/rv-component-registry';
 import { Vector3Editor } from './rv-field-editors';
@@ -90,6 +91,14 @@ function loadDetached(): boolean {
   catch { return false; }
 }
 
+// ── Stable no-ops for read-only virtual ComponentSections ────────────────
+// Virtual (ephemeral) sections never edit/reset — pass shared frozen handlers
+// so they don't allocate a fresh closure per render.
+const EMPTY_OVERRIDES: Set<string> = new Set();
+const NOOP_FIELD_EDIT = (_fieldName: string, _value: unknown): void => { /* read-only */ };
+const NOOP_FIELD_RESET = (_fieldName: string): void => { /* read-only */ };
+const NOOP_RESET = (): void => { /* read-only */ };
+
 // ── LogicStep Runtime Section ─────────────────────────────────────────────
 
 interface RuntimeFieldRowProps {
@@ -111,65 +120,55 @@ function RuntimeFieldRow({ label, value, color }: RuntimeFieldRowProps) {
   );
 }
 
-/** Accent color for the read-only live-state section (distinct from config). */
-const LIVE_STATE_COLOR = '#4dd0e1';
+/** Pure projection of a snap-point registry entry into the inspector rows.
+ *  Returns null when the uuid is not a registered snap. Mock-testable without a
+ *  React render (plan-200 §9.5 / §10.5). `partnerOwnerRoot` is the partner's
+ *  asset root (for a clickable "Paired with" navigation), null when unpaired. */
+export function snapInspectorData(
+  reg: { getById(id: string): import('../engine/rv-snap-point-registry').SnapPoint | undefined } | null,
+  uuid: string,
+): { type: string; axis: string; flow: string; state: string; occupied: boolean; pairedWith: string; partnerOwnerRoot: Object3D | null } | null {
+  const snap = reg?.getById(uuid) ?? null;
+  if (!snap) return null;
+  const partner = snap.pairedSnapId ? reg?.getById(snap.pairedSnapId) ?? null : null;
+  return {
+    type: snap.typeId,
+    axis: snap.dir.axis,
+    flow: snap.flow === 'in' ? 'Input' : snap.flow === 'out' ? 'Output' : 'Bidirectional',
+    state: snap.occupied ? 'Occupied' : 'Free',
+    occupied: snap.occupied,
+    pairedWith: partner ? (partner.ownerRoot?.name || partner.scenePath || partner.id) : '—',
+    partnerOwnerRoot: partner?.ownerRoot ?? null,
+  };
+}
 
-/** Read-only "Live State" section showing the actual runtime values of the
- *  selected node's live components (Drive, Sensor, TransportSurface). These are
- *  NEVER editable or overridable — runtime state belongs to the simulation, not
- *  the saved scene. Returns null when the node has no live component. */
-function LiveStateSection({ viewer, nodePath, componentTypes }: {
-  viewer: RVViewer;
-  nodePath: string;
-  componentTypes: readonly string[];
-}) {
-  const groups: Array<{ type: string; fields: Array<[string, unknown]> }> = [];
-  for (const type of componentTypes) {
-    const live = getLiveStateFor(viewer, nodePath, type);
-    if (live) {
-      const fields = Object.entries(live);
-      if (fields.length > 0) groups.push({ type, fields });
-    }
-  }
-  if (groups.length === 0) return null;
-  const showTypeLabel = groups.length > 1;
+/** Accent color for an occupied snap (amber). */
+const SNAP_OCCUPIED_COLOR = '#e8b04a';
 
-  return (
-    <Box sx={{ borderBottom: '1px solid rgba(255, 255, 255, 0.06)' }}>
-      <Box
-        sx={{
-          display: 'flex',
-          alignItems: 'center',
-          px: 1,
-          py: 0.5,
-          bgcolor: LIVE_STATE_COLOR + '18',
-          borderBottom: `2px solid ${LIVE_STATE_COLOR}44`,
-        }}
-      >
-        <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: LIVE_STATE_COLOR, mr: 0.75, flexShrink: 0 }} />
-        <Typography sx={{ fontSize: 10, fontWeight: 700, color: LIVE_STATE_COLOR, textTransform: 'uppercase', letterSpacing: 0.5, flex: 1 }}>
-          Live State
-        </Typography>
-        <Typography sx={{ fontSize: 9, color: LIVE_STATE_COLOR, fontWeight: 600 }}>
-          read-only
-        </Typography>
-      </Box>
-      <Box sx={{ py: 0.5 }}>
-        {groups.map(({ type, fields }) => (
-          <Box key={type}>
-            {showTypeLabel && (
-              <Typography sx={{ fontSize: 9, color: 'text.disabled', px: 1, pt: 0.25, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                {type}
-              </Typography>
-            )}
-            {fields.map(([k, v]) => (
-              <RuntimeFieldRow key={k} label={k} value={formatValue(v, { boolStyle: 'word' })} />
-            ))}
-          </Box>
-        ))}
-      </Box>
-    </Box>
-  );
+/** Build the read-only-live virtual component for a selected snap Empty, or null
+ *  when the node is not a registered snap. Resolves the snap by Object3D.uuid
+ *  through the snap-point registry; the "Paired with" row is clickable and
+ *  navigates to the partner's component when the partner root is resolvable. */
+function buildSnapVirtualComponent(viewer: RVViewer, uuid: string): { type: string; data: Record<string, unknown> } | null {
+  const reg = viewer.getPlugin<SnapPointPlugin>('snap-point')?.getRegistry() ?? null;
+  const d = snapInspectorData(reg, uuid);
+  if (!d) return null;
+
+  const data: Record<string, unknown> = {
+    Type: runtimeRow(d.type),
+    Axis: runtimeRow(d.axis),
+    Flow: runtimeRow(d.flow),
+    State: runtimeRow(d.state, { color: d.occupied ? SNAP_OCCUPIED_COLOR : undefined }),
+  };
+
+  // "Paired with" → clickable navigation to the partner component (when paired
+  // and the partner root resolves to a registered path).
+  const partnerPath = d.partnerOwnerRoot ? viewer.registry?.getPathForNode(d.partnerOwnerRoot) ?? null : null;
+  data['Paired with'] = partnerPath
+    ? runtimeRow(d.pairedWith, { onClick: () => navigateToRef(viewer, partnerPath) })
+    : runtimeRow(d.pairedWith);
+
+  return { type: 'Snap Point', data };
 }
 
 function LogicStepRuntimeSection({ info }: { info: StepStateInfo }) {
@@ -463,7 +462,11 @@ export function PropertyInspector({ viewer }: PropertyInspectorProps) {
     if (!node) return null;
 
     const rv = node.userData?.realvirtual as Record<string, Record<string, unknown>> | undefined;
-    if (!rv) return null;
+    // A node without rv_extras (e.g. a snap-point Empty) still gets an inspector
+    // card — it shows no real component sections but may carry a read-only "Snap
+    // Point" virtual component. Only a missing node returns null; an extras-less
+    // node returns empty components.
+    if (!rv) return { components: [], layoutObj: undefined, uuid: node.uuid };
 
     // Collect component types and their data (skip hidden types)
     const components: Array<{ type: string; data: Record<string, unknown> }> = [];
@@ -477,7 +480,7 @@ export function PropertyInspector({ viewer }: PropertyInspectorProps) {
     // Detect LayoutObject for transform editing
     const layoutObj = rv.LayoutObject as Record<string, unknown> | undefined;
 
-    return { components, layoutObj };
+    return { components, layoutObj, uuid: node.uuid };
     // Note: state.overlay intentionally excluded — overlay changes should not re-scan node components.
     // Overlay-dependent data (overridden fields) is computed separately below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -509,6 +512,29 @@ export function PropertyInspector({ viewer }: PropertyInspectorProps) {
     if (!selectedPath || !viewer.registry) return [];
     return viewer.registry.getReferencesTo(selectedPath);
   }, [selectedPath, viewer.registry]);
+
+  // Behavior States+Hardware gate: the stamped behavior marker is
+  // inspectorVisible:false, so it no longer appears in nodeData.components.
+  // Detect it by scanning the SELECTED node's RAW userData (filterHidden:false)
+  // for a component whose capability filterLabel is 'Behavior'.
+  //
+  // The gate matches ONLY when the LayoutObject ROOT ITSELF is selected
+  // (`findLayoutRoot(node) === node`) — not a snap-point child or any other
+  // descendant, which would otherwise spuriously surface the behavior section.
+  // Returns the marker type (e.g. `ConveyorBehavior`) used as the virtual
+  // component's header name, or null.
+  const behaviorRoot = useMemo<{ root: import('three').Object3D; markerType: string } | null>(() => {
+    if (!selectedPath || !viewer.registry) return null;
+    const node = viewer.registry.getNode(selectedPath);
+    if (!node) return null;
+    // Only when the LayoutObject root itself is the selected node.
+    if (findLayoutRoot(node) !== node) return null;
+    const rootRv = node.userData?.realvirtual;
+    const rawTypes = extractComponentTypes(rootRv, { filterHidden: false });
+    const markerType = rawTypes.find(t => getCapabilities(t).filterLabel === 'Behavior');
+    return markerType ? { root: node, markerType } : null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPath, viewer.registry, state]);
 
   // Count total overrides for this node
   const totalOverrides = useMemo(() => {
@@ -642,9 +668,11 @@ export function PropertyInspector({ viewer }: PropertyInspectorProps) {
   // physics frame without touching the SignalStore, so the signal tick above
   // won't refresh them. Poll at 200ms only when the selected node has such a
   // component. Sensors write to the SignalStore and refresh via the tick above.
-  const hasLiveNonSignalComponent = nodeData?.components.some(
+  // Also poll when a behavior root is selected — its virtual component shows
+  // child drives' live speed/direction, which change every physics frame.
+  const hasLiveNonSignalComponent = (nodeData?.components.some(
     c => c.type === 'Drive' || c.type === 'TransportSurface',
-  ) ?? false;
+  ) ?? false) || behaviorRoot !== null;
   const [, setLiveTick] = useState(0);
   useEffect(() => {
     if (!hasLiveNonSignalComponent) return;
@@ -742,6 +770,29 @@ export function PropertyInspector({ viewer }: PropertyInspectorProps) {
     </>
   );
 
+  // ── Ephemeral read-only "virtual components" ──────────────────────────
+  // Built fresh on every render (cheap; a handful of map/registry ops) so they
+  // refresh on the inspector's signal/live ticks. They are NOT stamped into
+  // userData — they are injected into the section list at render time and
+  // rendered through the SAME ComponentSection pipeline (readOnlyLive mode) as
+  // a real component. Order: AFTER the real LayoutObject/config sections.
+  const virtualComponents: Array<{ type: string; data: Record<string, unknown> }> = [];
+  // Behavior live state — only when the LayoutObject root ITSELF is selected.
+  if (behaviorRoot) {
+    const vc = buildBehaviorVirtualComponent(
+      viewer as unknown as BehaviorViewerSnapshot,
+      behaviorRoot.root,
+      behaviorRoot.markerType,
+    );
+    if (vc) virtualComponents.push(vc);
+  }
+  // Snap-point data — when a registered snap Empty is selected (resolved by uuid).
+  if (nodeData.uuid) {
+    const snapVc = buildSnapVirtualComponent(viewer, nodeData.uuid);
+    if (snapVc) virtualComponents.push(snapVc);
+  }
+  const hasContent = nodeData.components.length > 0 || virtualComponents.length > 0;
+
   // ── Shared scrollable content ─────────────────────────────────────────
   const scrollContent = (
     <Box
@@ -753,14 +804,6 @@ export function PropertyInspector({ viewer }: PropertyInspectorProps) {
     >
       {/* LogicStep Runtime Status (above component sections, hidden when Idle) */}
       {showRuntimeSection && <LogicStepRuntimeSection info={stepInfo} />}
-
-      {/* Live runtime state (read-only) for Drive/Sensor/TransportSurface,
-          above the editable config. Never overridable or saved. */}
-      <LiveStateSection
-        viewer={viewer}
-        nodePath={selectedPath}
-        componentTypes={nodeData.components.map(c => c.type)}
-      />
 
       {/* Layout Object Transform (position + rotation editing).
           Lock + Visibility toggles live inside its header. */}
@@ -776,8 +819,7 @@ export function PropertyInspector({ viewer }: PropertyInspectorProps) {
         />
       )}
 
-
-      {nodeData.components.length === 0 ? (
+      {!hasContent ? (
         <Typography sx={{ fontSize: 12, color: 'text.disabled', textAlign: 'center', py: 4 }}>
           No component data
         </Typography>
@@ -788,26 +830,17 @@ export function PropertyInspector({ viewer }: PropertyInspectorProps) {
         // itself lives in TRANSFORM's header (outside this wrapper) so the
         // user can still unlock.
         <Box sx={{ opacity: layoutLocked ? 0.5 : 1, pointerEvents: layoutLocked ? 'none' : 'auto' }}>
+          {/* Real (editable) component sections FIRST. */}
           {nodeData.components.map(({ type, data }) => {
             const overriddenFields = new Set(
               state.overlay ? getOverriddenFields(selectedPath, type, state.overlay) : [],
             );
             // Editable rows show CONFIG only (static + overlay) so the
             // override/save model stays coherent: what you see is what you
-            // save. Live runtime state is shown read-only in LiveStateSection
-            // below — never as an editable/overridable field.
+            // save. Live runtime state is shown read-only in the virtual
+            // components below — never as an editable/overridable field.
             // Header value: a compact live glance (signal value or drive pos).
             const headerValue = getPrimaryDisplayValue(viewer, selectedPath, type, data).text;
-            // For behavior markers (Conveyor/Turntable/ChainTransfer/…) append a
-            // live signals + hardware + snaps section scoped to the owning
-            // LayoutObject. Detected by capability filterLabel — no per-behavior
-            // wiring needed.
-            const isBehavior = getCapabilities(type).filterLabel === 'Behavior';
-            const selectedNode = viewer.registry?.getNode(selectedPath) ?? null;
-            const layoutRoot = isBehavior ? findLayoutRoot(selectedNode) : null;
-            const behaviorExtra = layoutRoot
-              ? <BehaviorLiveStateSections viewer={viewer} layoutRoot={layoutRoot} />
-              : undefined;
             return (
               <ComponentSection
                 key={type}
@@ -818,7 +851,6 @@ export function PropertyInspector({ viewer }: PropertyInspectorProps) {
                 consumedOnly={consumedOnly}
                 signalValue={headerValue}
                 headerAction={type === 'AASLink' ? <AasDetailHeaderAction data={data} /> : undefined}
-                extraContent={behaviorExtra}
                 onFieldEdit={(fieldName, value) => handleFieldEdit(type, fieldName, value)}
                 onFieldReset={(fieldName) => handleFieldReset(type, fieldName)}
                 onResetComponent={() => handleComponentReset(type)}
@@ -827,6 +859,26 @@ export function PropertyInspector({ viewer }: PropertyInspectorProps) {
               />
             );
           })}
+
+          {/* Ephemeral read-only "virtual components" (behavior live state,
+              snap data) AFTER the editable sections — same header / collapse /
+              color pipeline, but rendered read-only (no editor / overlay). */}
+          {virtualComponents.map(({ type, data }) => (
+            <ComponentSection
+              key={`virtual:${type}`}
+              nodePath={selectedPath}
+              componentType={type}
+              data={data}
+              overriddenFields={EMPTY_OVERRIDES}
+              consumedOnly={consumedOnly}
+              readOnlyLive
+              onFieldEdit={NOOP_FIELD_EDIT}
+              onFieldReset={NOOP_FIELD_RESET}
+              onResetComponent={NOOP_RESET}
+              viewer={viewer}
+              signalStore={signalStore}
+            />
+          ))}
         </Box>
       )}
 

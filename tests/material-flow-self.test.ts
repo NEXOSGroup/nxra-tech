@@ -11,6 +11,7 @@ import {
 import { EventEmitter } from '../src/core/rv-events';
 import { ContextMenuStore } from '../src/core/hmi/context-menu-store';
 import { createSelf, type SelfDef, type SelfScheduler, type MU } from '../src/core/material-flow/material-flow-self';
+import { StateStatistics } from '../src/core/material-flow/rv-state-statistics';
 
 // ─── Inline mock host (mirrors tests/conveyor-behavior.test.ts) ───────────
 
@@ -189,7 +190,7 @@ describe('createSelf — ports from the snap graph', () => {
     // Mark downstream root occupied (no per-port key → root signal). The `/`-prefixed
     // read resolves via the global escape, which strips the leading slash, so the
     // stored key is the un-prefixed name.
-    values.set('ConvB/Flow.Occupied', true);
+    values.set('ConvB.Flow.Occupied', true);
     expect(self.freeOutputs().length).toBe(0);
     expect(self.downstreamOccupied(self.outputs()[0])).toBe(true);
   });
@@ -213,6 +214,49 @@ describe('createSelf — state machine + prop', () => {
     self.prop['driveTarget'] = 42;
     expect(self.prop['driveTarget']).toBe(42);
     expect(JSON.stringify(self.prop)).toContain('driveTarget');
+  });
+});
+
+describe('createSelf — statistics sink (Plan 201)', () => {
+  it('setState books state time into the StateStatistics sink', () => {
+    let t = 0;
+    const stats = new StateStatistics(() => t, { initialState: 'idle' });
+    const root = new Object3D();
+    const { host } = makeHost({ root });
+    const self = createSelf(ctxFor(host, root), DEF, { statistics: stats });
+    self.setState('Working'); t = 10;
+    self.setState('Empty'); t = 20;
+    const snap = stats.getSnapshot();
+    expect(snap.states['Working'].duration).toBeCloseTo(10);
+    expect(snap.states['Empty'].duration).toBeCloseTo(10);
+    expect(self.state).toBe('Empty');
+  });
+
+  it('statOutput / statCycle delegate to the sink', () => {
+    let t = 0;
+    const stats = new StateStatistics(() => t, { initialState: 'idle' });
+    const root = new Object3D();
+    const { host } = makeHost({ root });
+    const self = createSelf(ctxFor(host, root), DEF, { statistics: stats });
+    self.statCycleStart(); t = 5; self.statCycleEnd();
+    self.statOutput(3);
+    const snap = stats.getSnapshot();
+    expect(snap.output).toBe(3);
+    expect(snap.cycleCount).toBe(1);
+    expect(snap.cycleAvg).toBeCloseTo(5);
+  });
+
+  it('stat calls are no-ops without a sink', () => {
+    const root = new Object3D();
+    const { host } = makeHost({ root });
+    const self = createSelf(ctxFor(host, root), DEF);
+    expect(() => {
+      self.setState('Working');
+      self.statOutput(2);
+      self.statCycleStart();
+      self.statCycleEnd();
+    }).not.toThrow();
+    expect(self.state).toBe('Working');
   });
 });
 

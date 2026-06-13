@@ -32,6 +32,7 @@ import type { Object3D } from 'three';
 import { defineLibraryComponent, type RV } from './_shared/behavior-kit';
 import { classifyConnections, listOwnSnaps, type PortConnection } from './_shared/snap-graph-helpers';
 import { alignToInputAngle, dispatchToOutputAngle, calibrateBeltNeutralAngle } from './_shared/turntable-angle-math';
+import { FLOW_OCCUPIED, flowOccupiedRootSignal } from './_shared/transport-links';
 
 // Turntable publishes the type-neutral material-flow interop signals `Flow.*`
 // (NOT `Turntable.*`). `signalNamespace: 'Flow'` scopes the signals block to the
@@ -44,7 +45,11 @@ const SIGNALS = {
   PartCount: 'PLCOutputInt',
 } as const;
 
-const OCCUPIED_SIGNAL = 'Flow.Occupied';
+// SSOT for the per-port Occupied key: the shared FLOW_OCCUPIED constant from
+// transport-links (the type-neutral interop signal). No local literal — so the
+// turntable's per-port writes/reads and the conveyor's interlock reads can never
+// diverge on the `Flow.Occupied` name (see plan-200 §10.1).
+const OCCUPIED_SIGNAL = FLOW_OCCUPIED;
 const CONFIG = {
   neighborRefreshSec: 0.5,
   dischargeClearSec: 0.5,
@@ -158,7 +163,7 @@ const outputs = (l: TurntableLocal): PortConnection[] => l.connections.filter(c 
 const freeOutputs = (self: TurntableSelf): PortConnection[] => {
   const out: PortConnection[] = [];
   for (const c of outputs(self.local)) {
-    const sigName = `/${c.ownerRoot.name}/${OCCUPIED_SIGNAL}`;
+    const sigName = flowOccupiedRootSignal(c.ownerRoot.name);
     if (self.signals.get(sigName) === true) continue;
     out.push(c);
   }
@@ -180,7 +185,7 @@ function tryReceive(self: TurntableSelf): void {
   if (!self.sig.Run.get()) return;
 
   const ready = inputs(l).filter(c =>
-    self.signals.get(`/${c.ownerRoot.name}/${OCCUPIED_SIGNAL}`) === true);
+    self.signals.get(flowOccupiedRootSignal(c.ownerRoot.name)) === true);
   if (ready.length === 0) return;
   const waiting = ready[Math.floor(Math.random() * ready.length)];
 

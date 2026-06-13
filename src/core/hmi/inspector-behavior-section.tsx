@@ -2,24 +2,28 @@
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
 /**
- * BehaviorLiveStateSections — appended to the inspector card of any component
- * whose capability is registered with `filterLabel: 'Behavior'` (Conveyor,
- * Turntable, ChainTransfer, …). Shows three live read-only sections scoped to
- * the LayoutObject root that owns the behavior:
+ * inspector-behavior-section — live read-out for a placed behavior LayoutObject
+ * (Conveyor, Turntable, ChainTransfer, …), surfaced as an ephemeral READ-ONLY
+ * "virtual component" that flows through the SAME `ComponentSection` pipeline as
+ * a real Drive/LayoutObject section (same header, collapse, color, row optics).
  *
- *   • SIGNALS   — every `${rootName}/...` entry in the signal store
- *   • HARDWARE  — drives + sensors in the subtree with live speed / direction / occupied
- *   • SNAPS     — per-snap row (flow, paired vs free)
+ * The virtual component carries two field groups as read-only rows:
+ *   • STATES   — Running / Occupied / Part Count from the scoped `Flow.*` signals
+ *   • HARDWARE — Drive live speed/direction + Sensor clear/occupied
  *
- * Re-renders on the inspector's existing `useSignalTick` cadence — no extra pump.
+ * Signals are read by the dot-symbol the behavior publishes (`${rootName}.Flow.*`).
+ * The data is collected fresh on each inspector render; the section re-renders on
+ * the inspector's existing `useSignalTick` cadence — no extra pump.
  */
 
-import { useMemo } from 'react';
-import { Box, Typography } from '@mui/material';
 import type { Object3D } from 'three';
-import type { RVViewer } from '../rv-viewer';
-import { useSignalTick } from '../../hooks/use-signal-tick';
 import { isPlacedLibraryAsset } from './layout-root-utils';
+import { runtimeRow, type RuntimeRowSpec } from './rv-component-section';
+
+/** Accent color for "hot" (active / occupied) read-only values. */
+const LIVE_STATE_COLOR = '#4dd0e1';
+/** Accent color for an occupied sensor (amber, matches snap occupied). */
+const OCCUPIED_COLOR = '#e8b04a';
 
 // ─── Minimal viewer-shape contracts (tested without a real viewer) ──────
 export interface BehaviorViewerSnapshot {
@@ -29,17 +33,25 @@ export interface BehaviorViewerSnapshot {
   getPlugin?<T>(id: string): T | undefined;
 }
 
-export interface BehaviorSnapInfo {
-  id: string;
-  flow: 'in' | 'out' | 'bidi';
-  paired: boolean;
+export interface BehaviorDriveInfo {
+  name: string;
+  /** Live speed in mm/s or deg/s (0 when stopped or unknown). */
+  speed: number;
+  direction: 'forward' | 'backward' | 'idle';
+}
+
+export interface BehaviorSensorInfo {
+  name: string;
+  occupied: boolean;
 }
 
 export interface BehaviorRowData {
-  signalNames: string[];
-  driveNames: string[];
-  sensorNames: string[];
-  snaps: BehaviorSnapInfo[];
+  /** Scoped `Flow.*` state signals → { Running, Occupied, PartCount }. */
+  running: boolean | undefined;
+  occupied: boolean | undefined;
+  partCount: number | undefined;
+  drives: BehaviorDriveInfo[];
+  sensors: BehaviorSensorInfo[];
 }
 
 // ─── Pure data collection (testable) ────────────────────────────────────
@@ -54,134 +66,109 @@ function ancestorOrSelfIs(node: Object3D | null, target: Object3D): boolean {
 }
 
 export function collectBehaviorData(viewer: BehaviorViewerSnapshot, root: Object3D): BehaviorRowData {
-  const out: BehaviorRowData = { signalNames: [], driveNames: [], sensorNames: [], snaps: [] };
-
-  if (viewer.signalStore) {
-    const prefix = `${root.name}/`;
-    for (const name of viewer.signalStore.getAll().keys()) {
-      if (name.startsWith(prefix)) out.signalNames.push(name);
-    }
-    out.signalNames.sort();
-  }
-
-  for (const d of viewer.drives) {
-    if (ancestorOrSelfIs(d.node, root)) out.driveNames.push(d.name);
-  }
-
-  for (const s of viewer.transportManager?.sensors ?? []) {
-    if (ancestorOrSelfIs(s.node, root)) {
-      out.sensorNames.push(s.node.name || '<sensor>');
-    }
-  }
-
-  type SnapRegistryShape = {
-    getByOwnerRoot(r: Object3D): readonly { id: string; flow: 'in' | 'out' | 'bidi'; pairedSnapId?: string }[];
+  const out: BehaviorRowData = {
+    running: undefined, occupied: undefined, partCount: undefined,
+    drives: [], sensors: [],
   };
-  const snapPlugin = viewer.getPlugin?.<{ getRegistry?: () => SnapRegistryShape }>('snap-point');
-  const reg = snapPlugin?.getRegistry?.();
-  if (reg) {
-    for (const sp of reg.getByOwnerRoot(root)) {
-      out.snaps.push({ id: sp.id, flow: sp.flow, paired: !!sp.pairedSnapId });
-    }
+
+  // STATES — read the scoped `Flow.*` dot-symbols this behavior publishes.
+  const signals = viewer.signalStore?.getAll();
+  if (signals) {
+    const running = signals.get(`${root.name}.Flow.Running`);
+    const occupied = signals.get(`${root.name}.Flow.Occupied`);
+    const partCount = signals.get(`${root.name}.Flow.PartCount`);
+    if (typeof running === 'boolean') out.running = running;
+    if (typeof occupied === 'boolean') out.occupied = occupied;
+    if (typeof partCount === 'number') out.partCount = partCount;
+  }
+
+  // HARDWARE — live drives in the subtree (current speed + direction).
+  for (const d of viewer.drives) {
+    if (!ancestorOrSelfIs(d.node, root)) continue;
+    const live = d as { name: string; jogForward?: boolean; jogBackward?: boolean; currentSpeed?: number };
+    out.drives.push({
+      name: live.name,
+      speed: live.currentSpeed ?? 0,
+      direction: live.jogForward ? 'forward' : live.jogBackward ? 'backward' : 'idle',
+    });
+  }
+
+  // HARDWARE — sensors in the subtree (clear / occupied).
+  for (const s of viewer.transportManager?.sensors ?? []) {
+    if (!ancestorOrSelfIs(s.node, root)) continue;
+    const occ = (s as { occupied?: boolean }).occupied === true;
+    out.sensors.push({ name: s.node.name || '<sensor>', occupied: occ });
   }
 
   return out;
 }
 
-// ─── Component ──────────────────────────────────────────────────────────
+// ─── Display-name derivation ────────────────────────────────────────────
 
-interface Props {
-  viewer: RVViewer;
-  layoutRoot: Object3D;
+/**
+ * Human-readable header for a behavior marker type.
+ * Strips a trailing `Behavior` suffix and space-splits camelCase words, so
+ * `ConveyorBehavior` → "Conveyor", `ChainTransferBehavior` → "Chain Transfer".
+ */
+export function behaviorDisplayName(markerType: string): string {
+  const stripped = markerType.replace(/Behavior$/, '');
+  const spaced = stripped.replace(/([a-z0-9])([A-Z])/g, '$1 $2').trim();
+  return (spaced || stripped || markerType).toUpperCase();
 }
 
-export function BehaviorLiveStateSections({ viewer, layoutRoot }: Props) {
-  // Tick-driven re-render on signal changes (same cadence the inspector uses).
-  useSignalTick(viewer.signalStore ?? null, 200);
+// ─── Virtual-component builder ──────────────────────────────────────────
 
-  if (!isPlacedLibraryAsset(layoutRoot)) return null;
+/** A "virtual component" injected into the inspector section list at render
+ *  time — same `{ type, data }` shape a real component carries, but rendered in
+ *  the read-only-live ComponentSection mode. `data` holds pre-formatted rows. */
+export interface VirtualComponent {
+  type: string;
+  data: Record<string, unknown>;
+}
 
-  const data = useMemo(
-    () => collectBehaviorData(viewer as unknown as BehaviorViewerSnapshot, layoutRoot),
-    // Re-collect every signal tick — cheap (handful of map ops); avoids stale
-    // signal/drive/sensor lists when the viewer adds new entries after mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [viewer, layoutRoot, viewer.signalStore?.getAll().size, viewer.drives.length],
-  );
+/**
+ * Build the read-only-live virtual component for a placed behavior LayoutObject,
+ * or null when the root is not a placed library asset / carries no live data.
+ * `markerType` is the stamped marker (e.g. `ConveyorBehavior`) and supplies the
+ * header name; `data` is collected fresh from the viewer snapshot.
+ */
+export function buildBehaviorVirtualComponent(
+  viewer: BehaviorViewerSnapshot,
+  root: Object3D,
+  markerType: string,
+): VirtualComponent | null {
+  if (!isPlacedLibraryAsset(root)) return null;
 
-  const signalValues = viewer.signalStore?.getAll();
-  const live = (viewer as unknown as BehaviorViewerSnapshot);
+  const d = collectBehaviorData(viewer, root);
+  const hasStates = d.running !== undefined || d.occupied !== undefined || d.partCount !== undefined;
+  const hasHardware = d.drives.length > 0 || d.sensors.length > 0;
+  if (!hasStates && !hasHardware) return null;
 
-  if (data.signalNames.length === 0 && data.driveNames.length === 0 && data.sensorNames.length === 0 && data.snaps.length === 0) {
-    return null;
+  const fields: Record<string, RuntimeRowSpec> = {};
+
+  // STATES
+  if (d.running !== undefined) {
+    fields['Running'] = runtimeRow(d.running ? 'true' : 'false', { color: d.running ? LIVE_STATE_COLOR : undefined });
+  }
+  if (d.occupied !== undefined) {
+    fields['Occupied'] = runtimeRow(d.occupied ? 'true' : 'false', { color: d.occupied ? LIVE_STATE_COLOR : undefined });
+  }
+  if (d.partCount !== undefined) {
+    fields['Part Count'] = runtimeRow(String(d.partCount));
   }
 
-  return (
-    <Box sx={{ px: 1, pb: 1 }}>
-      {data.signalNames.length > 0 && (
-        <Section title={`SIGNALS (${data.signalNames.length})`}>
-          {data.signalNames.map(name => {
-            const v = signalValues?.get(name);
-            return <Row key={name} k={name.split('/').slice(-1)[0]} v={formatValue(v)} hot={v === true} />;
-          })}
-        </Section>
-      )}
+  // HARDWARE — drives (direction arrow + live speed)
+  for (const drv of d.drives) {
+    const arrow = drv.direction === 'forward' ? '►' : drv.direction === 'backward' ? '◄' : '·';
+    fields[drv.name] = runtimeRow(`${arrow}  ${drv.speed.toFixed(0)} mm/s`, {
+      color: drv.direction !== 'idle' ? LIVE_STATE_COLOR : undefined,
+    });
+  }
 
-      {(data.driveNames.length > 0 || data.sensorNames.length > 0) && (
-        <Section title="HARDWARE">
-          {data.driveNames.map(name => {
-            const d = (viewer.drives as ReadonlyArray<unknown>).find(x => (x as { name: string }).name === name) as
-              | { jogForward?: boolean; jogBackward?: boolean; currentSpeed?: number }
-              | undefined;
-            const dir = d?.jogForward ? '►' : d?.jogBackward ? '◄' : '·';
-            return <Row key={`d-${name}`} k={`drv ${name}`} v={`${dir}  ${d ? (d.currentSpeed ?? 0).toFixed(0) : '?'} mm/s`} hot={!!d?.jogForward} />;
-          })}
-          {data.sensorNames.map(name => {
-            const s = (live.transportManager?.sensors as ReadonlyArray<unknown> | undefined)?.find(
-              x => ((x as { node: { name: string } }).node.name === name),
-            ) as { occupied?: boolean } | undefined;
-            const occ = s?.occupied === true;
-            return <Row key={`s-${name}`} k={`sns ${name}`} v={occ ? 'OCCUPIED' : 'clear'} hot={occ} />;
-          })}
-        </Section>
-      )}
+  // HARDWARE — sensors (clear / occupied)
+  for (const s of d.sensors) {
+    fields[s.name] = runtimeRow(s.occupied ? 'Occupied' : 'Clear', { color: s.occupied ? OCCUPIED_COLOR : undefined });
+  }
 
-      {data.snaps.length > 0 && (
-        <Section title={`SNAPS (${data.snaps.filter(s => s.paired).length}/${data.snaps.length} paired)`}>
-          {data.snaps.map(s => (
-            <Row key={s.id} k={s.flow} v={s.paired ? 'paired' : 'free'} hot={!s.paired && s.flow === 'out'} dim={!s.paired} />
-          ))}
-        </Section>
-      )}
-    </Box>
-  );
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <Box sx={{ mt: 0.75 }}>
-      <Typography sx={{ fontSize: 9, color: 'text.disabled', letterSpacing: 0.6, fontWeight: 700 }}>{title}</Typography>
-      <Box sx={{ mt: 0.25 }}>{children}</Box>
-    </Box>
-  );
-}
-
-function Row({ k, v, hot, dim }: { k: string; v: string; hot?: boolean; dim?: boolean }) {
-  return (
-    <Box sx={{
-      display: 'flex', justifyContent: 'space-between', gap: 1,
-      fontSize: 11, fontFamily: '"JetBrains Mono", ui-monospace, monospace',
-      color: dim ? 'text.disabled' : 'text.secondary',
-      px: 0.5,
-    }}>
-      <Box sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{k}</Box>
-      <Box sx={{ color: hot ? '#e8b04a' : 'inherit', fontWeight: hot ? 700 : 400 }}>{v}</Box>
-    </Box>
-  );
-}
-
-function formatValue(v: boolean | number | undefined): string {
-  if (v === undefined) return '—';
-  if (typeof v === 'boolean') return v ? 'true' : 'false';
-  return String(v);
+  return { type: behaviorDisplayName(markerType), data: fields };
 }

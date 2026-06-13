@@ -291,9 +291,9 @@ describe('Source / Sink — continuous blocks are inert (no double effect)', () 
     const { ctx, handle } = createBindContext(root, host, {});
     SinkBehavior.bind(ctx);
     // setup() published Occupied=false so an upstream conveyor discharges into the sink.
-    expect(values.get('Sink/Flow.Occupied')).toBe(false);
+    expect(values.get('Sink.Flow.Occupied')).toBe(false);
     // Ticking does nothing (no fixedUpdate) — no MU handling on the continuous path.
     iterateFixedUpdate(handle, 1 / 60);
-    expect(values.get('Sink/Flow.Occupied')).toBe(false);
+    expect(values.get('Sink.Flow.Occupied')).toBe(false);
   });
 });

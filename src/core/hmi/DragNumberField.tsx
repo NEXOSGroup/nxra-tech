@@ -57,6 +57,16 @@ export interface DragNumberFieldProps {
   ariaLabel?: string;
   /** Compact rendering for dense surfaces like the Property Inspector. */
   compact?: boolean;
+  /**
+   * Inline label rendered BETWEEN the drag handle and the input. When set, the
+   * field lays out as a single settings-style row — `[handle] label … [input]` —
+   * so it visually matches one-line toggle rows. The handle drops its boxed
+   * styling and reads as a plain (draggable) icon. Omit for the default
+   * stacked / full-width layout.
+   */
+  label?: ReactNode;
+  /** Fixed width (px) of the input in inline-label mode. Default 92. */
+  inputWidth?: number;
 }
 
 /**
@@ -81,7 +91,10 @@ export function DragNumberField({
   disabled = false,
   ariaLabel,
   compact = false,
+  label,
+  inputWidth = 92,
 }: DragNumberFieldProps) {
+  const inline = label != null;
   const dragRef = useRef<{ startX: number; startValue: number } | null>(null);
 
   // Default precision: 0 decimals if step >= 1, else 2.
@@ -116,13 +129,25 @@ export function DragNumberField({
   }, [onCommit]);
 
   return (
-    <Box sx={{ display: 'flex', alignItems: 'stretch', gap: compact ? 0.25 : 0.5, ...sx }}>
+    <Box sx={{ display: 'flex', alignItems: 'center', gap: inline ? 1 : compact ? 0.25 : 0.5, ...sx }}>
       <Box
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         aria-label={ariaLabel ? `${ariaLabel} drag handle` : 'drag to change value'}
-        sx={{
+        sx={inline ? {
+          // Plain (boxless) draggable icon so the row matches one-line toggles.
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: 'text.secondary',
+          cursor: disabled ? 'default' : 'ew-resize',
+          userSelect: 'none',
+          flex: '0 0 auto',
+          opacity: disabled ? 0.4 : 1,
+          transition: 'color 120ms ease',
+          '&:hover': disabled ? {} : { color: 'text.primary' },
+        } : {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -144,6 +169,22 @@ export function DragNumberField({
       >
         {icon}
       </Box>
+      {inline && (
+        <Typography
+          sx={{
+            fontSize: 12,
+            flex: 1,
+            minWidth: 0,
+            color: disabled ? 'text.disabled' : 'text.primary',
+            userSelect: 'none',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}
+        >
+          {label}
+        </Typography>
+      )}
       <TextField
         size="small"
         type="number"
@@ -171,11 +212,13 @@ export function DragNumberField({
           },
         }}
         sx={{
-          flex: 1,
-          '& .MuiInputBase-input': compact
-            ? { fontSize: 11, fontFamily: 'monospace', height: 24, py: 0, boxSizing: 'border-box' }
-            : { fontSize: 13, py: 0.75 },
-          ...(compact && {
+          ...(inline ? { width: inputWidth, flex: '0 0 auto' } : { flex: 1 }),
+          '& .MuiInputBase-input': inline
+            ? { fontSize: 12, py: 0.4, textAlign: 'right' }
+            : compact
+              ? { fontSize: 11, fontFamily: 'monospace', height: 24, py: 0, boxSizing: 'border-box' }
+              : { fontSize: 13, py: 0.75 },
+          ...((compact || inline) && {
             '& .MuiOutlinedInput-root': {
               bgcolor: 'rgba(255,255,255,0.04)',
               '& fieldset': { borderColor: 'rgba(255,255,255,0.08)' },

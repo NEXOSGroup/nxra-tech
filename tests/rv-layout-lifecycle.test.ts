@@ -125,3 +125,59 @@ describe('LayoutPlannerPlugin Lifecycle', () => {
     expect(viewer.raycastManager.removeAncestorOverride).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('LayoutPlannerPlugin — re-activation across scene load', () => {
+  // The plugin auto-(re)enters planner mode at the END of every scene load
+  // (the `scene-loaded` event), so the planner re-binds to the freshly-loaded
+  // scene. Regression guard for: discarding changes / loading a different scene
+  // left the planner `_active` from the previous scene, so its edit bindings +
+  // toolbar context stayed attached to the disposed scene and never rebuilt.
+  function setup(opts: { panelOpen: boolean }) {
+    const viewer = createMockViewer() as any;
+    const handlers: Record<string, Array<(arg: unknown) => void>> = {};
+    viewer.on = vi.fn((evt: string, cb: (arg: unknown) => void) => {
+      (handlers[evt] ??= []).push(cb);
+      return vi.fn();
+    });
+    viewer.leftPanelManager = {
+      open: vi.fn(),
+      close: vi.fn(),
+      isOpen: vi.fn(() => opts.panelOpen),
+      restore: vi.fn(),
+      subscribe: vi.fn(() => vi.fn()),
+    };
+
+    const plugin = new LayoutPlannerPlugin();
+    plugin.onModelLoaded?.({ scene: new Group() } as any, viewer);
+
+    // Stub setActive so we exercise the scene-loaded HANDLER logic without
+    // running the heavy activation body (which touches many viewer subsystems).
+    const setActive = vi
+      .spyOn(plugin as unknown as { setActive(a: boolean): void }, 'setActive')
+      .mockImplementation((a: boolean) => { (plugin as unknown as { _active: boolean })._active = a; });
+
+    const fireSceneLoaded = () => {
+      for (const cb of handlers['scene-loaded'] ?? []) cb({ scene: new Group() });
+    };
+    return { plugin, setActive, fireSceneLoaded };
+  }
+
+  test('first load: activates when the panel is open and not yet active', () => {
+    const { setActive, fireSceneLoaded } = setup({ panelOpen: true });
+    fireSceneLoaded();
+    expect(setActive.mock.calls.map(c => c[0])).toEqual([true]);
+  });
+
+  test('scene switch / discard: re-cycles (deactivate then activate) when already active', () => {
+    const { plugin, setActive, fireSceneLoaded } = setup({ panelOpen: true });
+    (plugin as unknown as { _active: boolean })._active = true; // active from the previous scene
+    fireSceneLoaded();
+    expect(setActive.mock.calls.map(c => c[0])).toEqual([false, true]);
+  });
+
+  test('panel closed: scene-loaded does not force the planner on', () => {
+    const { setActive, fireSceneLoaded } = setup({ panelOpen: false });
+    fireSceneLoaded();
+    expect(setActive).not.toHaveBeenCalled();
+  });
+});

@@ -74,7 +74,10 @@ export interface ViewerEvents {
   'camera-animation-done': { targetPath?: string };
   'object-clicked': { path: string; node: Object3D; hitPoint?: [number, number, number] };
   'selection-changed': SelectionSnapshot;
-  'object-focus': { path: string; node: Object3D };
+  /** Frame-on-object trigger. `openInspector === false` (e.g. the F shortcut)
+   *  frames the camera only — the hierarchy/inspector listener must NOT open or
+   *  reveal. Omitted/true (double-click) opens & reveals as before. */
+  'object-focus': { path: string; node: Object3D; openInspector?: boolean };
   /** Fired when a previously focused object is unfocused (focusByPath cleared). */
   'object-blur': void;
   'panel-opened': { panelId: string };

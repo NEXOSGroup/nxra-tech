@@ -112,21 +112,21 @@ describe('TransportLink.occupied — per-port then root', () => {
   // by rv.signals before it reaches the store), so seed without the leading slash.
   it('reads the per-port signal when it is present', () => {
     const { link, store } = makeOutLink('Conv', 'TT', 'C', 'P');
-    store.set('TT/Flow.Occupied', false);      // root says free
-    store.set('TT/Flow.Occupied@P', true);     // but the per-port says blocked
+    store.set('TT.Flow.Occupied', false);      // root says free
+    store.set('TT.Flow.Occupied@P', true);     // but the per-port says blocked
     expect(link.occupied()).toBe(true);
   });
 
   it('falls back to the root Occupied when no per-port signal exists', () => {
     const { link, store } = makeOutLink('Conv', 'TT', 'C', 'P');
-    store.set('TT/Flow.Occupied', true);
+    store.set('TT.Flow.Occupied', true);
     expect(link.occupied()).toBe(true);
   });
 
   it('false/undefined → not occupied (optimistic)', () => {
     const { link, store } = makeOutLink('Conv', 'TT', 'C', 'P');
     expect(link.occupied()).toBe(false);           // unset → false
-    store.set('TT/Flow.Occupied', false);
+    store.set('TT.Flow.Occupied', false);
     expect(link.occupied()).toBe(false);           // explicit false → false
   });
 });
@@ -165,7 +165,7 @@ describe('TransportLink.setOccupied — own scope keyed by mySnapId', () => {
     };
     const link: TransportLink = linkOf(rv, conn);
     link.setOccupied(true);
-    // rv.signals.set scopes 'Flow.Occupied@P' → 'TT/Flow.Occupied@P'.
+    // rv.signals.set scopes 'Flow.Occupied@P' → 'TT.Flow.Occupied@P'.
     expect(rv.signals.get<boolean>('Flow.Occupied@P')).toBe(true);
   });
 });
@@ -173,13 +173,13 @@ describe('TransportLink.setOccupied — own scope keyed by mySnapId', () => {
 describe('TransportLink.upstreamWaiting — partner root Occupied', () => {
   it('is true when the connected upstream root publishes Occupied=true', () => {
     const { link, store } = makeOutLink('TT', 'Infeed', 'P', 'I');
-    store.set('Infeed/Flow.Occupied', true);   // resolved key (no leading slash)
+    store.set('Infeed.Flow.Occupied', true);   // resolved key (no leading slash)
     expect(link.upstreamWaiting()).toBe(true);
   });
   it('is false when the partner root Occupied is unset/false', () => {
     const { link, store } = makeOutLink('TT', 'Infeed', 'P', 'I');
     expect(link.upstreamWaiting()).toBe(false);
-    store.set('Infeed/Flow.Occupied', false);
+    store.set('Infeed.Flow.Occupied', false);
     expect(link.upstreamWaiting()).toBe(false);
   });
 });
@@ -214,8 +214,8 @@ describe('TransportLink — SYMMETRY: turntable setOccupied ↔ conveyor occupie
     if (!cvLink) throw new Error('expected an output link on the conveyor');
 
     // Turntable blocks its port → conveyor must see it as occupied (same resolved key).
-    ttLink.setOccupied(true);                  // writes TT/Flow.Occupied@P
-    expect(cvLink.occupied()).toBe(true);      // reads /TT/Flow.Occupied@P → TT/Flow.Occupied@P
+    ttLink.setOccupied(true);                  // writes TT.Flow.Occupied@P
+    expect(cvLink.occupied()).toBe(true);      // reads /TT.Flow.Occupied@P → TT.Flow.Occupied@P
 
     ttLink.setOccupied(false);
     expect(cvLink.occupied()).toBe(false);
@@ -237,8 +237,8 @@ describe('TransportLink — SYMMETRY: turntable setOccupied ↔ conveyor occupie
     });
     const conns = [conn(A, 'pA', 'iA'), conn(B, 'pB', 'iB'), conn(C, 'pC', 'iC')];
     // Resolved keys (the `/`-escape is stripped by rv.signals before the store).
-    store.set('B/Flow.Occupied', true);      // B blocked
-    store.set('C/Flow.Occupied', false);     // C explicitly free; A unset
+    store.set('B.Flow.Occupied', true);      // B blocked
+    store.set('C.Flow.Occupied', false);     // C explicitly free; A unset
     const free = conns.filter(c => !linkOf(ttCtx.rv, c).occupied());
     expect(free.map(c => c.ownerRoot)).toEqual([A, C]);
   });

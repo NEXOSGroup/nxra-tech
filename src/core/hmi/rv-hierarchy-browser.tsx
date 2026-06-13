@@ -38,6 +38,7 @@ import {
 import { Search } from '@mui/icons-material';
 import { filterChipSx, RV_SCROLL_CLASS } from './shared-sx';
 import type { RVViewer } from '../rv-viewer';
+import type { SnapPointPlugin } from '../../plugins/snap-point';
 import type { ContextMenuTarget } from './context-menu-store';
 import { HIERARCHY_MIN_WIDTH, HIERARCHY_MAX_WIDTH } from './rv-extras-editor';
 import { LeftPanel } from './LeftPanel';
@@ -295,19 +296,39 @@ export function HierarchyBrowser({ viewer }: HierarchyBrowserProps) {
 
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // ── Snap 3D-highlight (A5) ──
+  // A snap Empty has no mesh, so the outline highlighter shows nothing. When a
+  // hierarchy row is a snap node, drive the snap-point plugin's marker highlight
+  // instead (hover = temporary, select = persistent). The snap id is the node's
+  // Object3D.uuid (== SnapPoint.id).
+  const snapIdForPath = useCallback((path: string | null): string | null => {
+    if (!path) return null;
+    const node = viewer.registry?.getNode(path);
+    if (!node) return null;
+    const reg = viewer.getPlugin<SnapPointPlugin>('snap-point')?.getRegistry();
+    return reg?.getById(node.uuid) ? node.uuid : null;
+  }, [viewer]);
+
+  const highlightSnap = useCallback((snapId: string | null) => {
+    viewer.getPlugin<SnapPointPlugin>('snap-point')?.highlightSnap(snapId);
+  }, [viewer]);
+
   const handleHover = useCallback((path: string | null) => {
     if (hoverTimerRef.current) { clearTimeout(hoverTimerRef.current); hoverTimerRef.current = null; }
-    if (!path) { viewer.highlighter.clear(); return; }
+    if (!path) { viewer.highlighter.clear(); highlightSnap(null); return; }
     hoverTimerRef.current = setTimeout(() => {
       hoverTimerRef.current = null;
       const node = viewer.registry?.getNode(path);
       if (node) {
         viewer.highlighter.highlight(node, true, { includeChildDrives: true });
+        // Snap node → also show the 3D marker highlight (temporary hover).
+        highlightSnap(snapIdForPath(path));
       } else {
         viewer.highlighter.clear();
+        highlightSnap(null);
       }
     }, 80);
-  }, [viewer]);
+  }, [viewer, highlightSnap, snapIdForPath]);
 
   const handleSelect = useCallback(
     (path: string, shiftKey = false) => {
@@ -316,9 +337,11 @@ export function HierarchyBrowser({ viewer }: HierarchyBrowserProps) {
       } else {
         viewer.selectionManager.select(path);
       }
+      // Persistent snap highlight on select; clears when a non-snap is selected.
+      highlightSnap(snapIdForPath(path));
       plugin.selectNode(path, true);
     },
-    [viewer, plugin],
+    [viewer, plugin, highlightSnap, snapIdForPath],
   );
 
   const handleDoubleClick = useCallback(
@@ -352,15 +375,16 @@ export function HierarchyBrowser({ viewer }: HierarchyBrowserProps) {
     [viewer],
   );
 
-  // Clear hover highlight when panel closes
+  // Clear hover + snap highlight when panel closes / unmounts
   useEffect(() => {
-    return () => { viewer.highlighter.clear(); };
-  }, [viewer]);
+    return () => { viewer.highlighter.clear(); highlightSnap(null); };
+  }, [viewer, highlightSnap]);
 
   const handleClose = useCallback(() => {
     viewer.highlighter.clear();
+    highlightSnap(null);
     plugin.togglePanel();
-  }, [plugin, viewer]);
+  }, [plugin, viewer, highlightSnap]);
 
   const isFlat = flatFiltered !== null;
 

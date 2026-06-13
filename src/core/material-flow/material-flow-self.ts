@@ -33,9 +33,11 @@ import type {
   SignalType,
 } from '../behavior-runtime';
 import type { TransportLink } from '../../behaviors/_shared/transport-links';
+import type { StateStatistics } from './rv-state-statistics';
 import {
   createDownstreamInterlock,
   declareFlowSignalsWith,
+  flowOccupiedRootSignal,
   FLOW_OCCUPIED,
 } from '../../behaviors/_shared/transport-links';
 import {
@@ -271,6 +273,15 @@ export interface MaterialFlowSelf<
   setState(name: string): void;
   readonly state: string;
 
+  // Statistics (Plan 201). When the self has a StateStatistics sink these book
+  // into it; otherwise they are no-ops. `setState` already feeds state time.
+  /** Count completed output (parts) for throughput statistics. */
+  statOutput(n?: number): void;
+  /** Start a cycle timer (statistics). */
+  statCycleStart(): void;
+  /** Close a cycle timer (statistics). Ignored if no cycle was started. */
+  statCycleEnd(): void;
+
   // MU transfer / load.
   transfer(mu: MU, fromPort?: Port): void;
   /**
@@ -374,8 +385,10 @@ function portFromPairing(rv: RVBindContext, pr: OutputPairing): Port {
  * Build the TransportLink fields for a port. This mirrors `makeLink` in
  * transport-links.ts (kept private there) using the same per-port/root
  * `Flow.Occupied@<id>` signal convention so the addressing is identical
- * across Plan 196 and Plan 194. The signal name comes from the shared
- * `FLOW_OCCUPIED` SSOT — no second literal lives here.
+ * across Plan 196 and Plan 194. The per-root interlock symbol comes from the
+ * shared `flowOccupiedRootSignal()` helper (which folds in `FLOW_OCCUPIED` with
+ * the `.`-separator) — no second literal lives here, so makeLink and makeLinkLike
+ * can never diverge on the separator.
  */
 function makeLinkLike(
   rv: RVBindContext,
@@ -383,7 +396,7 @@ function makeLinkLike(
   partnerSnapId: string,
   partnerRoot: Object3D,
 ): TransportLink {
-  const partnerRootSig = `/${partnerRoot.name}/${FLOW_OCCUPIED}`;
+  const partnerRootSig = flowOccupiedRootSignal(partnerRoot.name);
   return {
     mySnapId,
     partnerSnapId,
@@ -493,6 +506,14 @@ export interface CreateSelfOptions<
   canAcceptDownstream?: ((mu: MU, port?: Port) => boolean) | null;
   /** Per-instance state object exposed as `self.local` (defaults to `{}`). */
   local?: S;
+  /**
+   * Plan 201 — per-component state-statistics sink. When present, `self.setState`
+   * ALSO books state time into it, and `self.statOutput/statCycleStart/statCycleEnd`
+   * delegate to it. Absent → every stat call is a no-op. The caller (a createSelf
+   * caller wired to the StatisticsManager) constructs it with the shared sim clock
+   * (`() => viewer.simTime`) and registers it for aggregation.
+   */
+  statistics?: StateStatistics | null;
 }
 
 /** DES scheduling backend the DESRunner injects (P5). */
@@ -526,6 +547,7 @@ export function createSelf<
   const spawnMU = opts.spawnMU ?? null;
   const canAcceptDownstream = opts.canAcceptDownstream ?? null;
   const local = (opts.local ?? {}) as S;
+  const statistics = opts.statistics ?? null;
   let localMuId = 0;
 
   // Build the typed `self.sig` accessor map from the optional `signals` shape.
@@ -671,9 +693,21 @@ export function createSelf<
 
     setState(name: string): void {
       state = name;
+      // Plan 201: feed the state-statistics sink (no-op when absent). This is the
+      // single source of state time — DES and continuous both go through here.
+      statistics?.setState(name);
     },
     get state(): string {
       return state;
+    },
+    statOutput(n = 1): void {
+      statistics?.output(n);
+    },
+    statCycleStart(): void {
+      statistics?.cycleStart();
+    },
+    statCycleEnd(): void {
+      statistics?.cycleEnd();
     },
 
     transfer(mu: MU, fromPort?: Port): void {

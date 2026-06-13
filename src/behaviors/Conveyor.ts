@@ -45,7 +45,7 @@ interface ConveyorLocal {
   partAtSensor: boolean;
   partCount: number;
   blockedMUs: RV.MU[];
-  /** Resolved DES transit-timing model (speed/length/timeToSensor + entry/exit tween). */
+  /** Resolved DES transit-timing model (speed/length/transitTime + entry/exit tween). */
   timer: TransitTimer | null;
   /** MUs currently in transit → their DES arrival event id (cancel-on-reset). */
   transitMUs: Map<number, number>;
@@ -80,18 +80,10 @@ const def = {
   type: 'Conveyor' as const,
   kind: 'conveyor' as const,
   models: ['*Conveyor*'],
-  // DES timing params (Plan 194 §2.5 / F12). Mirror the C#-DES `DESConveyor`
-  // schema; read by the DES transit timer from self.prop. All three are
-  // scope:'des' — inert in the continuous/live view (the belt surface + the
-  // Transport-Z Drive own real motion there), so they show read-only with a
-  // "(DES)" tag instead of pretending to be editable live fields. In particular
-  // ConveyorSpeed is only the DES fallback for the real Drive.TargetSpeed, so it
-  // must NOT appear as a second, contradicting editor.
-  schema: {
-    ConveyorLength:      { type: 'number' as const, default: 1000, scope: 'des' as const }, // mm
-    ConveyorSpeed:       { type: 'number' as const, default: 200, scope: 'des' as const },  // mm/s (DES fallback for Drive.TargetSpeed)
-    CalculatedArcLength: { type: 'number' as const, default: 0, scope: 'des' as const },    // mm (curves; overrides length)
-  },
+  // No DES timing fields: the transit timing is derived from the real belt
+  // geometry (length) and the Transport Drive's TargetSpeed (speed), so there is
+  // nothing for the user to configure here. See _shared/transit-timing.ts.
+  schema: {},
 
   // The material-flow interop signals — published under the type-neutral `Flow`
   // namespace (NOT `Conveyor.*`), auto-declared as `Flow.<key>` + typed self.sig.
@@ -129,13 +121,13 @@ const def = {
     // whose initial value differs from the type-default (createSelf declares
     // Run=false with the rest); override it here on both paths.
     self.sig.Run.set(true);
-    // Stamp the inspector/hierarchy marker with the resolved nodes (the factory
-    // also stamps ConveyorBehavior with the schema defaults — these deep-merge).
+    // Stamp the inspector/hierarchy marker with the resolved nodes.
     self.stamp('ConveyorBehavior', { Belt: l.belt.name, Sensor: l.sensor.name });
-    // Resolve the DES timing model once (speed/length/timeToSensor + tween
-    // endpoints). Mode-agnostic: harmless in continuous (the belt physics owns
-    // motion there), authoritative for the DES transit schedule.
-    l.timer = createTransitTimer(self, l.belt, l.sensor);
+    // Resolve the DES timing model once (speed from the Transport Drive, length
+    // from the belt geometry, full-belt transit time + tween endpoints).
+    // Mode-agnostic: harmless in continuous (the belt physics owns motion
+    // there), authoritative for the DES transit schedule.
+    l.timer = createTransitTimer(self, l.belt);
     self.contextMenu(l.belt, [
       { id: 'run',  label: 'Run',  action: () => self.sig.Run.set(true) },
       { id: 'stop', label: 'Stop', danger: true, dividerBefore: true,
@@ -163,19 +155,19 @@ const def = {
   },
 
   des: {
-    // Accept = enter transit. Schedule the arrival at the sensor/discharge point
-    // after `timeToSensor` of SIM time (NOT an immediate release), and attach a
-    // straight entry→exit position tween (Plan 194 §2.5 / §3.1). Capacity is
-    // single-zone like the C#-DES `DESConveyor`; the runner's canAccept already
-    // enforces MaxCapacity, so returning true here accepts the MU into transit.
+    // Accept = enter transit. Schedule the arrival at the discharge point (the
+    // belt exit) after the full-belt transit time of SIM time (NOT an immediate
+    // release), and attach a straight entry→exit position tween. Capacity is
+    // single-zone; the runner's canAccept already enforces MaxCapacity, so
+    // returning true here accepts the MU into transit.
     onAccept(self: ConveyorSelf, mu: RV.MU): boolean {
       const l = self.local;
-      l.transitMUs.set(mu.id, self.in(l.timer!.timeToSensor, 'Arrival', mu, l.timer!.tween(mu)));
+      l.transitMUs.set(mu.id, self.in(l.timer!.transitTime, 'Arrival', mu, l.timer!.tween(mu)));
       return true;
     },
-    // Arrival at the sensor/discharge point: mark the part present (the local
-    // discharge trigger), then run the existing release handshake. A downstream
-    // block parks the MU in blockedMUs (Plan 194 §2.5 back-pressure).
+    // Arrival at the discharge point (belt exit): mark the part present (the
+    // local discharge trigger), then run the existing release handshake. A
+    // downstream block parks the MU in blockedMUs (back-pressure).
     onArrival(self: ConveyorSelf, mu: RV.MU): void {
       self.local.transitMUs.delete(mu.id);
       onPartAtSensor(self, true);

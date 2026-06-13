@@ -42,6 +42,13 @@ const COLOR_DRAG_MATCH = 0xffd24a;  // gold — stands out from the green moving
 /** renderOrder above everything else; the active sprite sits one slot higher. */
 const RENDER_ORDER_IDLE = 2000;
 const RENDER_ORDER_ACTIVE = 2001;
+/** The hierarchy-driven highlight sits above the active sprite. */
+const RENDER_ORDER_HIGHLIGHT = 2002;
+/** Hierarchy snap-highlight: larger marker + distinct cyan so it reads clearly
+ *  against the green idle markers (matches the inspector's LIVE_STATE_COLOR). */
+const HIGHLIGHT_MARKER_SIZE_M = 0.14;
+const HIGHLIGHT_MARKER_PX = 22;
+const COLOR_HIGHLIGHT = 0x4dd0e1;
 
 
 export class SnapMarkerRenderer {
@@ -59,6 +66,13 @@ export class SnapMarkerRenderer {
   private activeHandle: GizmoHandle | null = null;
   /** Snap currently shown as active — used to avoid redundant rebuilds. */
   private activeSnapId: string | null = null;
+
+  /** Single gizmo handle for the hierarchy-driven highlight (hover/select of a
+   *  snap node in the hierarchy browser). Independent of `activeHandle` (drag
+   *  proximity) and of `enabled` (works outside planner mode). */
+  private highlightHandle: GizmoHandle | null = null;
+  /** Snap currently highlighted from the hierarchy, or null. */
+  private highlightSnapId: string | null = null;
 
   /** Snap ids whose idle handle is currently overridden by a drag hint
    *  (faint-moving or gold-match). Reset back to idle style on clear. */
@@ -192,6 +206,45 @@ export class SnapMarkerRenderer {
   }
 
   /**
+   * Highlight a single snap in 3D from the hierarchy browser (hover or select),
+   * or clear it with `null`. Shows a larger cyan marker at the snap so an
+   * otherwise-empty snap Empty becomes visible (the mesh-outline highlighter
+   * can't outline a node with no geometry). Works regardless of planner mode
+   * (`enabled`) — the hierarchy is always usable. Idempotent on the same id.
+   */
+  highlight(snapId: string | null): void {
+    if (snapId === this.highlightSnapId) {
+      if (snapId && this.highlightHandle) this.highlightHandle.setVisible(true);
+      return;
+    }
+    // Re-target: dispose the old handle (gizmos are parented to a specific node).
+    if (this.highlightHandle) {
+      this.highlightHandle.dispose();
+      this.highlightHandle = null;
+    }
+    this.highlightSnapId = snapId;
+    if (!snapId) {
+      this.viewer.markRenderDirty?.();
+      return;
+    }
+    const sp = this.registry.getById(snapId);
+    if (!sp) { this.viewer.markRenderDirty?.(); return; }
+    this.highlightHandle = this.viewer.gizmoManager.create(sp.object3D, {
+      shape: 'sprite',
+      color: COLOR_HIGHLIGHT,
+      opacity: 1.0,
+      spriteTexture: makeSnapMarkerTexture('plus'),
+      worldSize: HIGHLIGHT_MARKER_SIZE_M,
+      attachToNode: true,
+      excludeFromRaycast: true,
+      depthTest: false,
+      renderOrder: RENDER_ORDER_HIGHLIGHT,
+      visible: true,
+    });
+    this.viewer.markRenderDirty?.();
+  }
+
+  /**
    * Per-frame: keep every visible marker at a constant on-screen pixel size
    * (idle/drag markers at IDLE_MARKER_PX, the hover marker at ACTIVE_MARKER_PX)
    * regardless of camera distance / zoom — same approach as the FloorGizmo.
@@ -209,6 +262,9 @@ export class SnapMarkerRenderer {
     }
     if (this.activeHandle?.root.visible) {
       applyScreenSpaceScale(this.activeHandle.root, ACTIVE_MARKER_PX, camera, h);
+    }
+    if (this.highlightHandle?.root.visible) {
+      applyScreenSpaceScale(this.highlightHandle.root, HIGHLIGHT_MARKER_PX, camera, h);
     }
   }
 
@@ -318,6 +374,11 @@ export class SnapMarkerRenderer {
       this.activeHandle = null;
     }
     this.activeSnapId = null;
+    if (this.highlightHandle) {
+      this.highlightHandle.dispose();
+      this.highlightHandle = null;
+    }
+    this.highlightSnapId = null;
     // The shared CanvasTexture stays alive across re-inits (module-level
     // singleton). Disposing it would leave the next plugin instance with a
     // dead reference; the few-KB texture is fine to keep until page reload.
@@ -331,6 +392,10 @@ export class SnapMarkerRenderer {
   }
   /** Returns the currently-hovered snap id, or null. */
   getActiveSnapId(): string | null { return this.activeSnapId; }
+  /** Returns the currently hierarchy-highlighted snap id, or null. */
+  getHighlightSnapId(): string | null { return this.highlightSnapId; }
+  /** Test helper — the live highlight gizmo handle (or null). */
+  getHighlightHandle(): GizmoHandle | undefined { return this.highlightHandle ?? undefined; }
   /** Currently in "always show idle" mode? */
   isShowAllIdle(): boolean { return this.showAllIdle; }
   /** Renderer enabled (planner mode)? */

@@ -24,11 +24,14 @@ import {
   baseComponentType,
   classifyField,
   componentColor,
+  formatDisplayValue,
   getSignalHeaderColor,
   inferFieldType,
   isComponentRef,
   isScriptableObject,
   isFieldHidden,
+  isSignalComponentType,
+  signalTypeLabel,
 } from './rv-inspector-helpers';
 import { flattenObjectFields } from './rv-field-editors';
 import { FieldRow } from './rv-field-row';
@@ -86,6 +89,67 @@ function persistSectionCollapsed(key: string, collapsed: boolean): void {
 /** Stable empty-actions array — shared by every section without registered actions. */
 const EMPTY_ACTIONS: readonly import('./rv-component-action-registry').ComponentAction[] = Object.freeze([]);
 
+// ── Read-only live row spec ──────────────────────────────────────────────
+
+/**
+ * A pre-formatted read-only row for the `readOnlyLive` ComponentSection mode.
+ * A virtual-component field whose value is one of these renders its `display`
+ * string verbatim with an optional accent `color` and an optional `onClick`
+ * (used by the Snap "Paired with" row to navigate to the partner component).
+ * Any non-spec field value is formatted through `formatDisplayValue`.
+ */
+export interface RuntimeRowSpec {
+  /** Marks the value as a pre-formatted read-only row (vs. a raw data field). */
+  readonly __runtimeRow: true;
+  /** Already-formatted display text. */
+  display: string;
+  /** Optional accent color for the value (e.g. amber for "Occupied"). */
+  color?: string;
+  /** Optional click handler — renders the value as a clickable link. */
+  onClick?: () => void;
+}
+
+export function runtimeRow(display: string, opts?: { color?: string; onClick?: () => void }): RuntimeRowSpec {
+  return { __runtimeRow: true, display, color: opts?.color, onClick: opts?.onClick };
+}
+
+export function isRuntimeRow(value: unknown): value is RuntimeRowSpec {
+  return typeof value === 'object' && value !== null && (value as RuntimeRowSpec).__runtimeRow === true;
+}
+
+/** A single read-only label/value row for the `readOnlyLive` mode — same
+ *  visual language as the editable field rows, but never an editor. Resolves
+ *  a {@link RuntimeRowSpec} (color + clickable navigation) or a raw value. */
+function ReadOnlyLiveRow({ fieldName, value }: { fieldName: string; value: unknown }) {
+  const spec = isRuntimeRow(value) ? value : null;
+  const text = spec ? spec.display : formatDisplayValue(value);
+  const clickable = !!spec?.onClick;
+  return (
+    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, px: 1, py: 0.15, minHeight: 22, '&:hover': { bgcolor: 'rgba(255,255,255,0.02)' } }}>
+      <Box sx={{ width: 10, flexShrink: 0 }} />
+      <Typography sx={{ fontSize: 11, color: 'text.disabled', minWidth: 80, maxWidth: 120, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={fieldName}>
+        {fieldName}
+      </Typography>
+      <Box sx={{ flex: 1, display: 'flex', alignItems: 'center' }}>
+        <Typography
+          onClick={spec?.onClick}
+          sx={{
+            fontSize: 11,
+            color: spec?.color ?? 'text.primary',
+            fontWeight: spec?.color ? 600 : 500,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            ...(clickable ? { cursor: 'pointer', '&:hover': { textDecoration: 'underline' } } : {}),
+          }}
+        >
+          {text}
+        </Typography>
+      </Box>
+    </Box>
+  );
+}
+
 // ── ComponentSection ─────────────────────────────────────────────────────
 
 export interface ComponentSectionProps {
@@ -99,6 +163,14 @@ export interface ComponentSectionProps {
   headerAction?: React.ReactNode;
   /** Optional extra content rendered inside the expanded card, below the field rows (e.g. BehaviorLiveStateSections). */
   extraContent?: React.ReactNode;
+  /**
+   * Read-only live mode: render ALL `data` fields as visible read-only rows
+   * under the normal collapsible header — no editors, no overlay, no
+   * consumed/other split, no "N more fields" collapse, no signal short-circuit.
+   * Used for ephemeral virtual components (live behavior state, snap data) that
+   * flow through the SAME header/collapse/color pipeline as a real component.
+   */
+  readOnlyLive?: boolean;
   onFieldEdit: (fieldName: string, value: unknown) => void;
   onFieldReset: (fieldName: string) => void;
   onResetComponent: () => void;
@@ -106,7 +178,7 @@ export interface ComponentSectionProps {
   signalStore: SignalStore | null;
 }
 
-export function ComponentSection({ nodePath, componentType, data, overriddenFields, consumedOnly, signalValue, headerAction, extraContent, onFieldEdit, onFieldReset, onResetComponent, viewer, signalStore }: ComponentSectionProps) {
+export function ComponentSection({ nodePath, componentType, data, overriddenFields, consumedOnly, signalValue, headerAction, extraContent, readOnlyLive, onFieldEdit, onFieldReset, onResetComponent, viewer, signalStore }: ComponentSectionProps) {
   const color = componentColor(componentType);
   const base = baseComponentType(componentType);
   const expandKey = `${nodePath}:${componentType}`;
@@ -203,6 +275,97 @@ export function ComponentSection({ nodePath, componentType, data, overriddenFiel
     // click — drives the actions.map() loop to re-evaluate isActive().
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewer, nodePath, data, actions.length, actionTick]);
+
+  // ── Read-only live short-circuit ──
+  // A virtual component (live behavior state, snap data) renders ALL its data
+  // fields as visible read-only rows under the NORMAL collapsible header. No
+  // editor, no overlay, no consumed/other split, no "N more fields" collapse,
+  // no signal short-circuit. Same header / collapse / color as a real section.
+  if (readOnlyLive) {
+    const entries = Object.entries(data).filter(([k]) => !k.startsWith('_'));
+    return (
+      <Box>
+        <Box
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 0.5,
+            px: 1,
+            py: 0.375,
+            bgcolor: color + '11',
+            borderBottom: `1px solid ${color}22`,
+            borderTop: `1px solid ${color}22`,
+          }}
+        >
+          <Box
+            onClick={toggleSection}
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 0.25,
+              cursor: 'pointer',
+              userSelect: 'none',
+              '&:hover .rv-comp-title': { textDecoration: 'underline' },
+            }}
+          >
+            {sectionExpanded
+              ? <ExpandMore sx={{ fontSize: 14, color: color }} />
+              : <ChevronRight sx={{ fontSize: 14, color: color }} />}
+            <Typography
+              className="rv-comp-title"
+              sx={{ fontSize: 10, fontWeight: 700, color: color, letterSpacing: 0.5, textTransform: 'uppercase' }}
+            >
+              {componentType}
+            </Typography>
+          </Box>
+          {signalValue != null && (
+            <Typography sx={{ fontSize: 10, fontWeight: 600, fontFamily: 'monospace', ml: 'auto', color: getSignalHeaderColor(componentType, String(signalValue)) }}>
+              {signalValue}
+            </Typography>
+          )}
+          {headerAction}
+        </Box>
+        {sectionExpanded && entries.map(([fieldName, value]) => (
+          <ReadOnlyLiveRow key={fieldName} fieldName={fieldName} value={value} />
+        ))}
+        {sectionExpanded && extraContent}
+      </Box>
+    );
+  }
+
+  // ── Signal short-circuit (plan-200 B2) ──
+  // A PLC signal node renders a clean card: a friendly header + the full dotted
+  // SYMBOL name + a single Value row. No "Name" row, no collapsed "Status.Value",
+  // no "N more fields" clutter.
+  if (isSignalComponentType(componentType)) {
+    const symbol = typeof data.Name === 'string' ? data.Name : (nodePath.split('/').pop() ?? nodePath);
+    const valueText = signalValue ?? '—';
+    const valueColor = getSignalHeaderColor(componentType, String(valueText));
+    return (
+      <Box>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, px: 1, py: 0.375, bgcolor: color + '11', borderBottom: `1px solid ${color}22`, borderTop: `1px solid ${color}22` }}>
+          <Typography sx={{ fontSize: 10, fontWeight: 700, color, letterSpacing: 0.5, textTransform: 'uppercase' }}>
+            {`Signal (${signalTypeLabel(componentType)})`}
+          </Typography>
+          <Typography sx={{ fontSize: 10, fontWeight: 600, fontFamily: 'monospace', ml: 'auto', color: valueColor }}>
+            {valueText}
+          </Typography>
+          {headerAction}
+        </Box>
+        <Box sx={{ display: 'flex', alignItems: 'center', px: 1, py: 0.15 }}>
+          <Typography sx={{ fontSize: 10, color: 'text.disabled', width: 64, flexShrink: 0 }}>Symbol</Typography>
+          <Tooltip title={symbol} placement="top">
+            <Typography sx={{ fontSize: 10, color: 'text.secondary', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{symbol}</Typography>
+          </Tooltip>
+        </Box>
+        <Box sx={{ display: 'flex', alignItems: 'center', px: 1, py: 0.15 }}>
+          <Typography sx={{ fontSize: 10, color: 'text.disabled', width: 64, flexShrink: 0 }}>Value</Typography>
+          <Typography sx={{ fontSize: 10, color: valueColor, fontWeight: 500 }}>{valueText}</Typography>
+        </Box>
+        {extraContent}
+      </Box>
+    );
+  }
 
   return (
     <Box>

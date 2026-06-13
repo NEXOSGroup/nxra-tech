@@ -210,4 +210,61 @@ describe('SnapMarkerRenderer', () => {
     renderer.setDragHints([], ['t']);
     expect(spriteStyle('t').visible).toBe(false);
   });
+
+  // ── Hierarchy 3D-highlight (plan-200 §9.8 / A5) ────────────────────────
+
+  it('highlight(snapId) shows a single distinct highlight marker', () => {
+    makeSnap(reg, scene, 'a', [0, 0, 0]);
+    makeSnap(reg, scene, 'b', [1, 0, 0]);
+    renderer.rebuild(reg.size);
+
+    renderer.highlight('a');
+    expect(renderer.getHighlightSnapId()).toBe('a');
+    const handle = renderer.getHighlightHandle();
+    expect(handle).toBeDefined();
+    expect(handle!.root.visible).toBe(true);
+    // The highlight marker is parented to the highlighted snap's node.
+    expect(reg.getById('a')!.object3D.children).toContain(handle!.root);
+  });
+
+  it('highlight re-targets to a new snap (only one active at a time)', () => {
+    makeSnap(reg, scene, 'a', [0, 0, 0]);
+    makeSnap(reg, scene, 'b', [1, 0, 0]);
+    renderer.rebuild(reg.size);
+
+    renderer.highlight('a');
+    const firstHandle = renderer.getHighlightHandle()!;
+    renderer.highlight('b');
+    expect(renderer.getHighlightSnapId()).toBe('b');
+    // The old handle was disposed/removed from snap 'a'.
+    expect(reg.getById('a')!.object3D.children).not.toContain(firstHandle.root);
+    expect(reg.getById('b')!.object3D.children).toContain(renderer.getHighlightHandle()!.root);
+  });
+
+  it('highlight(null) clears the highlight', () => {
+    makeSnap(reg, scene, 'a', [0, 0, 0]);
+    renderer.rebuild(reg.size);
+    renderer.highlight('a');
+    renderer.highlight(null);
+    expect(renderer.getHighlightSnapId()).toBeNull();
+    expect(renderer.getHighlightHandle()).toBeUndefined();
+  });
+
+  it('highlight works regardless of planner-mode enabled state', () => {
+    makeSnap(reg, scene, 'a', [0, 0, 0]);
+    renderer.rebuild(reg.size);
+    renderer.setEnabled(false);          // outside planner mode
+    renderer.highlight('a');
+    expect(renderer.getHighlightSnapId()).toBe('a');
+    expect(renderer.getHighlightHandle()?.root.visible).toBe(true);
+  });
+
+  it('dispose clears the highlight too', () => {
+    makeSnap(reg, scene, 'a', [0, 0, 0]);
+    renderer.rebuild(reg.size);
+    renderer.highlight('a');
+    renderer.dispose();
+    expect(renderer.getHighlightSnapId()).toBeNull();
+    expect(renderer.getHighlightHandle()).toBeUndefined();
+  });
 });

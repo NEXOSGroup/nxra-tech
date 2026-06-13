@@ -52,7 +52,8 @@ const def = {
   type:   'Conveyor',          // stable id — the rv_extras key AND the DES action namespace
   kind:   'conveyor',          // family: conveyor | router | source | sink | …
   models: ['*Conveyor*'],      // which placed assets bind this (glob on the GLB/asset name)
-  schema:  { ConveyorSpeed: { type:'number', default:200 } },  // params read from the GLB
+  schema:  {},                 // GLB params (value ?? default). Conveyor has none — timing is derived
+  signalNamespace: 'Flow',     // type-neutral interop namespace → signals become `Flow.<key>`
   signals: SIGNALS,            // auto-declared PLC signals → typed self.sig.X accessors
   state:   () => ({ belt:null, partAtSensor:false /* … */ }),  // per-instance memory → self.local
 
@@ -131,9 +132,9 @@ Walk the file:
 5. **`continuous.fixedUpdate`** — every tick: publish surface occupancy, ask `shouldFlow`, jog the
    belt accordingly.
 6. **`des`** — the event version of the same flow. `onAccept` schedules an `Arrival` after the part's
-   transit time (`createTransitTimer` computed it); `onArrival` marks the part at the sensor and
-   tries to release it; `onDownstreamReady` retries a part that was parked because the next zone was
-   full.
+   **full-belt** transit time (`createTransitTimer` computed it as belt length ÷ drive speed);
+   `onArrival` marks the part present at the discharge point and tries to release it;
+   `onDownstreamReady` retries a part that was parked because the next zone was full.
 
 Notice `continuous.fixedUpdate` and `des.onArrival` both end in the **same** `shouldFlow` /
 `tryRelease` logic — that's the "write once" payoff.
@@ -214,6 +215,14 @@ conveyor-specific one. The full interop contract is `Flow.Run` / `Flow.Occupied`
 `Flow.PartCount`, and the single source of truth for the name is the exported `FLOW_OCCUPIED`
 constant in `transport-links.ts` — no module hand-builds the string.
 
+**Runtime symbol = the PLC binding name.** You author against the unscoped name (`Flow.Occupied`,
+`self.sig.Occupied`), but at runtime each placed instance's signals are **prefixed with the asset's
+de-duplicated name** and the scope is joined with a dot — so the actual `SignalStore` symbol (and the
+PLC binding name) is `<asset>.Flow.Occupied`, e.g. `RollConveyor-2m.Flow.Occupied`, unique per
+placement (`RollConveyor-2m`, `RollConveyor-2m_2`, …). The scoping is automatic (`scopeSignalName`);
+the dot separator is consistent throughout (the hierarchy *node path* keeps `/` for `getByPath`, but
+that is not the symbol). A standalone-loaded asset (no LayoutObject) gets the unscoped `Flow.Occupied`.
+
 Any component that publishes `Flow.Occupied` joins the line — a conveyor, a turntable, a sink
 (which publishes `false` so the line discharges into it), or a customer machine. The snap graph
 defines *who* the neighbour is; the signal name defines *how* they coordinate. (This is why
@@ -237,7 +246,8 @@ external/observability surface (a live PLC can read or override it), but inside 
   re-subscribed on restore, so a signal-driven interlock would silently fail in the worker.
 
 One exception is read-only and deliberate: the **router output selection** (`Turntable.freeOutputs()`)
-reads the downstream **root** `/${ownerRoot.name}/Flow.Occupied` to pick a free discharge port. The
+reads the downstream **root** signal `flowOccupiedRootSignal(ownerRoot.name)` (= `/${ownerRoot.name}.Flow.Occupied`)
+to pick a free discharge port. The
 back-pressure *authority* is still the `canAccept`/`onDownstreamReady` handshake — the signal only
 informs the routing choice (see `tests/turntable-output-selection.test.ts`).
 
@@ -261,7 +271,7 @@ separate `partAtSensor` discharge trigger (and the part counter) and does **not*
 |---|---|
 | `behavior-kit.ts` | the one-stop import: `defineLibraryComponent`, the `RV.*` types, `createTransitTimer` |
 | `define-library-component.ts` | the factory itself (badge, schema registration, the continuous bind) |
-| `transit-timing.ts` | `createTransitTimer(self, belt, sensor)` — conveyor DES transit time + entry/exit tween |
+| `transit-timing.ts` | `createTransitTimer(self, belt)` — conveyor DES transit time (full belt length ÷ belt-drive `TargetSpeed`) + entry/exit tween. The sensor position plays no part in the timing |
 | `transport-links.ts` | the interlock: `FLOW_OCCUPIED` (SSOT), `createDownstreamInterlock`, `linkOf`, `portIds`, `declareFlowSignalsWith` |
 | `lazy-drive.ts` | `attachBelt` / `attachDrive` — drive handles that resolve on demand |
 | `surface-occupancy.ts` | `isSurfaceOccupied(viewer, node)` |

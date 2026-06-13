@@ -102,7 +102,7 @@ import { BoxSelectController } from './box-select-controller';
 
 // UI components for slot registration
 import { LayoutPlannerButton, LayoutLibraryPanel } from './LayoutLibraryPanel';
-import { PlannerGridButton, PlannerDropToSurfaceButton, PlannerDeleteButton, PlannerSnapButton } from './PlannerToolbarButtons';
+import { PlannerGridButton, PlannerDropToSurfaceButton, PlannerDeleteButton, PlannerSnapButton, PlannerChainModeButton, PlannerUndoButton, PlannerRedoButton } from './PlannerToolbarButtons';
 import { BboxSnapController } from './bbox-snap';
 import { showInfoOverlay, hideInfoOverlay } from '../../core/hmi/info-overlay-store';
 import { freshOpId as opId } from '../../core/hmi/scene/rv-scene-edits';
@@ -503,14 +503,33 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     },
     {
       slot: 'button-group',
-      component: PlannerDeleteButton as ComponentType<UISlotProps>,
-      order: 220,
+      component: PlannerSnapButton as ComponentType<UISlotProps>,
+      order: 230,
       visibilityRule: { shownOnlyIn: ['planner'] },
     },
     {
       slot: 'button-group',
-      component: PlannerSnapButton as ComponentType<UISlotProps>,
-      order: 230,
+      component: PlannerChainModeButton as ComponentType<UISlotProps>,
+      order: 240,
+      visibilityRule: { shownOnlyIn: ['planner'] },
+    },
+    // Edit-history + delete, grouped at the end of the toolbar.
+    {
+      slot: 'button-group',
+      component: PlannerUndoButton as ComponentType<UISlotProps>,
+      order: 250,
+      visibilityRule: { shownOnlyIn: ['planner'] },
+    },
+    {
+      slot: 'button-group',
+      component: PlannerRedoButton as ComponentType<UISlotProps>,
+      order: 260,
+      visibilityRule: { shownOnlyIn: ['planner'] },
+    },
+    {
+      slot: 'button-group',
+      component: PlannerDeleteButton as ComponentType<UISlotProps>,
+      order: 270,
       visibilityRule: { shownOnlyIn: ['planner'] },
     },
   ];
@@ -1061,8 +1080,17 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     if (!this._plannerActivateHooked) {
       this._plannerActivateHooked = true;
       const unsubActivate = viewer.on('scene-loaded', () => {
-        if (this._active) return;
-        if (viewer.leftPanelManager.isOpen?.('layout-planner')) this.setActive(true);
+        if (!viewer.leftPanelManager.isOpen?.('layout-planner')) return;
+        // Re-cycle if the planner was ALREADY active. Across a scene switch /
+        // discard the plugin stayed `_active`, so its edit bindings (selection +
+        // store subscriptions, TransformControls, raycast allow-filter, MU
+        // reconciler, outline/highlight styles) and the 'planner' UI context were
+        // still bound to the now-disposed scene and never rebuilt — leaving the
+        // toolbar and planner half-loaded. Tear down then re-activate so every
+        // binding re-attaches to the freshly-loaded scene. (First load: `_active`
+        // is false, so this is just a plain activate.)
+        if (this._active) this.setActive(false);
+        this.setActive(true);
       });
       this._unsubs.push(unsubActivate);
     }

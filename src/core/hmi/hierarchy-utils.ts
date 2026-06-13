@@ -29,6 +29,7 @@ import { componentColor } from './rv-inspector-helpers';
 import { readSignalValue, formatValue } from './rv-value-resolver';
 import { getDisplayName } from '../engine/rv-component-registry';
 import { tooltipRegistry } from './tooltip/tooltip-registry';
+import { parseSnapName } from '../../plugins/snap-point/snap-name-parser';
 
 // ─── Tree data structure ─────────────────────────────────────────────────
 
@@ -214,9 +215,12 @@ function injectThreeJsChildren(
   }
 
   for (const child of parentObj.children) {
-    // Skip highlight/ghost overlays — they're not real scene content
+    // Skip highlight/ghost overlays + gizmo sprites (snap markers etc.) — they're
+    // not real scene content. The snap-marker sprite is parented to the snap Empty
+    // (attachToNode) and carries `_rvGizmo`; without this skip it surfaces as a raw
+    // UUID node under each snap in the hierarchy.
     const childUd = (child.userData ?? {}) as Record<string, unknown>;
-    if (childUd._highlightOverlay || childUd._isGhostOverlay) continue;
+    if (childUd._highlightOverlay || childUd._isGhostOverlay || childUd._rvGizmo) continue;
 
     // Pfad-Sanitization: '/' im Namen ersetzen (Door/Frame -> Door_Frame)
     const safeName = ((child.name || child.uuid) as string).replace(/\//g, '_');
@@ -233,9 +237,13 @@ function injectThreeJsChildren(
 
     const types = extractComponentTypes(childUd.realvirtual);
 
+    // Snap Empties get a readable label ("Snap in (Z) · convroll"); the path
+    // stays the real scene path so selection/registry lookups are unaffected.
+    const displayName = snapLabel(safeName) ?? safeName;
+
     const childNode: TreeNode = {
       path: childPath,
-      name: safeName,
+      name: displayName,
       types,
       children: [],
       hasOverrides: overlay ? !!overlay.nodes[childPath] : false,
@@ -266,7 +274,7 @@ function injectThreeJsChildren(
 function hasInjectableThreeJsChildren(obj: import('three').Object3D): boolean {
   for (const c of obj.children) {
     const ud = (c.userData ?? {}) as Record<string, unknown>;
-    if (ud._highlightOverlay || ud._isGhostOverlay) continue;
+    if (ud._highlightOverlay || ud._isGhostOverlay || ud._rvGizmo) continue;
     if (!(c.name || c.uuid)) continue;
     return true;
   }
@@ -356,7 +364,35 @@ export function computeAncestors(path: string): string[] {
   return ancestors;
 }
 
+// ─── Snap label ──────────────────────────────────────────────────────────
+
+/**
+ * Readable hierarchy label for a snap-point Empty (`Snap-<AXIS><FLOW>-<typeId>`).
+ * `Snap-ZN-convroll` → `Snap in (Z) · convroll` (N→in, P→out, B→bidi). Returns
+ * `null` for any node name that is not a snap, so the caller keeps the raw name.
+ */
+export function snapLabel(name: string): string | null {
+  const parsed = parseSnapName(name);
+  if (!parsed) return null;
+  return `Snap ${parsed.flow} (${parsed.dir.axis}) · ${parsed.typeId}`;
+}
+
 // ─── Signal helpers ──────────────────────────────────────────────────────
+
+/**
+ * Owner-qualified label for a scoped signal node in the flat ("Signals") list.
+ * The node path is `${owner}/Signals/${leaf}` (technical, `/`-separated); the
+ * displayed SYMBOL is the dot form `${owner}.${leaf}` (matches the PLC byName).
+ * For a path without a `/Signals/` segment, falls back to the bare leaf.
+ */
+export function signalOwnerLabel(path: string): string {
+  const marker = '/Signals/';
+  const idx = path.indexOf(marker);
+  if (idx === -1) return path.split('/').pop() ?? path;
+  const owner = path.slice(0, idx).split('/').pop() ?? '';
+  const leaf = path.slice(idx + marker.length);
+  return owner ? `${owner}.${leaf}` : leaf;
+}
 
 export function isSignalType(type: string): boolean {
   return type.startsWith('PLCInput') || type.startsWith('PLCOutput');

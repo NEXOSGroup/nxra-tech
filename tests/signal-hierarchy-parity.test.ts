@@ -98,9 +98,10 @@ describe('signal-hierarchy parity — synthetic node, userData, registry, store'
     const node = container!.children.find((c) => c.name === 'My.Run');
     expect(node).toBeDefined();
     const rv = (node!.userData.realvirtual as Record<string, unknown>);
-    expect(rv.PLCOutputBool).toMatchObject({ Name: 'Conv/My.Run', Status: { Value: true } });
+    expect(rv.PLCOutputBool).toMatchObject({ Name: 'Conv.My.Run', Status: { Value: true } });
 
     // Registered in the NodeRegistry (hierarchy badge resolves a path).
+    // The NODE path stays `/`-separated (technical address); only the symbol dots.
     expect(registry.getPathForNode(node!)).toBe('Conv/Signals/My.Run');
     // Live value resolves from the SignalStore by the node path.
     expect(store.getByPath('Conv/Signals/My.Run')).toBe(true);
@@ -133,8 +134,8 @@ describe('signal-path migration — path !== name', () => {
     manager.attach(host, () => null, () => '/models/Scene.glb');
     manager.dispatchPlaced(root);
 
-    // By scoped name (the canonical store key).
-    expect(store.get('Conv/My.Run')).toBe(true);
+    // By scoped name (the canonical store key — dot-separated symbol).
+    expect(store.get('Conv.My.Run')).toBe(true);
     // By the synthetic node path (path !== name).
     expect(store.getByPath('Conv/Signals/My.Run')).toBe(true);
     // By short name — resolved via the suffix index (buildIndex ran after materialise).
@@ -162,7 +163,7 @@ describe('signal multi-instance — unique scoped paths, no collision', () => {
     expect(registry.getPathForNode(nodeA)).not.toBe(registry.getPathForNode(nodeB));
 
     // Independent store values per instance (no name collision).
-    store.set('Conv/My.Run', false);
+    store.set('Conv.My.Run', false);
     expect(store.getByPath('Conv/Signals/My.Run')).toBe(false);
     expect(store.getByPath('Conv_2/Signals/My.Run')).toBe(true);
   });
@@ -181,9 +182,10 @@ describe('signal registry-absent graceful — registry: null', () => {
 
     // No synthetic container materialised…
     expect(root.children.find((c) => c.name === 'Signals')).toBeUndefined();
-    // …but the store seed (path === name) still happened.
-    expect(store.get('Conv/My.Run')).toBe(true);
-    expect(store.getByPath('Conv/My.Run')).toBe(true);
+    // …but the store seed (path === name) still happened. With no registry to
+    // materialise a node, path === the dot-scoped symbol name.
+    expect(store.get('Conv.My.Run')).toBe(true);
+    expect(store.getByPath('Conv.My.Run')).toBe(true);
   });
 });
 

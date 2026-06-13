@@ -17,7 +17,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { Object3D } from 'three';
+import { Object3D, Mesh, BoxGeometry } from 'three';
 import { DESRunner } from '@rv-private/plugins/des/des-runner';
 import { _resetDesHookCache } from '@rv-private/plugins/des/des-hook-adapter';
 import { resetDESMUCounter } from '@rv-private/plugins/des/rv-des-mu';
@@ -48,7 +48,10 @@ void Source;
 const SourceDef = getMaterialFlow('Source') as MaterialFlowDefinition;
 const ConveyorDef = ConveyorFlow as unknown as MaterialFlowDefinition;
 
-function makeHost(values: Map<string, boolean | number>): BindContextHost {
+function makeHost(
+  values: Map<string, boolean | number>,
+  drives: BindContextHost['drives'] = [],
+): BindContextHost {
   const events = new EventEmitter<Record<string, unknown>>();
   return {
     signalStore: {
@@ -58,19 +61,28 @@ function makeHost(values: Map<string, boolean | number>): BindContextHost {
     } as never,
     on: (e, cb) => events.on(e, cb as never),
     contextMenu: new ContextMenuStore(),
-    drives: [] as never,
+    drives: drives as never,
     registry: null,
     getPlugin: () => undefined,
   };
 }
 
-/** A conveyor node with the Transport-X + Sensor children the setup() needs. */
-function conveyorCtx(name: string, values: Map<string, boolean | number>): { ctx: RVBindContext; root: Object3D } {
+/** A conveyor node with the Transport-X + Sensor children the setup() needs.
+ *  The belt geometry (length, mm) and the Transport Drive (speed, mm/s) drive
+ *  the DES transit timing. Geometry is METRE-scale (the scene unit). */
+function conveyorCtx(
+  name: string,
+  values: Map<string, boolean | number>,
+  lengthMm: number,
+  speedMmS: number,
+): { ctx: RVBindContext; root: Object3D } {
   const root = new Object3D(); root.name = name;
-  const belt = new Object3D(); belt.name = 'Transport-X'; root.add(belt);
+  const belt = new Mesh(new BoxGeometry(lengthMm / 1000, 0.1, 0.2));
+  belt.name = 'Transport-X'; belt.updateMatrixWorld(true); root.add(belt);
   const sensor = new Object3D(); sensor.name = 'Sensor'; root.add(sensor);
+  const host = makeHost(values, [{ name: 'Transport-X', node: belt, TargetSpeed: speedMmS }]);
   const accum: KinematicsSpec = {};
-  return { ctx: createBindContext(root, makeHost(values), accum).ctx, root };
+  return { ctx: createBindContext(root, host, accum).ctx, root };
 }
 
 function bareCtx(name: string, values: Map<string, boolean | number>): { ctx: RVBindContext; root: Object3D } {
@@ -111,7 +123,7 @@ describe('DES end-to-end — Source → 2 Conveyors → Sink', () => {
     adapters.push(runner.addInstance(SourceDef, srcSelf, srcCtx.root));
 
     // ── Conveyor 1 (1000 mm @ 1000 mm/s → 1 s) ──
-    const c1 = conveyorCtx('Conveyor1', values);
+    const c1 = conveyorCtx('Conveyor1', values, 1000, 1000);
     const c1Self = createSelf(c1.ctx, ConveyorDef, {
       mode: 'des',
       scheduler: runner.makeScheduler(ConveyorDef, idAt(1)),
@@ -119,11 +131,10 @@ describe('DES end-to-end — Source → 2 Conveyors → Sink', () => {
       canAcceptDownstream: (mu) => adapters[1].nextComponents.some(c => c.canAccept(mu as never)),
       local: (ConveyorDef.state ?? ConveyorDef.local)!(),
     });
-    c1Self.prop['ConveyorLength'] = 1000; c1Self.prop['ConveyorSpeed'] = 1000;
     adapters.push(runner.addInstance(ConveyorDef, c1Self, c1.root));
 
     // ── Conveyor 2 (2000 mm @ 1000 mm/s → 2 s) ──
-    const c2 = conveyorCtx('Conveyor2', values);
+    const c2 = conveyorCtx('Conveyor2', values, 2000, 1000);
     const c2Self = createSelf(c2.ctx, ConveyorDef, {
       mode: 'des',
       scheduler: runner.makeScheduler(ConveyorDef, idAt(2)),
@@ -131,7 +142,6 @@ describe('DES end-to-end — Source → 2 Conveyors → Sink', () => {
       canAcceptDownstream: (mu) => adapters[2].nextComponents.some(c => c.canAccept(mu as never)),
       local: (ConveyorDef.state ?? ConveyorDef.local)!(),
     });
-    c2Self.prop['ConveyorLength'] = 2000; c2Self.prop['ConveyorSpeed'] = 1000;
     adapters.push(runner.addInstance(ConveyorDef, c2Self, c2.root));
 
     // ── Sink ──

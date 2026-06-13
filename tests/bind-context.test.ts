@@ -183,7 +183,7 @@ describe('createBindContext — per-instance signal scoping', () => {
     const accum: KinematicsSpec = {};
     const { ctx } = createBindContext(placedRoot('Conv'), host, accum);
     ctx.signal('Flow.Run', { type: 'PLCInputBool' });
-    expect(accum.signals![0].name).toBe('Conv/Flow.Run');
+    expect(accum.signals![0].name).toBe('Conv.Flow.Run');
   });
 
   it('leaves names unscoped for a standalone (non-LayoutObject) root', () => {
