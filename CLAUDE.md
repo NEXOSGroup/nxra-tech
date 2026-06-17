@@ -169,6 +169,7 @@ The recommended MCP server is [realvirtual-MCP](https://github.com/game4automati
 | File | Contents |
 |------|----------|
 | `doc-webviewer.md` | Full architecture, component reference, configuration |
+| `doc-deploy.md` | Local test build vs. publishing to public; `npm run deploy`/`deploy:private`, credentials, CI |
 | `doc-lifecycle.md` | Runtime lifecycle: model load, fixed-step loop, pause, reset, dispose, events |
 | `doc-extending-webviewer.md` | Plugin system, custom components, UI slots, hooks |
 | `doc-multiuser-system.md` | Multiuser sessions, relay server, shared views |

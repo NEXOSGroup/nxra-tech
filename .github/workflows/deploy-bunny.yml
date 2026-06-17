@@ -25,33 +25,17 @@ jobs:
 
       - run: npm install --force
 
-      - name: Build (public, no private folder)
+      # Single deploy path: the CLI builds (public, VITE_PUBLIC_BUILD=1), then
+      # diff-uploads dist/ to {BUNNY_REMOTE_PATH}/ and purges the pull zone.
+      # GA4 id is injected into the deployed settings.json by the tool itself
+      # (committed settings.json stays empty for AGPL forks); no separate
+      # GA-injection or curl-upload step is needed any more.
+      - name: Build & deploy (public) to Bunny CDN
         env:
-          VITE_PUBLIC_BUILD: '1'
-        run: npm run build
+          BUNNY_STORAGE_KEY: ${{ secrets.BUNNY_STORAGE_KEY }}
+          BUNNY_ACCOUNT_KEY: ${{ secrets.BUNNY_ACCOUNT_KEY }}
+          GA_MEASUREMENT_ID: ${{ secrets.GA_MEASUREMENT_ID }}
+        run: npm run deploy
 
-      - name: Upload dist/ to Bunny CDN Storage
-        run: |
-          echo "Uploading to ${BUNNY_STORAGE_ZONE}/${BUNNY_REMOTE_PATH}/ on ${BUNNY_REGION}"
-
-          find dist -type f | while read FILE; do
-            REL="${FILE#dist/}"
-            URL="https://${BUNNY_REGION}/${BUNNY_STORAGE_ZONE}/${BUNNY_REMOTE_PATH}/${REL}"
-            MIME=$(file --mime-type -b "$FILE")
-            echo "  ${REL} (${MIME})"
-            curl -s -X PUT "$URL" \
-              -H "AccessKey: ${{ secrets.BUNNY_STORAGE_KEY }}" \
-              -H "Content-Type: ${MIME}" \
-              --data-binary "@${FILE}" \
-              -o /dev/null -w "%{http_code}" | grep -q "201" || echo "    WARN: non-201 response"
-          done
-
-          echo "Done. https://web.realvirtual.io/${BUNNY_REMOTE_PATH}/"
-
-      - name: Purge Bunny Pull Zone Cache
-        run: |
-          echo "Purging pull zone cache..."
-          curl -s -X POST "https://api.bunny.net/pullzone/${BUNNY_PULL_ZONE_ID}/purgeCache" \
-            -H "AccessKey: ${{ secrets.BUNNY_ACCOUNT_KEY }}" \
-            -o /dev/null -w "%{http_code}"
-          echo " Done."
+      - name: Public URL
+        run: echo "Deployed to https://web.realvirtual.io/${BUNNY_REMOTE_PATH}/"

@@ -7,6 +7,11 @@ test-results/
 *.local
 *.tsbuildinfo
 
+# Bunny deploy credentials — never commit. (.env.production is auto-loaded by
+# Vite on prod builds, so it must stay ignored too.)
+.env
+.env.production
+
 # Local test working folder (large GLB/splat assets, not for the repo)
 LocalFolderTest/
 

@@ -1,0 +1,333 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
+
+/**
+ * bunny-deploy.node.test.ts — Node-environment parity tests for the
+ * Unity-independent Bunny CDN deploy CLI (`scripts/_bunny-lib.mjs`).
+ *
+ * These tests fixate behavioral parity with the Unity C# tooling
+ * (BunnyCdnUploader.cs + WebViewerToolbar.cs): URL/segment encoding, diff +
+ * always-upload rules, name sanitization, private staging, MIME/headers/retry,
+ * config fail-fast, region normalization, build-env mode, purge condition,
+ * recursive listing + index, dry-run, and force.
+ *
+ * Runner: `npm run test:node` (vitest.node.config.ts, environment: node).
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  mkdtempSync, writeFileSync, mkdirSync, existsSync, readFileSync, rmSync,
+} from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+import {
+  buildUploadUrl,
+  selectFilesToUpload,
+  sanitizeDemoName,
+  stagePrivateProject,
+  BunnyClient,
+  loadConfig,
+  normalizeRegion,
+  buildEnvForMode,
+  buildRemoteIndex,
+  mimeType,
+  ALWAYS_UPLOAD_FILES,
+} from '../scripts/_bunny-lib.mjs';
+
+// ─── 9.1 buildUploadUrl ──────────────────────────────────────────────────
+
+describe('buildUploadUrl', () => {
+  it('encodes each path segment, keeps slashes', () => {
+    const url = buildUploadUrl('storage.bunnycdn.com', 'rv-zone', 'demo/My Model.glb');
+    expect(url).toBe('https://storage.bunnycdn.com/rv-zone/demo/My%20Model.glb');
+  });
+});
+
+// ─── 9.2 diff selection ──────────────────────────────────────────────────
+
+describe('diff selection', () => {
+  it('skips same-size files but forces always-upload files', () => {
+    const local = [
+      { rel: 'assets/index-abc.js', size: 100 },
+      { rel: 'index.html', size: 50 },
+      { rel: 'settings.json', size: 20 },
+      { rel: 'models/machine.glb', size: 999 },
+    ];
+    const remote = new Map([
+      ['assets/index-abc.js', 100],
+      ['index.html', 50],
+      ['settings.json', 20],
+      ['models/machine.glb', 999],
+    ]);
+    const sel = selectFilesToUpload(local, remote, { force: false });
+    const rels = sel.map((f: { rel: string }) => f.rel).sort();
+    expect(rels).toEqual(['index.html', 'settings.json']); // js + glb unchanged
+  });
+
+  it('always-upload set covers settings/models/manifest json', () => {
+    expect(ALWAYS_UPLOAD_FILES.has('settings.json')).toBe(true);
+    expect(ALWAYS_UPLOAD_FILES.has('models.json')).toBe(true);
+    expect(ALWAYS_UPLOAD_FILES.has('manifest.json')).toBe(true);
+  });
+
+  it('force=true selects everything (diff skipped)', () => {
+    const local = [
+      { rel: 'assets/index-abc.js', size: 100 },
+      { rel: 'models/machine.glb', size: 999 },
+    ];
+    const remote = new Map([
+      ['assets/index-abc.js', 100],
+      ['models/machine.glb', 999],
+    ]);
+    const sel = selectFilesToUpload(local, remote, { force: true });
+    expect(sel.length).toBe(2);
+  });
+});
+
+// ─── 9.3 sanitizeDemoName ────────────────────────────────────────────────
+
+describe('sanitizeDemoName', () => {
+  it('lowercases, replaces invalid chars, collapses + trims dashes', () => {
+    expect(sanitizeDemoName('Kunde XY / Linie #2')).toBe('kunde-xy-linie-2');
+  });
+  it('caps at 60 chars', () => {
+    expect(sanitizeDemoName('a'.repeat(80)).length).toBe(60);
+  });
+  // R13 edge cases
+  it('empty input falls back to "demo"', () => {
+    expect(sanitizeDemoName('')).toBe('demo');
+    expect(sanitizeDemoName(null)).toBe('demo');
+    expect(sanitizeDemoName('###')).toBe('demo'); // all invalid → empty → "demo"
+  });
+  it('trims leading and trailing dashes', () => {
+    expect(sanitizeDemoName('-abc-')).toBe('abc');
+    expect(sanitizeDemoName('  -Kunde-  ')).toBe('kunde');
+  });
+});
+
+// ─── 9.4 stagePrivateProject ─────────────────────────────────────────────
+
+describe('stagePrivateProject', () => {
+  let work: string;
+  beforeEach(() => { work = mkdtempSync(join(tmpdir(), 'rvdep-')); });
+  afterEach(() => { rmSync(work, { recursive: true, force: true }); });
+
+  it('produces correct staging contents', () => {
+    const dist = join(work, 'dist');
+    mkdirSync(join(dist, 'assets'), { recursive: true });
+    writeFileSync(join(dist, 'index.html'), '<html></html>');
+    writeFileSync(join(dist, 'assets', 'demo.glb'), 'PUBLIC'); // must be dropped
+    writeFileSync(join(dist, 'assets', 'index-abc.js'), 'JS');  // must be kept
+    const proj = join(work, 'projects', 'kunde-xy');
+    mkdirSync(join(proj, 'models'), { recursive: true });
+    writeFileSync(join(proj, 'models', 'machine.glb'), 'CUSTOMER');
+    writeFileSync(join(proj, 'project.json'),
+      JSON.stringify({ name: 'Kunde XY', code: 'deadbeef', settings: { defaultModel: 'machine.glb' } }));
+
+    const staging = stagePrivateProject({ distDir: dist, projectDir: proj });
+    try {
+      expect(existsSync(join(staging, 'index.html'))).toBe(true);
+      expect(existsSync(join(staging, 'assets', 'demo.glb'))).toBe(false);   // public glb removed
+      expect(existsSync(join(staging, 'assets', 'index-abc.js'))).toBe(true); // other assets kept
+      expect(existsSync(join(staging, 'models', 'machine.glb'))).toBe(true); // customer glb present
+      expect(JSON.parse(readFileSync(join(staging, 'models.json'), 'utf8'))).toEqual(['machine.glb']);
+      const settings = JSON.parse(readFileSync(join(staging, 'settings.json'), 'utf8'));
+      expect(settings.defaultModel).toBe('models/machine.glb');
+      expect(settings.projectAssetsPath).toBe('private-assets/kunde-xy/');
+      // R2: GA id empty unless explicitly provided
+      expect(settings.analytics.googleAnalyticsId).toBe('');
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+    }
+  });
+
+  it('injects GA id only when provided (R2)', () => {
+    const dist = join(work, 'dist');
+    mkdirSync(dist, { recursive: true });
+    writeFileSync(join(dist, 'index.html'), '<html></html>');
+    const proj = join(work, 'projects', 'kunde-z');
+    mkdirSync(join(proj, 'models'), { recursive: true });
+    writeFileSync(join(proj, 'project.json'),
+      JSON.stringify({ name: 'Kunde Z', code: 'cafebabe', settings: {} }));
+
+    const staging = stagePrivateProject({ distDir: dist, projectDir: proj, googleAnalyticsId: 'G-TEST123' });
+    try {
+      const settings = JSON.parse(readFileSync(join(staging, 'settings.json'), 'utf8'));
+      expect(settings.analytics.googleAnalyticsId).toBe('G-TEST123');
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─── 9.5 BunnyClient.putFile ─────────────────────────────────────────────
+
+describe('BunnyClient.putFile', () => {
+  beforeEach(() => vi.restoreAllMocks());
+  afterEach(() => vi.restoreAllMocks());
+
+  it('sends AccessKey + glb mime, retries once on 503', async () => {
+    const calls: Array<{ url: string; init: { headers: Record<string, string> } }> = [];
+    const fetchMock = vi.fn(async (url: string, init: { headers: Record<string, string> }) => {
+      calls.push({ url, init });
+      const fail = calls.length === 1;
+      return {
+        status: fail ? 503 : 201,
+        ok: !fail,
+        text: async () => '',
+        json: async () => ({}),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new BunnyClient({ region: 'storage.bunnycdn.com', zone: 'z', storageKey: 'K' });
+    await client.putFile(Buffer.from('x'), 'demo/m.glb');
+
+    expect(calls.length).toBe(2); // retry happened
+    expect(calls[1].init.headers['AccessKey']).toBe('K');
+    expect(calls[1].init.headers['Content-Type']).toBe('model/gltf-binary');
+  });
+
+  it('mimeType maps glb to model/gltf-binary, unknown to octet-stream', () => {
+    expect(mimeType('a/b.glb')).toBe('model/gltf-binary');
+    expect(mimeType('a/b.html')).toBe('text/html');
+    expect(mimeType('a/b.unknownext')).toBe('application/octet-stream');
+  });
+
+  it('skips fetch entirely in dry-run mode', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new BunnyClient({ region: 'storage.bunnycdn.com', zone: 'z', storageKey: 'K', dryRun: true });
+    await client.putFile(Buffer.from('x'), 'demo/m.glb');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ─── 9.6 config + region ─────────────────────────────────────────────────
+
+describe('config', () => {
+  it('throws when BUNNY_STORAGE_KEY missing', () => {
+    expect(() => loadConfig({ BUNNY_STORAGE_ZONE: 'z' })).toThrow(/BUNNY_STORAGE_KEY/);
+  });
+  it('throws when BUNNY_STORAGE_ZONE missing', () => {
+    expect(() => loadConfig({ BUNNY_STORAGE_KEY: 'k' })).toThrow(/BUNNY_STORAGE_ZONE/);
+  });
+  it('normalizes region label suffix', () => {
+    expect(normalizeRegion('storage.bunnycdn.com (Falkenstein DE)')).toBe('storage.bunnycdn.com');
+    expect(normalizeRegion(undefined)).toBe('storage.bunnycdn.com'); // default
+  });
+  it('returns GA id from env', () => {
+    const cfg = loadConfig({ BUNNY_STORAGE_KEY: 'k', BUNNY_STORAGE_ZONE: 'z', GA_MEASUREMENT_ID: 'G-X' });
+    expect(cfg.googleAnalyticsId).toBe('G-X');
+  });
+});
+
+// ─── 9.7 buildEnvForMode ─────────────────────────────────────────────────
+
+describe('buildEnvForMode', () => {
+  it('public build sets VITE_PUBLIC_BUILD=1', () => {
+    expect(buildEnvForMode('public', {}).VITE_PUBLIC_BUILD).toBe('1');
+  });
+  it('private build must NOT set VITE_PUBLIC_BUILD', () => {
+    expect(buildEnvForMode('private', {}).VITE_PUBLIC_BUILD).toBeUndefined();
+  });
+  it('passes base path as VITE_BASE', () => {
+    expect(buildEnvForMode('public', { base: '/demo/' }).VITE_BASE).toBe('/demo/');
+  });
+});
+
+// ─── R11: listRecursive + buildRemoteIndex (IsDirectory filter) ──────────
+
+describe('listRecursive + buildRemoteIndex', () => {
+  beforeEach(() => vi.restoreAllMocks());
+  afterEach(() => vi.restoreAllMocks());
+
+  it('descends into directories and indexes files (lowercased, dirs filtered)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const u = String(url);
+      // root /demo/
+      if (/\/z\/demo\/$/.test(u)) {
+        return {
+          ok: true,
+          json: async () => [
+            { ObjectName: 'Index.HTML', Length: 10, IsDirectory: false },
+            { ObjectName: 'assets', Length: 0, IsDirectory: true },
+          ],
+        };
+      }
+      // /demo/assets/
+      if (/\/z\/demo\/assets\/$/.test(u)) {
+        return {
+          ok: true,
+          json: async () => [
+            { ObjectName: 'app.js', Length: 200, IsDirectory: false },
+          ],
+        };
+      }
+      return { ok: false, json: async () => [] };
+    }));
+
+    const client = new BunnyClient({ region: 'storage.bunnycdn.com', zone: 'z', storageKey: 'K' });
+    const entries = await client.listRecursive('demo');
+    const index = buildRemoteIndex(entries);
+
+    expect(index.get('index.html')).toBe(10);     // lowercased
+    expect(index.get('assets/app.js')).toBe(200);  // nested
+    expect(index.has('assets')).toBe(false);       // directory not indexed
+  });
+
+  it('returns empty list when remote path does not exist yet', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, json: async () => [] })));
+    const client = new BunnyClient({ region: 'storage.bunnycdn.com', zone: 'z', storageKey: 'K' });
+    const entries = await client.listRecursive('newdemo');
+    expect(entries).toEqual([]);
+  });
+});
+
+// ─── R11: purge condition ────────────────────────────────────────────────
+
+describe('BunnyClient.purge', () => {
+  beforeEach(() => vi.restoreAllMocks());
+  afterEach(() => vi.restoreAllMocks());
+
+  it('skips purge (no fetch) when account key / pull zone missing', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new BunnyClient({ region: 'storage.bunnycdn.com', zone: 'z', storageKey: 'K' });
+    const ok = await client.purge();
+    expect(ok).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('purges once when account key + pull zone set', async () => {
+    const fetchMock = vi.fn(
+      async (_url: string, _init: { method: string; headers: Record<string, string> }) =>
+        ({ ok: true, text: async () => '' }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new BunnyClient({
+      region: 'storage.bunnycdn.com', zone: 'z', storageKey: 'K',
+      accountKey: 'ACC', pullZoneId: '12345',
+    });
+    const ok = await client.purge();
+    expect(ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const call = fetchMock.mock.calls[0];
+    expect(String(call[0])).toBe('https://api.bunny.net/pullzone/12345/purgeCache');
+    expect(call[1].method).toBe('POST');
+    expect(call[1].headers.AccessKey).toBe('ACC');
+  });
+
+  it('does not fetch when dry-run', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new BunnyClient({
+      region: 'storage.bunnycdn.com', zone: 'z', storageKey: 'K',
+      accountKey: 'ACC', pullZoneId: '12345', dryRun: true,
+    });
+    const ok = await client.purge();
+    expect(ok).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

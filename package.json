@@ -14,9 +14,14 @@
     "e2e:headed": "npx playwright test --headed",
     "perf": "npx playwright test e2e/perf-smoke.spec.ts --headed",
     "build:aasx-index": "node scripts/build-aasx-index.mjs",
+    "deploy": "node scripts/bunny-deploy.mjs",
+    "deploy:private": "node scripts/bunny-deploy.mjs --private",
     "test:node": "vitest run --config vitest.node.config.ts",
     "test:all": "npm run test:node && npm run test",
     "lint": "eslint src/"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",

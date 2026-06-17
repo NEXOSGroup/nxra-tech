@@ -74,8 +74,9 @@ npm run dev          # Vite dev server with HMR
 Drop `.glb` files exported from [realvirtual.io](https://realvirtual.io) into `public/models/` — they appear automatically in the model selector.
 
 ```bash
-npm run build        # Production build -> dist/
+npm run build        # Production build -> dist/ (local only, nothing published)
 npm run preview      # Preview production build
+npm run deploy       # Build AND publish to the public CDN (web.realvirtual.io)
 npm test             # Run browser tests (headless Chromium via Playwright)
 npm run test:node    # Run Node.js tests (fs, glob, ESLint instance)
 npm run test:all     # Run both Node + browser tests
@@ -197,6 +198,7 @@ For the full plugin API — UI slots, event bus, hooks, context menus, and toolt
 |----------|----------|
 | [Unity Export Guide](https://doc.realvirtual.io/extensions/realvirtual-web) | GLB export from Unity, publish workflow, WebViewer Tools (Pro) |
 | [Architecture](doc-webviewer.md) | Full architecture, component reference, configuration |
+| [Building & Deploying](doc-deploy.md) | Local test build vs. publishing to public, private projects, credentials, CI |
 | [Layout Planner](doc-layout-planner.md) | Library objects, catalogs, GitHub libraries, snap points, pivots, deep-links |
 | [Plugin Development](doc-extending-webviewer.md) | Plugin system, custom components, UI slots, hooks |
 | [Multiuser System](doc-multiuser-system.md) | Sessions, shared views, avatars *(Beta)* |
