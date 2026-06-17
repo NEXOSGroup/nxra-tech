@@ -20,6 +20,7 @@ import './rv-grip-target';
 import './rv-connect-signal';
 import './rv-safety-door';
 import './rv-web-sensor';
+import './rv-web-error';
 // Pipeline components — class constructors also register capabilities + tooltip resolvers
 import { RVPipe } from './rv-pipe';
 import { RVTank } from './rv-tank';
@@ -27,6 +28,7 @@ import { RVPump } from './rv-pump';
 import { RVProcessingUnit } from './rv-processing-unit';
 import { applySchema, resolveComponentRefs, getRegisteredFactories, registerCapabilities, type RVComponent, type ComponentContext, type ComponentSchema } from './rv-component-registry';
 import type { GizmoOverlayManager } from './rv-gizmo-manager';
+import type { ErrorStore } from './rv-error-store';
 import { RVTransportManager } from './rv-transport-manager';
 import { SignalStore } from './rv-signal-store';
 import { RVDrivesPlayback, parseCompactRecording, parseScriptableObjectRecording, type CompactRecording } from './rv-drives-playback';
@@ -187,6 +189,8 @@ export interface LoadGLBOptions {
   isWebGPU?: boolean;
   /** Optional gizmo manager — passed into ComponentContext so components (e.g. WebSensor) can create overlays. */
   gizmoManager?: GizmoOverlayManager;
+  /** Optional error registry — passed into ComponentContext so components (e.g. WebError) can report active errors. */
+  errorStore?: ErrorStore;
   /** Optional viewer event bus — passed into ComponentContext for components
    *  that need to react to UI↔engine signals (e.g. RVSafetyDoor visibility toggle). */
   events?: EventEmitter<ViewerEvents>;
@@ -692,8 +696,9 @@ export function initializeComponents(
   root: Object3D,
   gizmoManager?: GizmoOverlayManager,
   events?: EventEmitter<ViewerEvents>,
+  errorStore?: ErrorStore,
 ): void {
-  const context: ComponentContext = { registry, signalStore, scene, transportManager, root, gizmoManager, events };
+  const context: ComponentContext = { registry, signalStore, scene, transportManager, root, gizmoManager, events, errorStore };
   for (const { component } of pending) {
     resolveComponentRefs(component as unknown as Record<string, unknown>, registry);
     component.init(context);
@@ -715,8 +720,9 @@ export function runOnSceneReady(
   root: Object3D,
   gizmoManager?: GizmoOverlayManager,
   events?: EventEmitter<ViewerEvents>,
+  errorStore?: ErrorStore,
 ): void {
-  const context: ComponentContext = { registry, signalStore, scene, transportManager, root, gizmoManager, events };
+  const context: ComponentContext = { registry, signalStore, scene, transportManager, root, gizmoManager, events, errorStore };
   for (const { component } of pending) {
     if (typeof component.onSceneReady === 'function') {
       component.onSceneReady(context);
@@ -1098,7 +1104,7 @@ export async function loadGLB(url: string, scene: Scene, options?: LoadGLBOption
   registerNodeAliases(renamedNodes, registry, signalStore);
 
   // Phase 7: Initialize components (Step 2 "Start")
-  initializeComponents(traverseResult.pending, registry, signalStore, scene, manager, root, options?.gizmoManager, options?.events);
+  initializeComponents(traverseResult.pending, registry, signalStore, scene, manager, root, options?.gizmoManager, options?.events, options?.errorStore);
 
   // Phase 8: Build groups
   const groups = buildGroups(traverseResult.groupNodes, registry);
@@ -1138,7 +1144,7 @@ export async function loadGLB(url: string, scene: Scene, options?: LoadGLBOption
   // Phase 8d: Late-init pass — components opting into onSceneReady() now see
   // the final hierarchy (kinematic re-parenting complete). Used by gizmos that
   // need an accurate subtree AABB (e.g. RVSafetyDoor floor halo + label).
-  runOnSceneReady(traverseResult.pending, registry, signalStore, scene, manager, root, options?.gizmoManager, options?.events);
+  runOnSceneReady(traverseResult.pending, registry, signalStore, scene, manager, root, options?.gizmoManager, options?.events, options?.errorStore);
 
   // Phase 9: WebGPU compatibility fixes
   applyWebGPUFixes(root, options?.isWebGPU ?? false);
@@ -1276,6 +1282,7 @@ export function processExtras(
   scene: Scene,
   gizmoManager?: GizmoOverlayManager,
   events?: EventEmitter<ViewerEvents>,
+  errorStore?: ErrorStore,
 ): ProcessExtrasResult {
   const drives: RVDrive[] = [];
   const pending: PendingComponent[] = [];
@@ -1335,7 +1342,7 @@ export function processExtras(
   // TransportSurface dropped in from the library) can create selection
   // overlays and subscribe to selection events, exactly like the main
   // loadGLB() path does via initializeComponents().
-  const context: ComponentContext = { registry, signalStore, scene, transportManager, root, gizmoManager, events };
+  const context: ComponentContext = { registry, signalStore, scene, transportManager, root, gizmoManager, events, errorStore };
   for (const { component } of pending) {
     resolveComponentRefs(component as unknown as Record<string, unknown>, registry);
     component.init(context);

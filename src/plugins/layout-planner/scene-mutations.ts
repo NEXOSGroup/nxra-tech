@@ -163,6 +163,7 @@ export function addPlacedToScene(
       viewer.scene,
       viewer.gizmoManager,
       viewer,
+      viewer.errorStore,
     );
 
     // Append new drives to viewer and rebuild the grouped BVH so the new
@@ -362,6 +363,7 @@ export function placeAtSnapPoint(
       viewer.scene,
       viewer.gizmoManager,
       viewer,
+      viewer.errorStore,
     );
     if (result.drives.length > 0) {
       viewer.drives.push(...result.drives);

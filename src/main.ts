@@ -43,6 +43,7 @@ import { KioskPlugin } from './plugins/kiosk-plugin';
 import { AdaptiveNavPlugin } from './plugins/adaptive-nav-plugin';
 import { MeasurementPlugin } from './plugins/measurement-plugin';
 import { OrientationGizmoPlugin } from './plugins/rv-orientation-gizmo-plugin';
+import { WebErrorPlugin } from './plugins/web-error-plugin';
 
 // Extras editor plugin (hierarchy browser + property editor)
 import { RvExtrasEditorPlugin } from './core/hmi/rv-extras-editor';
@@ -228,6 +229,7 @@ async function init() {
     .use(new CameraStartPosPlugin())
     .use(new KioskPlugin())
     .use(new MeasurementPlugin())
+    .use(new WebErrorPlugin())
     .use(new RvExtrasEditorPlugin())
     .use(new ConnectPlugin())
     .use(new OrientationGizmoPlugin())

@@ -92,6 +92,7 @@ import type { NodeRegistry, NodeSearchResult } from './engine/rv-node-registry';
 import { TankFillManager } from './engine/rv-tank-fill';
 import { PipeFlowManager } from './engine/rv-pipe-flow';
 import { GizmoOverlayManager } from './engine/rv-gizmo-manager';
+import { ErrorStore } from './engine/rv-error-store';
 import { ComponentEventDispatcher } from './engine/rv-component-event-dispatcher';
 import type { GroupRegistry } from './engine/rv-group-registry';
 import { AutoFilterRegistry } from './engine/rv-auto-filter-registry';
@@ -305,6 +306,12 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   // --- Generic gizmo overlay system (always available) ---
   /** Central 3D-overlay/gizmo system. Used by WebSensor and other components. */
   readonly gizmoManager: GizmoOverlayManager;
+
+  // --- Error/alarm registry (always available) ---
+  /** Central error registry — single source of truth for active errors.
+   *  Singleton that survives model loads; emptied on model switch by the
+   *  web-error plugin's onModelCleared hook. Used by WebError + error panel. */
+  readonly errorStore: ErrorStore = new ErrorStore();
 
   // --- Component event dispatcher (routes viewer events → per-component callbacks) ---
   /** Dispatches object-hover/clicked/selection-changed to RVComponent.onHover/onClick/onSelect. */
@@ -2002,6 +2009,7 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     const result = await loadGLB(url, this.scene, {
       isWebGPU: this.isWebGPU,
       gizmoManager: this.gizmoManager,
+      errorStore: this.errorStore,
       events: this,
       overlay: options?.overlay,
     });

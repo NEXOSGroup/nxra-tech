@@ -20,6 +20,7 @@ import type { SignalStore } from './rv-signal-store';
 import type { RVTransportManager } from './rv-transport-manager';
 import type { AABB } from './rv-aabb';
 import type { GizmoOverlayManager } from './rv-gizmo-manager';
+import type { ErrorStore } from './rv-error-store';
 import type { ComponentEventDispatcher } from './rv-component-event-dispatcher';
 import type { ObjectHoverData } from './rv-raycast-manager';
 import type { EventEmitter } from '../rv-events';
@@ -81,6 +82,9 @@ export interface ComponentContext {
   /** Optional — available when RVViewer instantiates one. Components that need
    *  overlays (e.g. WebSensor) must null-check before use. */
   gizmoManager?: GizmoOverlayManager;
+  /** Optional — central error/alarm registry (RVViewer singleton). Components
+   *  that report errors (e.g. WebError) must null-check before use. */
+  errorStore?: ErrorStore;
   /** Optional — available when RVViewer instantiates one. Components don't
    *  need to touch this directly; they just implement onHover/onClick/onSelect. */
   componentEventDispatcher?: ComponentEventDispatcher;
