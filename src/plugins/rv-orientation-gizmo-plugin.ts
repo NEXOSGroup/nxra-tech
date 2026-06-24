@@ -26,16 +26,23 @@ type HandleId = OrientationView | 'cube';
 
 // ─── Layout constants (CSS pixels) ───────────────────────────────────
 
-/** Edge length of the gizmo widget. */
-const SIZE_PX = 120;
-/** Distance from the right edge of the viewport. */
+/** Edge length of the gizmo widget. The box is kept just large enough to hold
+ *  the cube + its axis bars/labels: content reaches ~RADIUS+label (~38 px) from
+ *  the centre, so a half-edge of 44 px leaves only a thin (~6 px) margin and the
+ *  cube tucks snugly into the corner instead of floating ~22 px away from it.
+ *  (The cube and bars themselves are fixed-size — shrinking the box only trims
+ *  the empty padding around them, it does not scale the gizmo.) */
+const SIZE_PX = 88;
+/** Distance from the right edge of the viewport — flush in the corner. */
 const MARGIN_RIGHT_PX = 0;
-/** Distance from the top edge of the viewport. The widget is 120 px wide and
- *  the cube sits at its centre, so the cube's centre lands at ~60 px below
- *  this value. A small (or negative) value pulls the cube closer to the
- *  upper-right corner; SVG `overflow: visible` keeps any labels that spill
- *  above the box readable. */
-const MARGIN_TOP_PX = -8;
+/** Distance from the top edge of the viewport. The cube sits at the box centre
+ *  (~SIZE_PX/2 below this), and the topmost content (the "Y" axis label) sits
+ *  ~RADIUS above the cube — so at 0 the "Y" label lands ~8 px from the top, lining
+ *  up with the floating top-left toolbar's FLOATING_TOP_MARGIN (8 px) instead of
+ *  sitting well below it. The camera/view controls float at the BOTTOM-right, so
+ *  the gizmo owns the top-right corner. SVG `overflow: visible` keeps labels that
+ *  spill out of the box readable. */
+const MARGIN_TOP_PX = 0;
 
 /** SVG center coord — bars project outward from here. */
 const CENTER = SIZE_PX / 2;
@@ -175,6 +182,7 @@ export class OrientationGizmoPlugin implements RVViewerPlugin {
   private _hovered: HandleId | null = null;
   private _lastLabelText = '';
   private _panelUnsub: (() => void) | null = null;
+  private _resizeObs: ResizeObserver | null = null;
   private _intendedLabel: string | null = null;
   private _lastCamW = NaN;
   private _lastCamX = NaN;
@@ -213,6 +221,14 @@ export class OrientationGizmoPlugin implements RVViewerPlugin {
     this._updateCubeRotation();
     this._reorderForDepth();
     this._panelUnsub = viewer.leftPanelManager.subscribe(() => this._refreshPosition());
+    // Track the real 3D viewport rect: ViewportFrame insets #rv-viewport for the
+    // title bar, right-docked panels, and UI zoom — observing its size keeps the
+    // gizmo glued to the viewport's top-right corner through all of them.
+    const vp = document.getElementById('rv-viewport');
+    if (vp && typeof ResizeObserver !== 'undefined') {
+      this._resizeObs = new ResizeObserver(() => this._refreshPosition());
+      this._resizeObs.observe(vp);
+    }
     this._refreshPosition();
     this._enabled = true;
   }
@@ -240,6 +256,8 @@ export class OrientationGizmoPlugin implements RVViewerPlugin {
   dispose(): void {
     this._panelUnsub?.();
     this._panelUnsub = null;
+    this._resizeObs?.disconnect();
+    this._resizeObs = null;
     if (this._container) {
       this._container.remove();
       this._container = null;
@@ -254,13 +272,26 @@ export class OrientationGizmoPlugin implements RVViewerPlugin {
     this._viewer = null;
   }
 
-  // ─── Layout: stay clear of right-side docks ────────────────────────
+  // ─── Layout: glue to the 3D viewport's top-right corner ────────────
 
+  /** Pin the gizmo to the top-right corner of the actual 3D viewport region.
+   *  Reads the live `#rv-viewport` rect (already inset by ViewportFrame for the
+   *  optional title bar, right-docked panels and UI zoom) so the gizmo follows
+   *  the corner exactly. Falls back to the right-dock width if the element is
+   *  missing. */
   private _refreshPosition(): void {
-    if (!this._container || !this._viewer) return;
+    if (!this._container) return;
+    const vp = document.getElementById('rv-viewport');
+    if (vp) {
+      const rect = vp.getBoundingClientRect();
+      this._container.style.top = `${rect.top + MARGIN_TOP_PX}px`;
+      this._container.style.right = `${Math.max(0, window.innerWidth - rect.right) + MARGIN_RIGHT_PX}px`;
+      return;
+    }
+    if (!this._viewer) return;
     const rightDockWidth = this._viewer.leftPanelManager.getActiveWidth('right');
-    const right = MARGIN_RIGHT_PX + rightDockWidth;
-    this._container.style.right = `${right}px`;
+    this._container.style.top = `${MARGIN_TOP_PX}px`;
+    this._container.style.right = `${MARGIN_RIGHT_PX + rightDockWidth}px`;
   }
 
   // ─── Projection ────────────────────────────────────────────────────

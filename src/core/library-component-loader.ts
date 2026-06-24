@@ -48,9 +48,11 @@ export function parseTransportName(name: string): AxisCode | null {
   return ('+' + m[1]) as AxisCode;
 }
 
-/** Sensor — bare `Sensor` or `Sensor-<id>` (e.g. `Sensor-1`, `Sensor-Infeed`). */
+/** Sensor — bare `Sensor` or `Sensor-<id>` (e.g. `Sensor-1`, `Sensor-Infeed`), also
+ *  tolerating a Unity/exporter duplicate-name suffix like `Sensor_(1)` / `Sensor (1)`
+ *  (two same-named nodes → one gets a `(N)` suffix on GLB export). */
 export function isSensorName(name: string): boolean {
-  return /^Sensor(-.*)?$/.test(name);
+  return /^Sensor(-.*)?([_ ]?\(\d+\))?$/.test(name);
 }
 
 // ─── Node finders (for behavior files) ──────────────────────────────────

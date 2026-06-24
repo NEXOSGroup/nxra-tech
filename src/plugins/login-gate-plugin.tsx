@@ -21,8 +21,10 @@
  */
 
 import { useState, useCallback, useEffect, useMemo, type KeyboardEvent } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
 import { Box, Typography, TextField, Button, Paper, Menu, MenuItem } from '@mui/material';
 import { Lock, SwapHoriz } from '@mui/icons-material';
+import { RVViewerProvider } from '../hooks/use-viewer';
 import type { RVViewerPlugin } from '../core/rv-plugin';
 import type { RVViewer } from '../core/rv-viewer';
 import type { UISlotEntry, UISlotProps } from '../core/rv-ui-plugin';
@@ -58,6 +60,25 @@ export interface LoginGateConfig {
 let _config: LoginGateConfig | null = null;
 let _resolveGate: (() => void) | null = null;
 
+// Standalone overlay mounted by installGate() so the login dialog is visible DURING the loading
+// screen — the main HMI (which also hosts the overlay slot) only mounts after the model loads, so
+// without this the gate would deadlock (model waits for login, login UI waits for model).
+let _standaloneRoot: Root | null = null;
+let _standaloneEl: HTMLElement | null = null;
+
+function teardownStandalone(): void {
+  if (!_standaloneRoot) return;
+  const root = _standaloneRoot;
+  const el = _standaloneEl;
+  _standaloneRoot = null;
+  _standaloneEl = null;
+  // Defer unmount so it doesn't run during the component's own render/commit.
+  setTimeout(() => {
+    try { root.unmount(); } catch { /* ignore */ }
+    if (el?.parentNode) el.parentNode.removeChild(el);
+  }, 0);
+}
+
 function isAuthed(key: string): boolean {
   return localStorage.getItem(key) === '1';
 }
@@ -68,6 +89,21 @@ function LoginGateOverlay({ viewer }: UISlotProps) {
 
   const key = cfg.sessionKey ?? 'rv-login-auth';
   const accent = cfg.accentColor ?? '#4fc3f7';
+
+  // The gate is mounted in its own React root (mountStandalone) OUTSIDE the
+  // app's dark MUI ThemeProvider, so MUI falls back to its LIGHT theme — input
+  // text + label render near-black on the dark glass and become unreadable.
+  // Pin the field colors explicitly so it looks right in both mount paths.
+  const fieldSx = {
+    '& .MuiInputBase-root': { bgcolor: 'rgba(255,255,255,0.05)' },
+    '& .MuiInputBase-input': { color: 'rgba(255,255,255,0.92)' },
+    '& .MuiInputBase-input::placeholder': { color: 'rgba(255,255,255,0.45)', opacity: 1 },
+    '& .MuiInputLabel-root': { color: 'rgba(255,255,255,0.5)' },
+    '& .MuiInputLabel-root.Mui-focused': { color: accent },
+    '& .MuiOutlinedInput-notchedOutline': { borderColor: 'rgba(255,255,255,0.15)' },
+    '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: 'rgba(255,255,255,0.3)' },
+    '& .MuiOutlinedInput-root.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: accent },
+  } as const;
 
   const [authed, setAuthed] = useState(() => isAuthed(key));
   const [user, setUser] = useState('');
@@ -97,6 +133,7 @@ function LoginGateOverlay({ viewer }: UISlotProps) {
         setError(false);
         _resolveGate?.();
         _resolveGate = null;
+        teardownStandalone(); // remove the loading-screen overlay; the model load now proceeds
       } else {
         setError(true);
       }
@@ -161,7 +198,7 @@ function LoginGateOverlay({ viewer }: UISlotProps) {
           value={user}
           onChange={(e) => { setUser(e.target.value); setError(false); }}
           onKeyDown={handleKey}
-          sx={{ '& .MuiInputBase-root': { bgcolor: 'rgba(255,255,255,0.05)' } }}
+          sx={fieldSx}
         />
         <TextField
           label="Password"
@@ -171,7 +208,7 @@ function LoginGateOverlay({ viewer }: UISlotProps) {
           value={pass}
           onChange={(e) => { setPass(e.target.value); setError(false); }}
           onKeyDown={handleKey}
-          sx={{ '& .MuiInputBase-root': { bgcolor: 'rgba(255,255,255,0.05)' } }}
+          sx={fieldSx}
         />
 
         {error && (
@@ -267,5 +304,25 @@ export class LoginGatePlugin implements RVViewerPlugin {
     }
     console.log('[LoginGate] Gate installed — model loading deferred until login');
     viewer.loadGate = new Promise<void>((resolve) => { _resolveGate = resolve; });
+    this.mountStandalone(viewer);
+  }
+
+  // Mounts the login overlay in its own DOM root (above the loading overlay, with pointer events
+  // enabled) so the user can authenticate while the model is still gated. The main HMI's overlay
+  // slot also renders this component, but only after the model loads — too late for the gate.
+  private mountStandalone(viewer: RVViewer): void {
+    if (typeof document === 'undefined' || _standaloneRoot) return;
+    const el = document.createElement('div');
+    el.id = 'rv-login-gate-root';
+    // #loading-overlay is z-index 1000; sit above it and re-enable pointer events.
+    el.style.cssText = 'position:fixed;inset:0;z-index:21000;pointer-events:auto;';
+    document.body.appendChild(el);
+    _standaloneEl = el;
+    _standaloneRoot = createRoot(el);
+    _standaloneRoot.render(
+      <RVViewerProvider value={viewer}>
+        <LoginGateOverlay viewer={viewer} />
+      </RVViewerProvider>,
+    );
   }
 }

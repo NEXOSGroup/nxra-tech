@@ -105,3 +105,24 @@ export function flowsCompatible(a: SnapFlow | undefined, b: SnapFlow | undefined
   if (fa === 'bidi' || fb === 'bidi') return true;
   return (fa === 'in' && fb === 'out') || (fa === 'out' && fb === 'in');
 }
+
+/**
+ * Whether a given port's authored flow should be overridden to bidirectional,
+ * keyed off the asset name (the GLB/owner-root name) and the snap typeId. This
+ * is the SINGLE SOURCE OF TRUTH used by BOTH the runtime snap scanner
+ * (`scanAndRegisterSnaps`) and the library quick-add index
+ * (`library-snap-index`) so a port's real connectability is identical whether
+ * it is already placed or being matched from the library.
+ *
+ *   • Turntable     — ALL ports bidi (it routes between any of them).
+ *   • ChainTransfer — only the cross-chain (`convchain`) port is bidi; the
+ *     straight roller line (`convroll`) keeps its authored in/out flow.
+ *
+ * `assetName` may be an owner-root name (runtime) or a GLB url/filename
+ * (library index) — both contain the model keyword.
+ */
+export function forcesBidiPort(assetName: string, typeId: string): boolean {
+  if (/turntable/i.test(assetName)) return true;
+  if (/chaintransfer/i.test(assetName) && typeId === 'convchain') return true;
+  return false;
+}

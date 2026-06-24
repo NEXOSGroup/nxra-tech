@@ -2,8 +2,9 @@
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
 /**
- * SimControllerToolbar — Two icon buttons (Play/Pause toggle + Reset) plus
- * an optional Pause-Badge displayed in the TopBar's `toolbar-button` slot.
+ * SimControllerToolbar — the Play/Pause toggle + Reset action group. Registered
+ * in the `toolbar-button-leading` slot, which the HMI renders as a floating
+ * action group next to the workspace mode switcher (top-left of the viewport).
  *
  * Subscribes to `'simulation-pause-changed'` via `useSyncExternalStore`, so
  * UI updates fire only on idle↔paused transitions (or pause-reason add/
@@ -12,8 +13,8 @@
 
 import { useSyncExternalStore, useCallback, useMemo } from 'react';
 import { PlayArrow, Pause, Replay } from '@mui/icons-material';
-import { Tooltip, IconButton, Box, Divider } from '@mui/material';
 import type { UISlotProps } from '../../core/rv-ui-plugin';
+import { ActionSegment, ActionDivider } from '../../core/hmi/action-group';
 import { SIM_CONTROLLER_PAUSE_REASON } from './index';
 
 /** Snapshot shape returned by `getPauseSnapshot`. Compared by reference so
@@ -46,8 +47,8 @@ export function SimControllerToolbar({ viewer }: UISlotProps) {
 
   // Icon reflects the ACTUAL sim state (paused by ANY reason — user, planner
   // 'layout-edit', AR, …) so the toolbar shows "paused" whenever the sim is
-  // held, e.g. on entering the Layout-Planner.
-  const playPauseIcon = snap.paused ? <PlayArrow fontSize="small" /> : <Pause fontSize="small" />;
+  // held, e.g. on entering the Layout-Planner. (Size is normalized by ActionSegment.)
+  const playPauseIcon = snap.paused ? <PlayArrow /> : <Pause />;
   // Detailed tooltip surfaces *all* active pause reasons — replaces the inline
   // chip that used to render in the toolbar. Keeps the info discoverable on
   // hover without cluttering the main menu.
@@ -61,43 +62,27 @@ export function SimControllerToolbar({ viewer }: UISlotProps) {
   // sim is being held by another plugin (Planner, AR, …) even when they did
   // not press Pause themselves.
   const pausedByOther = snap.paused && !userPaused;
-  const playPauseColor: 'primary' | 'warning' | 'inherit' =
-    userPaused ? 'primary' : pausedByOther ? 'warning' : 'inherit';
+  const playPauseColor = userPaused ? 'primary.main' : pausedByOther ? 'warning.main' : 'inherit';
 
+  // Segmented action group (shared design): full-height rectangular segments
+  // split by a divider. The pill wrapper is provided by the host (TopBar).
   return (
-    <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
-      <Tooltip title={playPauseTitle} placement="bottom">
-        <IconButton
-          size="small"
-          color={playPauseColor}
-          sx={{ p: 0.75 }}
-          onClick={handleTogglePlayPause}
-          data-testid="sim-controller-playpause"
-        >
-          {playPauseIcon}
-        </IconButton>
-      </Tooltip>
-      <Tooltip title="Reset MUs and LogicSteps (Shift+R)" placement="bottom">
-        <IconButton
-          size="small"
-          color="inherit"
-          sx={{ p: 0.75 }}
-          onClick={handleReset}
-          data-testid="sim-controller-reset"
-        >
-          <Replay fontSize="small" />
-        </IconButton>
-      </Tooltip>
-      {/* Vertical divider visually groups Play/Pause + Reset and separates
-          them from whatever toolbar plugin renders next (Hierarchy, Models,
-          LayoutPlanner, …). */}
-      <Divider
-        orientation="vertical"
-        flexItem
-        sx={{ mx: 0.5, my: 0.5, borderColor: 'divider' }}
-        data-testid="sim-controller-divider"
+    <>
+      <ActionSegment
+        title={playPauseTitle}
+        onClick={handleTogglePlayPause}
+        color={playPauseColor}
+        icon={playPauseIcon}
+        buttonProps={{ 'data-testid': 'sim-controller-playpause' }}
       />
-    </Box>
+      <ActionDivider />
+      <ActionSegment
+        title="Reset MUs and LogicSteps (Shift+R)"
+        onClick={handleReset}
+        icon={<Replay />}
+        buttonProps={{ 'data-testid': 'sim-controller-reset' }}
+      />
+    </>
   );
 }
 

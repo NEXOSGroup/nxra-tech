@@ -73,6 +73,10 @@ export interface PostProcessingHost {
    *  manager folds this into `useComposer` so OutlinePass becomes a
    *  composer-only path when nothing else (AO/Bloom) is on. */
   readonly outlineHasOutlines: boolean;
+  /** Whether the Toon render mode's post passes (posterize + outline) are
+   *  active. Folds into `useComposer` so toon engages the composer even when
+   *  AO/Bloom are off. */
+  readonly toonPassActive: boolean;
   /** Mark the next frame as needing a render. The viewer's render-on-demand
    *  loop reads this flag — every state-changing setter on the manager
    *  calls into here so users see the change immediately. */
@@ -183,6 +187,7 @@ export class PostProcessingManager {
       this._aoMode !== 'off'
       || this._bloomEnabled
       || this.host.outlineHasOutlines
+      || this.host.toonPassActive
     );
   }
 

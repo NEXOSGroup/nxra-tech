@@ -4,20 +4,28 @@
 import { Box } from '@mui/material';
 import { useViewer } from '../../hooks/use-viewer';
 import { useSlot } from '../../hooks/use-slot';
+import { useViewportInsets } from '../../hooks/use-viewport-insets';
+import { FLOATING_TOP_MARGIN } from './layout-constants';
 
 /** Core layout container for the KPI bar (top center). Renders 'kpi-bar' slot entries. */
 export function KpiBar() {
   const viewer = useViewer();
   const entries = useSlot('kpi-bar');
+  // Center over the actual 3D view (between the docked windows), not the whole
+  // window, so the cards stay centered on the viewport as panels open/resize.
+  const insets = useViewportInsets();
   if (entries.length === 0) return null;
 
   return (
     <Box
       sx={{
+        // KPI cards float at the top-center of the viewport (there is no top app
+        // bar anymore). The mode/sim and camera clusters float at the same height
+        // in the left/right corners, so the centered cards never collide.
         position: 'fixed',
-        top: { xs: 44, sm: 8 },
-        left: 0,
-        right: 0,
+        top: insets.top + FLOATING_TOP_MARGIN,
+        left: insets.left,
+        right: insets.right,
         zIndex: 1200,
         display: 'flex',
         alignItems: 'flex-start',

@@ -38,6 +38,7 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 
 import type { ComponentType } from 'react';
 import type { RVViewerPlugin } from '../../core/rv-plugin';
+import type { ModeId } from '../../core/rv-mode-manager';
 import type { LoadResult } from '../../core/engine/rv-scene-loader';
 import type { ProcessExtrasResult } from '../../core/engine/rv-scene-loader';
 import type { RVViewer } from '../../core/rv-viewer';
@@ -47,6 +48,7 @@ import type { HighlightStyle } from '../../core/engine/rv-highlight-manager';
 import { DEFAULT_SELECTION_STYLE } from '../../core/engine/rv-highlight-manager';
 import type { SelectionSnapshot } from '../../core/engine/rv-selection-manager';
 import type { OutlineStyle } from '../../core/engine/rv-outline-manager';
+import { DEFAULT_HOVER_OUTLINE_STYLE } from '../../core/engine/rv-outline-manager';
 import {
   LayoutStore,
   serializeLayout,
@@ -68,7 +70,7 @@ import {
 export type { PlacementsSnapshot } from '../../core/rv-shared-types';
 import type { PlacementsSnapshot } from '../../core/rv-shared-types';
 import { ModelCache, dropToSurface, dropPivotToSurface, collectDropTargets } from './model-cache';
-import { GhostManager } from './ghost-manager';
+import { GhostManager, buildVirtualNode } from './ghost-manager';
 import { ThumbnailRenderer } from './thumbnail-renderer';
 import { ThumbnailCache } from './thumbnail-cache';
 import { FloorGizmo } from './floor-gizmo';
@@ -79,10 +81,13 @@ import {
   removePlacedFromScene as smRemovePlacedFromScene,
   resolveUniqueName as smResolveUniqueName,
   placeAtSnapPoint as smPlaceAtSnapPoint,
+  markSnapOccupied as smMarkSnapOccupied,
   type SceneMutationDeps,
 } from './scene-mutations';
 import type { SnapPoint, PlacedComponentId } from '../../core/engine/rv-snap-point-registry';
 import type { SnapPointPlugin } from '../snap-point';
+import { findBestGhostSnap, applyGhostSnapAlignment, type GhostSnapMatch } from '../snap-point/ghost-snap-match';
+import { DEFAULT_MAGNET_RADIUS_M } from '../snap-point/snap-magnetic-controller';
 import { computeProximityPairings, type RebuildSnapInput } from '../snap-point/snap-pairing-rebuild';
 import {
   loadBundledLibrary as plLoadBundledLibrary,
@@ -101,8 +106,8 @@ import { MultiSelectPivot, type MultiSelectPivotDeps } from './multi-select-pivo
 import { BoxSelectController } from './box-select-controller';
 
 // UI components for slot registration
-import { LayoutPlannerButton, LayoutLibraryPanel } from './LayoutLibraryPanel';
-import { PlannerGridButton, PlannerDropToSurfaceButton, PlannerDeleteButton, PlannerSnapButton, PlannerChainModeButton, PlannerUndoButton, PlannerRedoButton } from './PlannerToolbarButtons';
+import { LayoutLibraryPanel } from './LayoutLibraryPanel';
+import { PlannerGridButton, PlannerDropToSurfaceButton, PlannerDeleteButton, PlannerSnapButton, PlannerChainModeButton, PlannerVanishMUsButton, PlannerUndoButton, PlannerRedoButton, PlannerLibraryButton } from './PlannerToolbarButtons';
 import { BboxSnapController } from './bbox-snap';
 import { showInfoOverlay, hideInfoOverlay } from '../../core/hmi/info-overlay-store';
 import { freshOpId as opId } from '../../core/hmi/scene/rv-scene-edits';
@@ -420,7 +425,8 @@ const PLANNER_SELECTION_MUTE_STYLE: HighlightStyle = {
  *  object is drawn as a vivid-green OutlinePass silhouette (edgeColor) — the
  *  same green as the selection outline, so the focused object always reads as
  *  "green" whether hovered or selected. The overlay fields only matter on the
- *  WebGPU fallback (no OutlinePass). */
+ *  WebGPU fallback or for fully static-merged objects (no visible mesh to
+ *  outline). */
 const PLANNER_HOVER_STYLE: HighlightStyle = {
   overlayColor: 0x4fc34f,
   overlayOpacity: 0.10,
@@ -446,18 +452,33 @@ const PLANNER_OUTLINE_STYLE: OutlineStyle = {
   pulsePeriod: 0,
 };
 
+/**
+ * OutlinePass parameters for the planner-mode HOVER channel. Deliberately
+ * less intense than PLANNER_OUTLINE_STYLE (the selection silhouette): a softer,
+ * darker green at lower edge strength/glow so a hovered object reads as a hint
+ * while the selected object clearly dominates. Restored to
+ * DEFAULT_HOVER_OUTLINE_STYLE on planner exit so HMI hover is unaffected.
+ */
+const PLANNER_HOVER_OUTLINE_STYLE: OutlineStyle = {
+  visibleEdgeColor: 0x5fc35f,
+  hiddenEdgeColor: 0x2a6b2a,
+  edgeStrength: 3.5,
+  edgeThickness: 2,
+  edgeGlow: 0.25,
+  pulsePeriod: 0,
+};
+
 // ─── Plugin ─────────────────────────────────────────────────────────────
 
-/** Standard parts library shipped with every build. Loaded from a pre-built
- *  `catalog.json` served via raw.githubusercontent.com — unlike the GitHub
- *  tree API (60 req/h per IP, anonymous), the raw host is not rate-limited, so
- *  the public demo never hits a 403. Regenerate the manifest with
- *  `scripts/build-library-catalog.mjs` whenever the library repo changes.
- *  Always loaded by `_loadCatalogs`, in addition to any constructor- or
- *  `?library=`-provided catalogs. */
-const DEFAULT_LIBRARY_URLS = [
-  'https://raw.githubusercontent.com/game4automation/realvirtual-Library/main/catalog.json',
-];
+/** Extra default catalogs auto-loaded by `_loadCatalogs`, on top of the bundled
+ *  library. The STANDARD parts library shipped with every build is the LOCAL
+ *  `public/models/library/` tree (sub-foldered, e.g. `pallethandling/`), loaded
+ *  via `loadBundledLibrary` and delivered with every publish — see
+ *  `_loadCatalogs` and planner-persistence.ts. GitHub is intentionally NOT a
+ *  default source (it caused 404s and could shadow the bundled assets with an
+ *  out-of-date copy). A remote catalog can still be opted into per session via
+ *  the constructor `catalogUrls` option or a `?library=<url>` URL parameter. */
+const DEFAULT_LIBRARY_URLS: string[] = [];
 
 export interface LayoutPlannerOptions {
   catalogUrls?: string[];
@@ -477,13 +498,33 @@ export interface LayoutPlannerOptions {
  *  so widening the window does not mis-pair when the true partner is nearer. */
 const SNAP_PAIR_REBUILD_EPS_M = 0.03;
 
+/** True when any node in `root`'s subtree carries the given realvirtual
+ *  component in its rv_extras (`userData.realvirtual[type]`). Used to detect a
+ *  Source on a freshly dragged draft without a registry path lookup. */
+function subtreeHasComponent(root: Object3D, type: string): boolean {
+  let found = false;
+  root.traverse((n) => {
+    if (found) return;
+    const rv = n.userData?.realvirtual as Record<string, unknown> | undefined;
+    if (rv && rv[type] !== undefined) found = true;
+  });
+  return found;
+}
+
 export class LayoutPlannerPlugin implements RVViewerPlugin {
   readonly id = 'layout-planner';
   readonly order = 250;
 
-  /** Self-register toolbar button and overlay panel via the UISlot system. */
+  /** plan-198: the planner is a workspace mode. Entered via the TopBar mode
+   *  dropdown (no standalone toolbar button). Its slot entries are auto-gated
+   *  to the `mode:planner` context by the UI registry. */
+  readonly modes: ModeId[] = ['planner'];
+
+  /** Self-register the overlay library panel + planner edit buttons. The panel
+   *  is opened/closed by onModeActivate/onModeDeactivate; the buttons are gated
+   *  to planner mode (both the legacy 'planner' context — still set by
+   *  setActive — and the new 'mode:planner' context injected by the registry). */
   readonly slots: UISlotEntry[] = [
-    { slot: 'toolbar-button', component: LayoutPlannerButton as ComponentType<UISlotProps>, order: 100 },
     { slot: 'overlay', component: LayoutLibraryPanel as ComponentType<UISlotProps>, order: 100 },
     // Left-toolbar buttons — visible ONLY while the 'planner' UI context is
     // active. ButtonPanel filters entries by visibilityRule; non-planner
@@ -513,6 +554,12 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
       order: 240,
       visibilityRule: { shownOnlyIn: ['planner'] },
     },
+    {
+      slot: 'button-group',
+      component: PlannerVanishMUsButton as ComponentType<UISlotProps>,
+      order: 245,
+      visibilityRule: { shownOnlyIn: ['planner'] },
+    },
     // Edit-history + delete, grouped at the end of the toolbar.
     {
       slot: 'button-group',
@@ -532,6 +579,14 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
       order: 270,
       visibilityRule: { shownOnlyIn: ['planner'] },
     },
+    // Library toggle — makes the right-docked parts catalog optional in planner
+    // mode (closing it stays in planner; see the lpm subscription below).
+    {
+      slot: 'button-group',
+      component: PlannerLibraryButton as ComponentType<UISlotProps>,
+      order: 280,
+      visibilityRule: { shownOnlyIn: ['planner'] },
+    },
   ];
 
   private _viewer: RVViewer | null = null;
@@ -545,6 +600,21 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
   private _modelCache: ModelCache;
   private _ghost: GhostManager;
   private _dragEntry: LibraryCatalogEntry | null = null;
+  /** The live draft: the dragged object is fully instantiated + registered +
+   *  selected on drag-enter, but NOT yet committed to the store / undo log.
+   *  Committed at drop, torn down on cancel. */
+  private _draft: { id: string; node: Object3D; entry: LibraryCatalogEntry; positioned: boolean; isSource: boolean } | null = null;
+  /** Cached drop-to-surface targets for the draft (parallels `_dragDropTargets`
+   *  for re-drag). Built once at draft-start. */
+  private _draftDropTargets: Mesh[] | null = null;
+  /** The snap-point match in effect at the last move (consumed at commit for
+   *  occupancy + pairing). */
+  private _draftSnapMatch: GhostSnapMatch | null = null;
+  /** Guards against concurrent `_startDraft` calls (build is async). */
+  private _startingDraft = false;
+  /** Set synchronously in onDrop so the dragend-fired `setDragEntry(null)`
+   *  knows the draft was committed (keep it) vs cancelled (remove it). */
+  private _dropCommitted = false;
   private _thumbnailRenderer: ThumbnailRenderer | null = null;
   // ── Auto preview generation ──────────────────────────────────────────
   /** Persistent (Cache-API) store of generated previews, keyed by glbUrl. */
@@ -606,6 +676,10 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
    *  gets excluded automatically). Null when no drag is active or
    *  dropToSurface mode is off. */
   private _dragDropTargets: Mesh[] | null = null;
+  /** Whether the single-select object being gizmo-dragged is a Source — cached
+   *  at drag-start so the per-frame drop can laterally centre it on a belt
+   *  without re-traversing its subtree every pointermove. */
+  private _dragIsSource = false;
   /** Resolves once `_loadCatalogs` has finished its first pass. Awaited by
    *  `_restorePlacements` so we can re-resolve placement glbUrls (dead
    *  `blob:` URLs from a prior session) against the freshly-loaded
@@ -689,9 +763,12 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     gltfLoader.setDRACOLoader(dracoLoader);
 
     this._modelCache = new ModelCache(gltfLoader);
-    this._ghost = new GhostManager(this._layoutRoot, this._modelCache);
+    // Builder-only: produces the raw node for the dragged entry. The planner
+    // adopts + fully registers it on drag-enter (see `_startDraft`), so the
+    // dragged object is a real, selectable, gizmo-bearing placement.
+    this._ghost = new GhostManager(this._modelCache);
 
-    // Whenever the ghost appears, moves into view, hides, or is replaced,
+    // Whenever the preview appears, moves into view, hides, or is adopted,
     // refresh the OutlinePass selection so its silhouette tracks the change.
     this._ghost.onGhostStateChange = () => this._refreshOutline();
   }
@@ -757,13 +834,31 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     this._attachToViewer(viewer);
   }
 
-  /** Open the planner panel and enter planner mode. Used by the `?mode=planner`
-   *  deep-link so a published viewer boots straight into layout authoring. */
+  /** Backward-compat alias for entering planner mode (plan-198). Prefer
+   *  `viewer.modes.setMode('planner')`. Kept for the `?mode=planner` deep-link
+   *  path and any external/bookmarked callers. */
   openPlanner(): void {
-    const viewer = this._viewer;
-    if (!viewer) return;
+    this._viewer?.modes.setMode('planner');
+  }
+
+  /** plan-198: entering the planner workspace — open the library panel and
+   *  activate the edit bindings. Called by the ModeManager AFTER the plugin has
+   *  been (re-)enabled and any missed onModelLoaded replayed, so `_viewer` and
+   *  the live model state are available. */
+  onModeActivate(_mode: ModeId, viewer: RVViewer): void {
     viewer.leftPanelManager.open('layout-planner', LAYOUT_PANEL_WIDTH, 'right');
     this.setActive(true);
+  }
+
+  /** plan-198: leaving the planner workspace — deactivate the edit bindings and
+   *  close the panel. Called BEFORE the plugin is disabled (scene/model refs
+   *  still valid). setActive(false) tears down raycast filter, OutlinePass,
+   *  selection subscription, gizmo, etc. (see setActive). */
+  onModeDeactivate(_mode: ModeId | null, viewer: RVViewer): void {
+    this.setActive(false);
+    if (viewer.leftPanelManager.isOpen?.('layout-planner')) {
+      viewer.leftPanelManager.close('layout-planner');
+    }
   }
 
   private _attachToViewer(viewer: RVViewer): void {
@@ -889,11 +984,18 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
             } else {
               const selectedId = this.store.getSnapshot().selectedId;
               const obj = selectedId ? this._objectMap.get(selectedId) : null;
-              if (obj) this._dragDropTargets = this._collectDropTargetsWithTransport(obj);
+              if (obj) {
+                this._dragDropTargets = this._collectDropTargetsWithTransport(obj);
+                // Cache once: a Source re-dragged onto a belt centres laterally.
+                this._dragIsSource = subtreeHasComponent(obj, 'Source');
+              }
             }
           }
         } else {
           // Disarm bbox snap — drop frozen state, hide guide lines.
+          // NOTE: don't reset `_dragIsSource` here — onDragEnd fires AFTER this
+          // and still needs it for the final centering drop. It is recomputed at
+          // the start of every single-select drag, so it never goes stale.
           this._bboxSnap?.disarm();
           this._dragDropTargets = null;
 
@@ -946,7 +1048,7 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
           } else {
             const selectedId = this.store.getSnapshot().selectedId;
             const obj = selectedId ? this._objectMap.get(selectedId) : null;
-            if (obj) dropToSurface(obj, v.scene, this._dragDropTargets);
+            if (obj) dropToSurface(obj, v.scene, this._dragDropTargets, this._dragIsSource);
           }
         }
         // Broadcast per-frame drag tick so external plugins (snap-point
@@ -962,7 +1064,9 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
         if (snapPlugin?.getMagnetic?.()?.getLastPair?.()) {
           this._transformControls?.endDrag();
         }
-        v.markRenderDirty();
+        // markShadowsDirty (not just render) so the dragged asset's shadow
+        // tracks it continuously, instead of staying frozen at the start pose.
+        v.markShadowsDirty();
         // Store write + autoSave deferred to onDraggingChanged(false)
         // to avoid O(placed) allocations + JSON.stringify on every frame.
       };
@@ -979,9 +1083,9 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
         if (!selectedId) return;
         const obj = this._objectMap.get(selectedId);
         if (obj) {
-          dropToSurface(obj, this._viewer.scene, this._collectDropTargetsWithTransport(obj));
+          dropToSurface(obj, this._viewer.scene, this._collectDropTargetsWithTransport(obj), this._dragIsSource);
           this._writeSingleTransform(selectedId, obj);
-          this._viewer.markRenderDirty();
+          this._viewer.markShadowsDirty();
         }
       };
 
@@ -1031,15 +1135,18 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
         canvas: viewer.renderer.domElement,
         objectMap: this._objectMap,
         idByObject: this._idByObject,
-        ghost: this._ghost,
         floorPlane: this._floorPlane,
         transformControls: this._transformControls,
         modelRoot: this._getModelRoot(),
         getPlacementEntry: () => this._getPlacementEntry(),
         setDragEntry: (entry) => this.setDragEntry(entry),
         getDragEntry: () => this._dragEntry,
-        placeComponent: (entry, pos) => this.placeComponent(entry, pos),
-        placeAtSnap: (entry, target, ownSnapName) => this.placeAtSnap(entry, target, ownSnapName),
+        startDraft: (entry) => { void this._startDraft(entry); },
+        moveDraft: (rawX, rawZ) => this._moveDraft(rawX, rawZ),
+        commitDraft: (entry, coords) => this._commitDraft(entry, coords),
+        cancelDraft: () => this._cancelDraft(),
+        hideDraft: () => this._hideDraft(),
+        markDropCommitted: () => { this._dropCommitted = true; },
         removeSelected: () => this.removeSelected(),
         duplicateSelected: () => this.duplicateSelected(),
         copySelected: () => this.copySelected(),
@@ -1104,7 +1211,13 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     if (typeof lpm.subscribe === 'function' && typeof lpm.isOpen === 'function') {
       const lpmUnsub = lpm.subscribe(() => {
         if (this._active && !lpm.isOpen?.('layout-planner')) {
-          this.setActive(false);
+          // Panel closed or displaced by another plugin while planner was active.
+          // The library is OPTIONAL in planner mode: if we're in planner MODE,
+          // do NOTHING — stay in the mode with edit bindings active; the library
+          // is simply hidden (toggle it back via the toolbar Library button).
+          // Only in the pre-mode (standalone) path do we release the edit
+          // bindings so the simulation isn't left frozen.
+          if (viewer.modes?.activeMode !== 'planner') this.setActive(false);
         }
       });
       this._unsubs.push(lpmUnsub);
@@ -1277,7 +1390,6 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     this._viewer?.setSimulationPaused?.('layout-edit', false);
     // Reset edit-pause bookkeeping so a fresh attach starts clean.
     this._editPauseDepth = 0;
-    this._editWasRunning = false;
     this._dragEntryEditActive = false;
     this._viewer = null;
   }
@@ -1288,8 +1400,6 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
 
   /** Refcount of in-flight 3D edit gestures (drag / transform / placement). */
   private _editPauseDepth = 0;
-  /** Whether the sim was running when the FIRST overlapping edit gesture began. */
-  private _editWasRunning = false;
 
   /**
    * Begin an edit-gesture pause: dragging in an asset, moving a placed object,
@@ -1303,23 +1413,27 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     const v = this._viewer;
     if (!v) return;
     if (this._editPauseDepth === 0) {
-      this._editWasRunning = !v.isSimulationPaused;
       v.setSimulationPaused?.(LAYOUT_EDIT_PAUSE_REASON, true);
     }
     this._editPauseDepth++;
   }
 
   /**
-   * End an edit-gesture pause. When the last overlapping gesture finishes,
-   * release the edit reason. The sim then resumes ONLY if it was running before
-   * the edit AND nothing else holds it paused — `setSimulationPaused` keys are
-   * independent, so a manual `USER_PAUSE_REASON` engaged during the edit keeps
-   * the sim paused.
+   * End an edit-gesture pause. When the last overlapping gesture finishes, ALWAYS
+   * release the planner's own edit reason. `setSimulationPaused` keys are
+   * independent and refcounted per reason, so dropping `LAYOUT_EDIT_PAUSE_REASON`
+   * resumes the sim ONLY when no other reason (e.g. a manual `USER_PAUSE_REASON`)
+   * still holds it — which is exactly "resume iff it was running before the
+   * edit". Previously this was gated on a captured `_editWasRunning`, which
+   * LEAKED the edit pause whenever a gesture began while the sim was already
+   * paused: the reason was set in `_beginEditPause` but never released, so a
+   * later Play (which only toggles the user reason) could not start the sim in
+   * planner mode.
    */
   private _endEditPause(): void {
     if (this._editPauseDepth === 0) return;
     this._editPauseDepth--;
-    if (this._editPauseDepth === 0 && this._editWasRunning) {
+    if (this._editPauseDepth === 0) {
       this._viewer?.setSimulationPaused?.(LAYOUT_EDIT_PAUSE_REASON, false);
     }
   }
@@ -1331,7 +1445,7 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
 
     const viewer = this._viewer;
     if (!viewer) {
-      if (this._gridHelper) this._gridHelper.visible = active && this.store.gridEnabled;
+      if (this._gridHelper) this._gridHelper.visible = active && this.store.gridActive;
       return;
     }
 
@@ -1376,14 +1490,20 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
       if (viewer.transportManager) viewer.transportManager.preferCloneMU = true;
 
       // 2. Mute the default selection overlay — OutlinePass takes over the
-      //    selection visual via outlineManager. Hover stays as overlay-mesh
-      //    (faint green) since hover has many call sites and is per-frame.
+      //    selection visual via outlineManager. Hover also renders as an
+      //    OutlinePass silhouette (green) on WebGL via highlight(); the overlay
+      //    style fields below only apply to the WebGPU / fully-merged fallback.
       viewer.highlighter.setSelectionStyle(PLANNER_SELECTION_MUTE_STYLE);
       viewer.highlighter.setHoverStyle(PLANNER_HOVER_STYLE);
 
       // 3. Configure the outline pass for planner-mode green silhouette.
       //    No-op on WebGPU (outlineManager.available === false).
+      //    The hover channel gets a dimmer green than selection so the focused
+      //    (selected) object dominates. setHoverStyle (above) only pushed the
+      //    edge COLOR into the hover channel; override the full style here so the
+      //    reduced strength/glow take effect.
       viewer.outlineManager.setStyle(PLANNER_OUTLINE_STYLE);
+      viewer.outlineManager.setHoverStyle(PLANNER_HOVER_OUTLINE_STYLE);
 
       // 4. Subscribe to selection changes — drives TransformControls + multi-pivot
       //    + OutlinePass selectedObjects (via _refreshOutline).
@@ -1443,6 +1563,9 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
 
       viewer.highlighter.setSelectionStyle(null);
       viewer.highlighter.setHoverStyle(null);
+      // Restore the default hover-outline intensity (planner dimmed it) so HMI
+      // hover silhouettes keep their normal strength/glow.
+      viewer.outlineManager.setHoverStyle(DEFAULT_HOVER_OUTLINE_STYLE);
 
       viewer.raycastManager?.setAllowFilter(this._priorAllowFilter);
       this._priorAllowFilter = null;
@@ -1627,7 +1750,9 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
   /** Whether a library drag-in gesture currently holds an edit-pause. */
   private _dragEntryEditActive = false;
 
-  /** Set the entry being dragged from the library panel (for drag ghost). */
+  /** Set the entry being dragged from the library panel. Instantiates + fully
+   *  registers the live draft (the real placed object) and pauses the simulation
+   *  for the duration of the drag; on dragend, keeps-or-tears-down the draft. */
   setDragEntry(entry: LibraryCatalogEntry | null): void {
     this._dragEntry = entry;
     if (entry) {
@@ -1638,14 +1763,246 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
         this._dragEntryEditActive = true;
         this._beginEditPause();
       }
-      this._ghost.ensureForEntry(entry);
+      void this._startDraft(entry);
     } else {
-      this._ghost.hide();
+      // Drag gesture ended (fires AFTER onDrop). If the drop committed the draft,
+      // keep it — just reset the flag. Otherwise it's a true cancel (dropped
+      // outside, Esc, released off-canvas): tear down the uncommitted draft.
+      // Either way, balance the edit-pause.
+      if (this._dropCommitted) {
+        this._dropCommitted = false;
+      } else {
+        this._cancelDraft();
+      }
       if (this._dragEntryEditActive) {
         this._dragEntryEditActive = false;
         this._endEditPause();
       }
     }
+  }
+
+  /**
+   * Instantiate + FULLY register the dragged entry as a live draft (real placed
+   * object: processExtras, drives, TransportSurface component, snap registration,
+   * raycast), select it (so the FloorGizmo + TransportSurface gizmo appear), and
+   * cache its drop-to-surface targets. NOT committed to the store / undo log —
+   * `_commitDraft` does that at drop, `_cancelDraft` tears it down on cancel.
+   * Idempotent + guarded against concurrent async builds.
+   */
+  private async _startDraft(entry: LibraryCatalogEntry): Promise<void> {
+    if (this._draft?.entry.id === entry.id) return; // already drafting this entry
+    if (this._startingDraft) return;                // a build is already in flight
+    // Splats aren't dragged as live drafts (place-at-origin via placeComponent).
+    if (entry.splatUrl) return;
+
+    this._startingDraft = true;
+    try {
+      await this._ghost.ensureForEntry(entry);
+      if (!this._viewer) return;
+      // Entry switched / build failed while we awaited.
+      if (this._ghost.entryId !== entry.id || !this._ghost.ghost) return;
+      // Re-check after the await — a draft may have appeared / changed.
+      if (this._draft?.entry.id === entry.id) return;
+      if (this._draft) this._cancelDraft(); // a different entry was lingering
+
+      const node = this._ghost.adopt()!;
+      node.visible = false; // revealed on first move (avoids origin flash)
+      const id = crypto.randomUUID();
+      // FULL prep + registration (markers/shadows/pivot/align/render-mode +
+      // processExtras/drives/snaps/raycast). Makes it a real layout instance.
+      this._addPlacedToScene(node, id, entry.name, entry.id);
+
+      this._draft = { id, node, entry, positioned: false, isSource: subtreeHasComponent(node, 'Source') };
+      this._draftSnapMatch = null;
+      this._draftDropTargets = this.store.dropToSurface
+        ? this._collectDropTargetsWithTransport(node)
+        : null;
+    } finally {
+      this._startingDraft = false;
+    }
+  }
+
+  /**
+   * Move the live draft to a raw floor XZ, applying the full re-drag pipeline:
+   * bbox + grid snap → snap-point port mating (self-excluded) → drop-to-surface
+   * (when not mating a port). Selects the draft on its first positioning so the
+   * gizmos attach at the cursor (not at the origin). Returns false (no-op) until
+   * the async build has produced the draft.
+   */
+  private _moveDraft(rawX: number, rawZ: number): boolean {
+    const draft = this._draft;
+    const viewer = this._viewer;
+    if (!draft || !viewer) return false;
+    const node = draft.node;
+
+    // Lazily arm magnetic bbox snap for this draft (idempotent; armForDrag
+    // excludes the moving root + its descendants → no self-snap).
+    if (this._bboxSnap && !this._bboxSnap.isArmed) this._bboxSnap.armForDrag(node);
+
+    // bbox + grid snap on XZ (mirrors the FloorGizmo re-drag).
+    let nx = rawX;
+    let nz = rawZ;
+    const custom = this._bboxSnap?.applySnap(nx, nz, 'free') ?? null;
+    if (custom?.snappedX) nx = custom.x;
+    if (custom?.snappedZ) nz = custom.z;
+    if (this.store.gridEnabled) {
+      const step = this.store.gridSizeMm / 1000;
+      if (step > 0) {
+        if (!custom?.snappedX) nx = Math.round(nx / step) * step;
+        if (!custom?.snappedZ) nz = Math.round(nz / step) * step;
+      }
+    }
+
+    // Baseline pose before the snap-point probe (Y=0, no rotation).
+    node.position.set(nx, 0, nz);
+    node.rotation.set(0, 0, 0);
+    node.visible = true;
+    node.updateMatrixWorld(true);
+
+    // Snap-point port mating — self-excluded so the draft's OWN ports (now in
+    // the registry) don't match themselves. Overrides XZ + rotation + Y.
+    const registry = viewer.getPlugin<SnapPointPlugin>('snap-point')?.getRegistry();
+    let match: GhostSnapMatch | null = null;
+    if (registry && registry.size > 0) {
+      match = findBestGhostSnap(node, registry, DEFAULT_MAGNET_RADIUS_M, node);
+      if (match) applyGhostSnapAlignment(node, match);
+    }
+    this._draftSnapMatch = match;
+
+    // Drop-to-surface when not mating a port (snap defines the full pose).
+    // Sources additionally snap to the belt's lateral centre line when they
+    // land on a transport surface, so spawned MUs start centred.
+    if (!match && this.store.dropToSurface && this._draftDropTargets) {
+      dropToSurface(node, viewer.scene, this._draftDropTargets, draft.isSource);
+    }
+
+    // Select once positioned so the gizmos appear at the cursor, not the origin.
+    if (!draft.positioned) {
+      draft.positioned = true;
+      this._selectObject(draft.id);
+    }
+
+    // markShadowsDirty so the draft's shadow tracks it as it's positioned.
+    viewer.markShadowsDirty();
+    return true;
+  }
+
+  /**
+   * Commit the live draft (drop / click): the object is already registered +
+   * positioned, so this only records the store + undo op and (for a snap match)
+   * marks occupancy/pairing. Ensures the draft exists first (a drop can beat the
+   * async build) and re-positions to the final `coords`. Falls back to a fresh
+   * `placeComponent` re-clone only if the build failed entirely.
+   */
+  private async _commitDraft(
+    entry: LibraryCatalogEntry,
+    coords: [number, number] | null,
+  ): Promise<string | null> {
+    if (!this._viewer) return null;
+
+    // Drop may arrive before the async build/register settled — ensure the draft.
+    if (!this._draft || this._draft.entry.id !== entry.id) {
+      await this._startDraft(entry);
+    }
+    if (!this._draft) {
+      // Build failed → legacy re-clone fallback at the drop position.
+      try {
+        const pos: [number, number, number] = coords ? [coords[0], 0, coords[1]] : [0, 0, 0];
+        return await this.placeComponent(entry, pos);
+      } catch (err) {
+        console.error('[LayoutPlanner] Draft commit fallback failed:', err);
+        return null;
+      }
+    }
+
+    // Position at the final drop location (sets `_draftSnapMatch`).
+    if (coords) this._moveDraft(coords[0], coords[1]);
+
+    const { id, node } = this._draft;
+
+    // Snap occupancy + pairing — the draft's snaps are already registered, so we
+    // only mark occupancy (no re-register).
+    const match = this._draftSnapMatch;
+    if (match && !match.targetSnap.occupied) {
+      const registry = this._viewer.getPlugin<SnapPointPlugin>('snap-point')?.getRegistry();
+      if (registry) {
+        smMarkSnapOccupied(this._sceneMutDeps, node, id, match.targetSnap, match.ghostSnap.name, registry);
+        this._scheduleSnapPairingRebuild();
+      }
+    }
+
+    node.visible = true;
+    // Mirror live node state into the marker components (Inspector Splat/Drive).
+    syncLayoutMarkerComponents(node, true);
+
+    // Broadcast placement so transform-coupled subscribers sync up.
+    const placedPath = this._viewer.registry?.getPathForNode(node);
+    if (placedPath) {
+      this._viewer.emit('layout-transform-update', {
+        path: placedPath,
+        position: [node.position.x, node.position.y, node.position.z],
+        rotation: [
+          MathUtils.radToDeg(node.rotation.x),
+          MathUtils.radToDeg(node.rotation.y),
+          MathUtils.radToDeg(node.rotation.z),
+        ],
+      });
+    }
+
+    const comp: PlacedComponent = {
+      id,
+      catalogId: entry.id,
+      glbUrl: entry.glbUrl ?? '',
+      label: entry.name,
+      position: [node.position.x, node.position.y, node.position.z],
+      rotation: [
+        MathUtils.radToDeg(node.rotation.x),
+        MathUtils.radToDeg(node.rotation.y),
+        MathUtils.radToDeg(node.rotation.z),
+      ],
+      scale: [node.scale.x, node.scale.y, node.scale.z],
+    };
+    this.store.addComponent(comp);
+    this.store.autoSave();
+    this._refreshHierarchy();
+
+    // Record the placement in the SceneStore op log for undo/redo.
+    emitPlannerOp(this._viewer, {
+      id: opId(), ts: Date.now(), schemaV: 1,
+      kind: 'addPlacement', placement: { ...comp },
+    });
+
+    // Place-one-at-a-time UX: exit placement mode + clear draft/drag state.
+    this.store.setPlacementMode(null);
+    this._dragEntry = null;
+    this._bboxSnap?.disarm();
+    this._draft = null;
+    this._draftDropTargets = null;
+    this._draftSnapMatch = null;
+
+    // The draft was already selected during the drag — keep the selection.
+    this._viewer.markShadowsDirty();
+    return id;
+  }
+
+  /** Hide the draft node without tearing it down (drag left the window — re-
+   *  entry reuses it). */
+  private _hideDraft(): void {
+    if (this._draft) this._draft.node.visible = false;
+    this._viewer?.markRenderDirty();
+  }
+
+  /** Fully tear down the uncommitted live draft (cancelled drag / Esc / mode off). */
+  private _cancelDraft(): void {
+    const draft = this._draft;
+    if (!draft) return;
+    this._removePlacedFromScene(draft.id); // full teardown (no undo op)
+    this._selectObject(null);
+    this._bboxSnap?.disarm();
+    this._draft = null;
+    this._draftDropTargets = null;
+    this._draftSnapMatch = null;
+    this._viewer?.markRenderDirty();
   }
 
   /** Place a component in the scene from a catalog entry. */
@@ -1669,32 +2026,9 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
       node = await (splatPlugin as unknown as import('./gaussian-splat-plugin-type').GaussianSplatPluginApi).loadSplat(entry.splatUrl, fileExt);
       isSplat = true;
     } else if (entry.virtual && entry.desType) {
-      // Virtual DES component — try component's createGizmo(), fall back to generic wireframe
-      const gizmoSize = entry.gizmoSize ?? [500, 500, 500] as [number, number, number];
-      let gizmoCreated = false;
-
-      // Look for registered component class with createGizmo
-      try {
-        const { getRegisteredFactories } = await import(
-          '../../core/engine/rv-component-registry'
-        );
-        const factories = getRegisteredFactories();
-        const factory = factories.get(entry.desType);
-        if (factory && typeof (factory as any).ctor?.createGizmo === 'function') {
-          node = (factory as any).ctor.createGizmo(gizmoSize);
-          gizmoCreated = true;
-        }
-      } catch { /* ignore — use fallback */ }
-
-      if (!gizmoCreated) {
-        const { createVirtualPlaceholder } = await import('./ghost-manager');
-        node = createVirtualPlaceholder(gizmoSize, entry.desType);
-      }
-
-      node.name = entry.name;
-      node.userData.realvirtual = {
-        [entry.desType]: entry.desConfig ?? {},
-      };
+      // Virtual DES component — same builder the drag preview uses (component
+      // createGizmo() with a wireframe fallback + name/realvirtual stamping).
+      node = await buildVirtualNode(entry);
     } else {
       // Standard GLB-based component
       node = await this._modelCache.getOrLoad(entry.glbUrl ?? '');
@@ -1888,7 +2222,8 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
 
     this.store.autoSave();
     this._refreshHierarchy();
-    viewer.markRenderDirty();
+    // markShadowsDirty so the deleted assets' shadows clear from the map.
+    viewer.markShadowsDirty();
   }
 
   /** Duplicate the currently selected component. */
@@ -2257,7 +2592,8 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     if (!this._objectMap.has(id)) return;
     this._removePlacedFromScene(id);
     this.store.removeComponent(id);
-    if (this._viewer) this._viewer.markRenderDirty();
+    // markShadowsDirty so the removed asset's shadow clears from the map.
+    if (this._viewer) this._viewer.markShadowsDirty();
   }
 
   /**
@@ -2314,7 +2650,8 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     // Three.js node only (the materialised view from ops carries the canonical
     // scale and is re-applied on scene reload).
     this.store.updateTransform(id, position, rotation);
-    if (this._viewer) this._viewer.markRenderDirty();
+    // markShadowsDirty so the moved asset's shadow follows the new transform.
+    if (this._viewer) this._viewer.markShadowsDirty();
   }
 
   /**
@@ -2507,17 +2844,19 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
   toggleGrid(): void {
     const next = !this.store.gridEnabled;
     this.store.setGridEnabled(next);
-    if (!this._gridHelper && next && this._viewer) {
+    // Grid is drawn only when enabled AND a non-zero step is set (gridActive).
+    if (!this._gridHelper && next && this.store.gridSizeMm > 0 && this._viewer) {
       this._createGridHelper();
     }
     if (this._gridHelper) {
-      this._gridHelper.visible = next && this._active;
+      this._gridHelper.visible = next && this._active && this.store.gridSizeMm > 0;
     }
     // Update FloorGizmo snap settings immediately so the currently
     // selected object respects the new grid state without re-selecting.
     if (this._transformControls) {
       if (next) {
-        this._transformControls.setTranslationSnap(this.store.gridSizeMm / 1000);
+        // 0 mm step → translation snapping off (null), rotation snap still on.
+        this._transformControls.setTranslationSnap(this.store.gridActive ? this.store.gridSizeMm / 1000 : null);
         this._transformControls.setRotationSnap(MathUtils.degToRad(this.store.rotationSnapDeg));
       } else {
         this._transformControls.setTranslationSnap(null);
@@ -2530,18 +2869,20 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
   /** Update grid size — rebuilds the grid overlay and updates snap settings. */
   setGridSize(mm: number): void {
     this.store.setGridSize(mm);
+    const step = this.store.gridSizeMm; // clamped to >= 0 by the store
     // Rebuild grid overlay with new spacing
     if (this._gridHelper) {
       disposeSubtree(this._gridHelper);
       this._gridHelper.removeFromParent();
       this._gridHelper = null;
     }
-    if (this.store.gridEnabled && this._viewer) {
+    // 0 mm → no grid drawn (also avoids a divide-by-zero in _createGridHelper).
+    if (this.store.gridActive && this._viewer) {
       this._createGridHelper();
     }
-    // Update snap settings for the FloorGizmo
+    // Update snap settings for the FloorGizmo: 0 mm turns translation snap off.
     if (this._transformControls && this.store.gridEnabled) {
-      this._transformControls.setTranslationSnap(mm / 1000);
+      this._transformControls.setTranslationSnap(step > 0 ? step / 1000 : null);
     }
     if (this._viewer) this._viewer.markRenderDirty();
   }
@@ -2779,6 +3120,9 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
   }
 
   private _createGridHelper(): void {
+    // 0 mm step means translation snapping is off — no grid is drawn (guards
+    // against divide-by-zero / infinite divisions below).
+    if (this.store.gridSizeMm <= 0) return;
     const gridStepM = this.store.gridSizeMm / 1000; // e.g. 0.5 for 500mm
     // Size must be an exact multiple of the grid step so lines land on
     // multiples of gridStepM from the center — matching the checkerboard
@@ -2786,7 +3130,9 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     const rawSize = 50;
     const size = Math.floor(rawSize / gridStepM) * gridStepM;
     const divisions = Math.round(size / gridStepM);
-    this._gridHelper = new GridHelper(size, divisions, 0x444444, 0x333333);
+    // Grey grid: brighter center line, mid-grey grid lines (was too dark at
+    // 0x444444 / 0x333333 against the floor).
+    this._gridHelper = new GridHelper(size, divisions, 0x999999, 0x808080);
     this._gridHelper.position.y = 0.001;
     // Align grid center with the checkerboard floor center (model bbox center)
     const groundMesh = this._viewer?.groundMesh;
@@ -3097,7 +3443,8 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     // Persist the new transform via the same path the gizmo uses on
     // drag-end, so undo / autosave / multi-user sync all stay coherent.
     this._writeSingleTransform(placedId, obj);
-    v.markRenderDirty();
+    // markShadowsDirty so the flipped asset's shadow matches its new pose.
+    v.markShadowsDirty();
     return true;
   }
 
@@ -3144,7 +3491,7 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
   // ─── Internal: Catalog Loading ──────────────────────────────────
 
   private async _loadCatalogs(): Promise<void> {
-    await plLoadBundledLibrary(this.store);
+    const bundledUrl = await plLoadBundledLibrary(this.store);
 
     const constructorUrls = this._options.catalogUrls ?? [];
     const params = new URLSearchParams(window.location.search);
@@ -3158,6 +3505,14 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     await this.store.restoreFromStorage();
     await this.store.restoreLocalFolder();
     this.store.loadAutoSave();
+
+    // Always surface the bundled standard library when the planner opens. A
+    // persisted active tab restored above (e.g. a previously-default remote /
+    // GitHub catalog still saved in the user's storage) must not shadow the
+    // shipped library.
+    if (bundledUrl && this.store.getSnapshot().catalogUrls.includes(bundledUrl)) {
+      this.store.setActiveTab(bundledUrl);
+    }
 
     // Re-place auto-saved components under model root
     const saved = this.store.getSnapshot().placed;

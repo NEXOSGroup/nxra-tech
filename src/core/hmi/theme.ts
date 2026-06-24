@@ -25,7 +25,11 @@ export const rvDarkTheme = createTheme({
     error:      { main: '#ef5350' },
     background: {
       default: 'rgba(0, 0, 0, 0)',
-      paper: 'rgba(18, 18, 18, 0.65)',
+      // Brightest of three tiers — the glassy default for everything FLOATING
+      // over the 3D viewport (KPI cards, message tiles, search bar, floating
+      // tool toolbar, dialogs…). Windows (LeftPanel) and the outer toolbars are
+      // progressively darker. Lower opacity + lighter base = brighter glass.
+      paper: 'rgba(30, 30, 30, 0.6)',
     },
   },
   typography: {
@@ -51,7 +55,7 @@ export const rvDarkTheme = createTheme({
         root: {
           backdropFilter: 'blur(16px)',
           backgroundImage: 'none !important',
-          backgroundColor: 'rgba(18, 18, 18, 0.65) !important',
+          backgroundColor: 'rgba(30, 30, 30, 0.6) !important',
           // Reduce blur on touch devices for GPU performance
           '@media (hover: none) and (pointer: coarse)': {
             backdropFilter: 'blur(8px)',

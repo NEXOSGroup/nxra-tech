@@ -1,69 +1,54 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
-import { useMemo, useState, useSyncExternalStore } from 'react';
-import { Box, Paper, Typography } from '@mui/material';
-import { Circle } from '@mui/icons-material';
+import { useMemo, useState } from 'react';
+import { Box, Paper } from '@mui/material';
 import { useViewer } from '../../hooks/use-viewer';
 import { useSlot } from '../../hooks/use-slot';
-import { useMcpBridge } from '../../hooks/use-mcp-bridge';
-import { useEditorPlugin } from '../../hooks/use-editor-plugin';
-import { SETTINGS_PANEL_WIDTH, INSPECTOR_PANEL_WIDTH } from './layout-constants';
+import { ACTIVITY_BAR_WIDTH, FLOATING_TOP_MARGIN, LEFT_PANEL_ZINDEX } from './layout-constants';
+import { useLeftWindowWidth } from '../../hooks/use-left-window-width';
+import { useViewportInsets } from '../../hooks/use-viewport-insets';
 import { useMobileLayout } from '../../hooks/use-mobile-layout';
 import { WelcomeModal } from './WelcomeModal';
 import { useCustomBranding } from './branding-store';
 import { useKioskHasTour, startKioskFromWelcome } from '../../plugins/kiosk-plugin';
 import { useActiveContexts, evaluateVisibilityRule } from './ui-context-store';
+import { useMode } from '../../hooks/use-mode';
 
 /* Logo URL: use BASE_URL so it resolves correctly under sub-folder deploys (e.g. Bunny CDN /demo/) */
 const logoUrl = `${import.meta.env.BASE_URL}logo.png`;
 
 /**
- * BrandingContent — renders either the default realvirtual branding or
- * a custom logo followed by "powered by realvirtual" when custom branding is set.
+ * BrandingContent — the logo image for the activity bar: the default realvirtual
+ * mark, or a custom logo when custom branding is set. Constrained to fit the
+ * narrow (30px) vertical activity bar — icon only, no text.
  */
-function BrandingContent({ isMobile }: { isMobile: boolean }) {
+function BrandingContent() {
   const custom = useCustomBranding();
 
-  if (!custom) {
-    // Default: realvirtual logo only (no text label)
-    return <img src={logoUrl} alt="realvirtual" style={{ height: 18, width: 18 }} />;
+  // No branding, or branding that doesn't override the activity-bar mark →
+  // keep the default realvirtual logo. A project sets `logoUrl` only when it
+  // wants its own mark here; Mauser leaves it so the platform logo stays.
+  if (!custom?.logoUrl) {
+    return <img src={logoUrl} alt="realvirtual" style={{ height: 24, width: 24 }} />;
   }
-
-  // Custom branding: [Custom Logo] | [powered by rv-logo realvirtual]
-  const logoHeight = custom.logoHeight ?? 20;
   return (
-    <>
-      <img src={custom.logoUrl} alt={custom.name ?? 'Logo'} style={{ height: logoHeight, width: 'auto', maxWidth: 180, objectFit: 'contain' }} />
-      {!isMobile && (
-        <Box sx={{
-          display: 'flex', alignItems: 'center', gap: 0.4,
-          ml: 0.75, pl: 0.75,
-          borderLeft: '1px solid rgba(255,255,255,0.15)',
-        }}>
-          <Typography sx={{ fontSize: 8, color: 'rgba(255,255,255,0.4)', whiteSpace: 'nowrap', lineHeight: 1 }}>
-            powered by
-          </Typography>
-          <img src={logoUrl} alt="realvirtual" style={{ height: 11, width: 11, opacity: 0.5 }} />
-        </Box>
-      )}
-    </>
+    <img
+      src={custom.logoUrl}
+      alt={custom.name ?? 'Logo'}
+      style={{ height: 24, width: 'auto', maxWidth: 38, objectFit: 'contain' }}
+    />
   );
 }
 
-// ── Logo Badge (inline — embedded in the top-left TopBar Paper) ─────────
+// ── Logo Badge (the top mark of the left activity bar) ──────────────────
 
-/** Logo + connection status badge — rendered as the leftmost element of the
- *  TopBar's button group (no longer a separate fixed-position panel). */
+/** Clickable realvirtual (or custom) logo at the top of the activity bar.
+ *  Opens the About / Welcome modal. Icon-only to fit the 30px vertical bar. */
 const WELCOME_DISMISSED_KEY = 'rv-welcome-dismissed';
 
 export function LogoBadge() {
   const [aboutOpen, setAboutOpen] = useState(() => !localStorage.getItem(WELCOME_DISMISSED_KEY));
-  const isMobile = useMobileLayout();
-  const mcp = useMcpBridge();
-
-  // Hide entirely on mobile — top-left toolbar is already cramped.
-  if (isMobile) return null;
 
   return (
     <>
@@ -71,33 +56,17 @@ export function LogoBadge() {
         sx={{
           display: 'flex',
           alignItems: 'center',
-          gap: 0.75,
-          px: 0.75,
+          justifyContent: 'center',
+          width: '100%',
           py: 0.5,
-          mr: 0.25,
-          borderRight: '1px solid rgba(255,255,255,0.08)',
           cursor: 'pointer',
           borderRadius: 1,
-          '&:hover': { backgroundColor: 'rgba(255,255,255,0.04)' },
+          '&:hover': { backgroundColor: 'rgba(255,255,255,0.06)' },
         }}
         onClick={() => setAboutOpen(true)}
         title="About"
       >
-        <BrandingContent isMobile={isMobile} />
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-          <Circle sx={{ fontSize: 6, color: '#66bb6a' }} />
-          <Typography sx={{ fontSize: 10, fontWeight: 500, color: 'rgba(102,187,106,0.85)', letterSpacing: 0.3 }}>
-            online
-          </Typography>
-        </Box>
-        {mcp.connected && (
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-            <Circle sx={{ fontSize: 6, color: '#66bb6a' }} />
-            <Typography sx={{ fontSize: 10, fontWeight: 500, color: 'rgba(102,187,106,0.85)', letterSpacing: 0.3 }}>
-              ai
-            </Typography>
-          </Box>
-        )}
+        <BrandingContent />
       </Box>
 
       <WelcomeModalHost
@@ -120,56 +89,49 @@ function WelcomeModalHost({ open, onClose }: { open: boolean; onClose: () => voi
   );
 }
 
-// ── Button Panel (slot-driven button group) ─────────────────────────────
+// ── Button Panel (floating contextual-tool toolbar) ─────────────────────
 
-/** Slot-driven button group sidebar. */
+/**
+ * ButtonPanel — the FLOATING left toolbar for contextual mode TOOLS contributed
+ * via the `button-group` slot (e.g. the Layout Planner's grid/snap/delete tools,
+ * measurement, …). It floats over the 3D view and shifts right to clear the
+ * activity bar and any open left-docked window.
+ *
+ * NOT the activity bar — window-opener buttons live in ActivityBar.tsx.
+ */
 export function ButtonPanel() {
   const viewer = useViewer();
   const allEntries = useSlot('button-group');
 
-  // Active UI contexts (planner, fpv, xr, …). Drives entry visibility
-  // filtering below.
+  // Active UI contexts (planner, fpv, xr, …). Drives entry visibility filtering.
   const contexts = useActiveContexts();
 
   /**
    * Filter slot entries to those that should currently render.
-   *
-   * Rules:
-   *  - Entry has explicit `visibilityRule` → evaluate it directly
-   *    (`shownOnlyIn` + `hiddenIn` precedence as elsewhere in the codebase).
-   *  - No rule → visible by default, EXCEPT when `'planner'` is active. In
-   *    planner mode the toolbar shows only planner-specific buttons (those
-   *    that opt in via `visibilityRule: { shownOnlyIn: ['planner'] }`); all
-   *    other model/scene plugins (Drives, Sensors, Alarms, …) get hidden so
-   *    the user has a focused, distraction-free layout-editing workspace.
+   *  - Entry has explicit `visibilityRule` → evaluate it directly.
+   *  - No rule → visible by default, EXCEPT in a "focused" workspace mode
+   *    (any active mode other than the default `hmi`, e.g. Planner or DES),
+   *    where only buttons that opt in via a visibility rule are shown.
    */
+  const { active: activeMode } = useMode();
   const entries = useMemo(() => {
-    const inPlanner = contexts.has('planner');
+    const focusedMode = activeMode !== null && activeMode !== 'hmi';
     return allEntries.filter((entry) => {
       if (entry.visibilityRule) {
         return evaluateVisibilityRule(entry.visibilityRule, contexts);
       }
-      return !inPlanner;
+      return !focusedMode;
     });
-  }, [allEntries, contexts]);
-
-  // Check if hierarchy panel is open (and its width) to shift the button group right
-  const { state: editorState } = useEditorPlugin();
+  }, [allEntries, contexts, activeMode]);
 
   const isMobile = useMobileLayout();
 
-  // Read leftPanelManager for panels managed outside of the extras-editor plugin
-  const lpm = viewer.leftPanelManager;
-  const panelSnapshot = useSyncExternalStore(lpm.subscribe, lpm.getSnapshot);
-
-  // Shift right for hierarchy panel, property inspector, or settings panel
-  const inspectorExtra = editorState.panelOpen && editorState.showInspector && editorState.selectedNodePath ? INSPECTOR_PANEL_WIDTH + 8 : 0;
-  const settingsWidth = editorState.settingsOpen ? SETTINGS_PANEL_WIDTH + 8 + 8 : 0; // panel + 8px left + 8px gap
-  const hierarchyWidth = editorState.panelOpen && !editorState.settingsOpen ? 8 + editorState.panelWidth + 8 + inspectorExtra : 0;
-  // Also account for panels managed by leftPanelManager (e.g. machine-control)
-  const lpmWidth = (panelSnapshot.activePanel && panelSnapshot.activePanel !== 'settings' && panelSnapshot.activePanel !== 'hierarchy')
-    ? 8 + panelSnapshot.activePanelWidth + 8 : 0;
-  const buttonLeftOffset = Math.max(settingsWidth, hierarchyWidth, lpmWidth) || 12;
+  // Shift the floating toolbar right to clear the activity bar AND any open
+  // left-docked window (shared with the floating mode switcher).
+  const windowWidth = useLeftWindowWidth();
+  const buttonLeftOffset = ACTIVITY_BAR_WIDTH + (windowWidth > 0 ? windowWidth + 8 : 8);
+  // Clear the optional top title bar when present.
+  const topInset = useViewportInsets().top;
 
   if (entries.length === 0) return null;
 
@@ -180,7 +142,7 @@ export function ButtonPanel() {
         left: 0,
         right: 0,
         bottom: 0,
-        zIndex: 1200,
+        zIndex: LEFT_PANEL_ZINDEX,
         display: 'flex',
         justifyContent: 'center',
         pointerEvents: 'none',
@@ -188,13 +150,12 @@ export function ButtonPanel() {
       } : {
         position: 'fixed',
         left: buttonLeftOffset,
-        top: 44,
+        top: topInset + FLOATING_TOP_MARGIN + 6,
         bottom: 8,
-        zIndex: 1200,
+        zIndex: LEFT_PANEL_ZINDEX,
         display: 'flex',
         alignItems: 'center',
         pointerEvents: 'none',
-        transition: 'left 0.2s ease',
       }}
     >
       <Paper
@@ -213,7 +174,6 @@ export function ButtonPanel() {
             WebkitOverflowScrolling: 'touch',
             scrollbarWidth: 'none',
             '&::-webkit-scrollbar': { display: 'none' },
-            // Prevent any child button from shrinking
             '& > *': { flexShrink: 0 },
           }),
         }}

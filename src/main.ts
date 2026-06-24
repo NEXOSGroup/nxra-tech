@@ -16,8 +16,10 @@ import { RVViewer } from './core/rv-viewer';
 import type { RVExtrasOverlay } from './core/engine/rv-extras-overlay-store';
 import { debug, logInfo } from './core/engine/rv-debug';
 import { initTestRunner } from './rv-test-runner';
-import { fetchAppConfig, setAppConfig, initAnalytics } from './core/rv-app-config';
+import { fetchAppConfig, setAppConfig, initAnalytics, trackAnalyticsEvent } from './core/rv-app-config';
+import { requireAnalyticsConsent } from './core/hmi/consent-gate';
 import { loadVisualSettings } from './core/hmi/visual-settings-store';
+import { loadPublishedPresets, seedInitialVisualPreset } from './core/hmi/visual-presets';
 import { isMobileDevice } from './hooks/use-mobile-layout';
 import { activateContext, registerUIElement } from './core/hmi/ui-context-store';
 import { isSupported as isFsApiSupported, listSubfolderFiles, readFileAsUrl } from './core/engine/rv-local-filesystem';
@@ -26,9 +28,10 @@ import { isSupported as isFsApiSupported, listSubfolderFiles, readFileAsUrl } fr
 import { initHMI } from '@rv-private/custom/hmi-entry';
 import { registerPrivatePlugins } from '@rv-private/private-plugins';
 
-// Hide AGPL watermark for commercial/private builds
-// (private projects show "powered by realvirtual" in the logo badge instead)
-if (__RV_COMMERCIAL__ || __RV_HAS_PRIVATE__) {
+// Hide AGPL watermark only for explicitly commercial builds (RV_COMMERCIAL=1).
+// Presence of the private folder alone no longer hides it, so the AGPL
+// watermark stays visible in normal dev/private builds as well.
+if (__RV_COMMERCIAL__) {
   const wm = document.getElementById('rv-watermark');
   if (wm) wm.style.display = 'none';
 }
@@ -38,6 +41,8 @@ import { SensorMonitorPlugin } from './plugins/sensor-monitor-plugin';
 import { TransportStatsPlugin } from './plugins/transport-stats-plugin';
 import { CameraEventsPlugin } from './plugins/camera-events-plugin';
 import { DriveOrderPlugin } from './plugins/drive-order-plugin';
+import { IKPathVisualizerPlugin } from './plugins/ik-path-visualizer-plugin';
+import { IKTargetEditPlugin } from './plugins/ik-target-edit-plugin';
 import { CameraStartPosPlugin } from './plugins/camera-startpos-plugin';
 import { KioskPlugin } from './plugins/kiosk-plugin';
 import { AdaptiveNavPlugin } from './plugins/adaptive-nav-plugin';
@@ -55,6 +60,9 @@ import { SnapFlipIconOverlay } from './plugins/snap-point/snap-flip-icon-overlay
 
 // SimController: Play/Pause-Toggle + Reset (TopBar toolbar widget).
 import { SimControllerPlugin } from './plugins/sim-controller';
+
+// DES workspace shell (plan-198) — UI surface for the DES mode.
+import { DESWorkspacePlugin } from './plugins/des/des-workspace-plugin';
 
 // Scene window: multi-scene browser + layout registry
 import { initSceneStore } from './core/hmi/scene/scene-store-singleton';
@@ -102,12 +110,27 @@ function showLoadingOverlay(modelName: string) {
 }
 
 function setLoadingProgress(loaded: number, total: number) {
+  // Download finished — what's left is GLB parse + scene construction, which
+  // report no byte progress. Hand off to the indeterminate "preparing" state so
+  // the bar doesn't sit deceptively full while seconds of work remain.
+  if (total > 0 && loaded >= total) {
+    setLoadingPreparing();
+    return;
+  }
   const pct = Math.round((loaded / total) * 100);
   loadingProgressBar.classList.remove('indeterminate');
   loadingProgressBar.style.width = `${pct}%`;
   const loadedMB = (loaded / (1024 * 1024)).toFixed(1);
   const totalMB = (total / (1024 * 1024)).toFixed(1);
   loadingProgressPct.textContent = `${loadedMB} / ${totalMB} MB`;
+}
+
+// Post-download phase: bytes are in, now parsing the GLB + building the scene.
+// Animated (indeterminate) bar + label so the user knows work is still ongoing.
+function setLoadingPreparing() {
+  loadingProgressBar.classList.add('indeterminate');
+  loadingProgressBar.style.width = '';
+  loadingProgressPct.textContent = 'Preparing scene…';
 }
 
 function hideLoadingOverlay() {
@@ -165,7 +188,25 @@ async function init() {
   // Set singleton — from here all stores have access via getAppConfig()
   setAppConfig(appConfig);
 
-  // --- Analytics (only when configured in settings.json) ---
+  // Load shipped visual presets (public/presets/index.json). Non-blocking for
+  // correctness — the preset picker re-reads on open — but awaited here so the
+  // first Settings open already has them. Missing manifest → no-op.
+  await loadPublishedPresets();
+
+  // Fresh install: seed the "Default" visual preset as the initial look so the
+  // viewer boots on Default (and the Visual-settings dropdown shows it) instead
+  // of "Custom". No-op once the user has saved visual settings. Must run after
+  // loadPublishedPresets() (needs the preset list) and before the first
+  // loadVisualSettings() below.
+  seedInitialVisualPreset('Default');
+
+  // --- Analytics consent gate ---
+  // When a tracker is configured (settings.json analytics.googleAnalyticsId), GA
+  // may not load without prior opt-in (GDPR / §25 TDDDG). Block boot until the
+  // user accepts — without consent the app does not run. Private deploys with no
+  // tracker id skip the gate entirely (this resolves immediately).
+  await requireAnalyticsConsent();
+  // Inject GA now that consent is in place (no-op when no id is configured).
   initAnalytics();
 
   // --- Bootstrap context-aware UI visibility (from settings.json `ui` key) ---
@@ -185,7 +226,19 @@ async function init() {
     }
   }
 
-  const container = document.getElementById('app')!;
+  const app = document.getElementById('app')!;
+
+  // Dedicated viewport container holding ONLY the WebGL canvas. It is full-bleed
+  // by default; on desktop the HMI's <ViewportFrame> reactively insets it (left
+  // for the activity bar + an open left window, right for an open right window)
+  // so the 3D renders only in the central viewport region — never behind the
+  // chrome. The renderer's ResizeObserver watches this container, so insetting it
+  // resizes the canvas + camera aspect automatically. Loading overlay / watermark
+  // stay on #app (full-screen), unaffected.
+  const container = document.createElement('div');
+  container.id = 'rv-viewport';
+  container.style.cssText = 'position:fixed; inset:0;';
+  app.appendChild(container);
 
   // --- Resolve antialias BEFORE renderer creation (constructor-only param) ---
   const initialSettings = loadVisualSettings();
@@ -210,6 +263,18 @@ async function init() {
 
   // Expose viewer globally for console debugging
   (window as unknown as { viewer: RVViewer }).viewer = viewer;
+
+  // --- Analytics: distinguish what the visitor views (no-op unless GA configured + consented) ---
+  // Standard demo (model_view: DemoRealvirtualWeb) vs. Planner demo (workspace_mode: planner), etc.
+  // trackAnalyticsEvent fires only when window.gtag exists, i.e. only after the consent gate granted.
+  viewer.on('model-loaded', () => {
+    const url = viewer.currentModelUrl ?? '';
+    const model = url.split(/[?#]/)[0].split('/').pop()?.replace(/\.glb$/i, '') || 'unknown';
+    trackAnalyticsEvent('model_view', { model });
+  });
+  viewer.on('mode-changed', ({ to }) => {
+    trackAnalyticsEvent('workspace_mode', { mode: to });
+  });
 
   // --- Register Industrial Interfaces ---
   const ifaceManager = new InterfaceManager();
@@ -236,7 +301,10 @@ async function init() {
     .use(new LayoutPlannerPlugin())
     .use(new SnapPointPlugin())
     .use(new SnapFlipIconOverlay())
-    .use(new SimControllerPlugin());
+    .use(new SimControllerPlugin())
+    .use(new IKPathVisualizerPlugin())
+    .use(new IKTargetEditPlugin())
+    .use(new DESWorkspacePlugin());
 
   // --- Lazy Plugins (code-split, loaded on demand) ---
   viewer.registerLazy('gaussian-splat', () =>
@@ -254,6 +322,14 @@ async function init() {
 
   // --- Register Private Plugins (no-op in public build) ---
   registerPrivatePlugins(viewer);
+
+  // --- Workspace modes (plan-198): HMI / DES / Planner ---
+  // Registered after all plugins so the dropdown reflects the full set. The
+  // active mode is applied AFTER the model loads (see mode-boot block below).
+  viewer.modes
+    .register({ id: 'hmi', label: 'HMI', icon: 'ViewQuilt', order: 10 })
+    .register({ id: 'des', label: 'DES', icon: 'AccountTree', order: 20 })
+    .register({ id: 'planner', label: 'Planner', icon: 'GridView', order: 30 });
 
   // --- Auto-discover behaviors (src/behaviors/*.ts) ---
   // Each behavior file declares which GLB filenames it applies to via
@@ -307,8 +383,30 @@ async function init() {
     } catch { /* permission denied or handle expired — skip silently */ }
   }
 
-  // Expose discovered models to the HMI model selector
-  viewer.availableModels = entries.map((e) => ({ url: e.url, label: e.filename.replace(/\.glb$/i, '') }));
+  // Expose discovered models to the HMI model selector.
+  // A base entry may be expanded with selectable "model options" (supplier variants)
+  // declared in a model folder's model-options.ts. An option entry reuses the SAME
+  // GLB url plus an `?option=<id>` marker that the model plugin reads in onModelLoaded
+  // to apply its manipulation (e.g. AAS remap) — no duplicate GLB, no build step.
+  const optionModules = import.meta.glob('/src/plugins/models/*/model-options.ts', { eager: true }) as
+    Record<string, { baseModel?: string; modelOptions?: Array<{ id: string; label: string }> }>;
+  const optionsByModel = new Map<string, Array<{ id: string; label: string }>>();
+  for (const mod of Object.values(optionModules)) {
+    if (mod.baseModel && Array.isArray(mod.modelOptions) && mod.modelOptions.length > 0) {
+      optionsByModel.set(mod.baseModel, mod.modelOptions);
+    }
+  }
+  viewer.availableModels = entries.flatMap((e) => {
+    const baseLabel = e.filename.replace(/\.glb$/i, '');
+    const base = { url: e.url, label: baseLabel };
+    const opts = optionsByModel.get(baseLabel);
+    if (!opts) return [base];
+    const sep = e.url.includes('?') ? '&' : '?';
+    return [
+      base,
+      ...opts.map((o) => ({ url: `${e.url}${sep}option=${o.id}`, label: `${baseLabel} (${o.label})` })),
+    ];
+  });
 
   // ── Scene window: register, migrate any legacy autosave, build store ──
   // Migration runs once: if `rv-layout-autosave` exists from a previous session,
@@ -355,6 +453,10 @@ async function init() {
 
       // Store original URL before loadModel (loadModel will set _currentModelUrl to blob URL)
       viewer.pendingModelUrl = url;
+
+      // Download done (or no content-length to stream) — the parse + scene build
+      // below is the long pole with no byte progress. Show the preparing state.
+      setLoadingPreparing();
 
       const result = await viewer.loadModel(modelUrl, options);
 
@@ -430,6 +532,19 @@ async function init() {
             sceneRouted = true;
           }
           // No match — fall through to default model resolution below.
+        } else if (urlScene.startsWith('published:')) {
+          // ?scene=published:<name> → fetch a static, read-only scene shipped
+          // with the build (public/scenes/<name>.scene.json) and load it
+          // transiently. Lets a saved scene (GLB + edits) be shared by URL
+          // without server-side scene storage and without touching localStorage.
+          const name = decodeURIComponent(urlScene.slice('published:'.length));
+          const resp = await fetch(`${import.meta.env.BASE_URL}scenes/${name}.scene.json`, { cache: 'no-store' });
+          if (resp.ok) {
+            await sceneStore.openPublished(await resp.json(), name);
+            hideLoadingOverlay();
+            sceneRouted = true;
+          }
+          // Not found / fetch failed — fall through to default model resolution below.
         } else {
           // Treat as a saved scene id.
           await sceneStore.openScene(urlScene);
@@ -476,10 +591,19 @@ async function init() {
       localStorage.removeItem(LS_KEY_MODEL);
     }
 
-    const modelToLoad = urlModel
+    let modelToLoad = urlModel
       ?? savedEntry?.url
       ?? resolvedConfigModel
       ?? null;
+
+    // A top-level `?option=<id>` deep link (e.g. `?model=…&option=sew`) is folded
+    // into the model URL so the selector, localStorage and currentModelUrl all carry
+    // the variant. ModelOptionPlugin and the demo HMI also read it straight from the
+    // page URL, so this is belt-and-suspenders for reload/selector consistency.
+    const urlOption = params.get('option');
+    if (modelToLoad && urlOption && !/[?&]option=/.test(modelToLoad)) {
+      modelToLoad += (modelToLoad.includes('?') ? '&' : '?') + 'option=' + encodeURIComponent(urlOption);
+    }
 
     // Defense-in-depth: if no `?scene=` param and a saved scene was active
     // last session (rv-scenes/active), resume it. This covers the path
@@ -529,10 +653,16 @@ async function init() {
     }
   }
 
-  // Deep-link: ?mode=planner opens the layout planner immediately — on the empty
-  // scene routed above, or on whatever model/scene was explicitly requested.
-  if (params.get('mode') === 'planner') {
-    viewer.getPlugin<LayoutPlannerPlugin>('layout-planner')?.openPlanner();
+  // Workspace mode boot (plan-198). Precedence: ?mode= URL param (if a
+  // registered mode) > persisted localStorage > 'hmi'. Applied AFTER the model/
+  // scene has loaded so mode plugins (e.g. Planner) see live model state in
+  // their onModeActivate hook. The legacy ?mode=planner empty-scene routing
+  // above is unchanged; entering Planner mode now runs through the mode system.
+  const urlMode = params.get('mode');
+  if (urlMode && viewer.modes.has(urlMode)) {
+    viewer.modes.setMode(urlMode);
+  } else {
+    viewer.modes.restore('hmi');
   }
 
   // --- Initialize HMI React Overlay ---

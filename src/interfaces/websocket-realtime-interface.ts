@@ -46,6 +46,8 @@ export class WebSocketRealtimeInterface extends BaseIndustrialInterface {
   private _importReject: ((err: Error) => void) | null = null;
   private _importTimeout: ReturnType<typeof setTimeout> | null = null;
   private _connectTimeout: ReturnType<typeof setTimeout> | null = null; // Fix 3: track connect timeout
+  private _wsHost = ''; // host of the current connection (for same-origin model-reload check)
+  private _wsPort = 0;  // port of the current connection
 
   // ── Protocol Implementation ──
 
@@ -53,6 +55,8 @@ export class WebSocketRealtimeInterface extends BaseIndustrialInterface {
     const scheme = settings.wsUseSSL ? 'wss' : 'ws';
     const path = settings.wsPath.startsWith('/') ? settings.wsPath : '/' + settings.wsPath;
     const url = this.buildUrl(scheme, settings.wsAddress, settings.wsPort, path, settings);
+    this._wsHost = settings.wsAddress;
+    this._wsPort = settings.wsPort;
 
     return new Promise<void>((resolve, reject) => {
       try {
@@ -173,9 +177,28 @@ export class WebSocketRealtimeInterface extends BaseIndustrialInterface {
         // Config messages — not used in WebViewer currently
         break;
 
+      case 'model_changed':
+        // CONNECT pushed a new live model (Unity "Publish to CONNECT"). Reload so the
+        // browser picks up the new geometry — only when THIS HMI is served by that same
+        // gateway (same host:port as the WS target), so a separate dev viewer isn't reloaded.
+        this.handleModelChanged();
+        break;
+
       default:
         // Unknown message type — ignore silently
         break;
+    }
+  }
+
+  /** Reload the HMI when the gateway that serves it reports a new live model. */
+  private handleModelChanged(): void {
+    if (typeof window === 'undefined') return;
+    const sameOrigin =
+      window.location.hostname === this._wsHost &&
+      window.location.port === String(this._wsPort);
+    if (sameOrigin) {
+      console.info('[websocket-realtime] gateway model changed — reloading HMI');
+      window.location.reload();
     }
   }
 

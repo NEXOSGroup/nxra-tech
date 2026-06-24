@@ -29,6 +29,8 @@ import type {
   RemovePlacementOp,
   TransformPlacementOp,
   SetCameraOp,
+  AddNodeOp,
+  RemoveNodeOp,
 } from './rv-scene-edits';
 import { saveStartPos, clearStartPos } from '../camera-startpos-store';
 import { deriveModelKey } from '../../../plugins/camera-startpos-plugin';
@@ -74,6 +76,8 @@ async function applyPrimitiveForward(op: PrimitiveEditOp, ctx: ExecutorContext):
     case 'removePlacement':    return removePlacementForward(op, ctx);
     case 'transformPlacement': return transformPlacementForward(op, ctx);
     case 'setCamera':          return setCameraForward(op, ctx);
+    case 'addNode':            return addNodeForward(op, ctx);
+    case 'removeNode':         return removeNodeForward(op, ctx);
   }
 }
 
@@ -85,7 +89,35 @@ async function applyPrimitiveInverse(op: PrimitiveEditOp, ctx: ExecutorContext):
     case 'removePlacement':    return removePlacementInverse(op, ctx);
     case 'transformPlacement': return transformPlacementInverse(op, ctx);
     case 'setCamera':          return setCameraInverse(op, ctx);
+    case 'addNode':            return addNodeInverse(op, ctx);
+    case 'removeNode':         return removeNodeInverse(op, ctx);
   }
+}
+
+// ─── addNode / removeNode ───────────────────────────────────────────────
+
+function addNodeForward(op: AddNodeOp, ctx: ExecutorContext): void {
+  ctx.viewer.createComponentNode(op.spec);
+  ctx.viewer.rebuildIKPaths?.();
+  ctx.viewer.markRenderDirty?.();
+}
+
+function addNodeInverse(op: AddNodeOp, ctx: ExecutorContext): void {
+  ctx.viewer.removeComponentNode(op.nodePath);
+  ctx.viewer.rebuildIKPaths?.();
+  ctx.viewer.markRenderDirty?.();
+}
+
+function removeNodeForward(op: RemoveNodeOp, ctx: ExecutorContext): void {
+  ctx.viewer.removeComponentNode(op.nodePath);
+  ctx.viewer.rebuildIKPaths?.();
+  ctx.viewer.markRenderDirty?.();
+}
+
+function removeNodeInverse(op: RemoveNodeOp, ctx: ExecutorContext): void {
+  ctx.viewer.createComponentNode(op.spec);
+  ctx.viewer.rebuildIKPaths?.();
+  ctx.viewer.markRenderDirty?.();
 }
 
 // ─── setField / unsetField ──────────────────────────────────────────────

@@ -163,7 +163,7 @@ The relevant plugins for the Demo scene are registered in
 These plugins are part of the AGPL viewer codebase. None of their content lives
 inside the demo GLB. They are activated only for the Demo model — they appear
 because the viewer matches the loaded filename against
-`models = ['DemoRealvirtualWeb', 'DemoRealvirtualWebBosch', 'RealvirtualWebTest']`.
+`models = ['DemoRealvirtualWeb', 'RealvirtualWebTest']`.
 
 If you load your own GLB, none of these demo plugins activate. The 3D scene and
 simulation will run, but the HMI overlay will only contain the **generic** WEB

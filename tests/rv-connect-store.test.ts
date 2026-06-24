@@ -88,6 +88,62 @@ describe('connect-store', () => {
     expect(snap.errorMessage).toBe('');
   });
 
+  it('should parse version, build and buildDate from /health (new gateway)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
+      const urlStr = typeof url === 'string' ? url : url.toString();
+      if (urlStr.includes('/health')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          status: 'ok',
+          version: '1.2.3',
+          build: 456,
+          buildDate: '2026-06-16',
+          appVersion: '1.2.3.456',
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }));
+      }
+      return Promise.resolve(new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }));
+    });
+
+    await connectToServer();
+    const snap = getConnectSnapshot();
+    expect(snap.state).toBe('connected');
+    expect(snap.serverVersion).toBe('1.2.3');
+    expect(snap.serverBuild).toBe('456');
+    expect(snap.serverBuildDate).toBe('2026-06-16');
+  });
+
+  it('should fall back to appVersion when version/build are absent (legacy gateway)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
+      const urlStr = typeof url === 'string' ? url : url.toString();
+      if (urlStr.includes('/health')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          status: 'ok',
+          appVersion: '0.1.0.0',
+          buildDate: '2026-06-16 21:19',
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }));
+      }
+      return Promise.resolve(new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }));
+    });
+
+    await connectToServer();
+    const snap = getConnectSnapshot();
+    expect(snap.state).toBe('connected');
+    expect(snap.serverVersion).toBe('0.1.0.0');
+    expect(snap.serverBuild).toBe('');
+    expect(snap.serverBuildDate).toBe('2026-06-16 21:19');
+  });
+
   it('should disconnect and reset state', async () => {
     // First connect
     vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {

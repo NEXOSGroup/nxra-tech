@@ -54,6 +54,8 @@ What happens, in order:
 
 The committed `settings.json` ships with an empty Google Analytics id so forks send no traffic into realvirtual's property. The real id is injected into the **deployed** `settings.json` only, from the `GA_MEASUREMENT_ID` environment variable. Leave it unset for no analytics.
 
+**Consent gate.** Google Analytics is a non-essential tracker (it sets cookies and transfers usage data to Google), so it only loads after the visitor opts in. When `analytics.googleAnalyticsId` is set, a blocking consent dialog is shown at startup and the app does not boot — and no GA script is loaded — until the visitor accepts. When no id is configured (every private/self-hosted deploy), there is no gate and nothing is tracked. Consent is persisted and can be withdrawn under **Settings → Backup → Privacy**. Optionally set `analytics.privacyPolicyUrl` in `settings.json` to show a privacy-policy link on the gate. Once granted, the viewer emits GA4 events that distinguish what the visitor looks at (`model_view`, `workspace_mode`).
+
 ---
 
 ## 3. Deploy a private project

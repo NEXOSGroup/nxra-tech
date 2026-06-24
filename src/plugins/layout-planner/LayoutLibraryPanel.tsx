@@ -31,7 +31,6 @@ import {
 } from '@mui/material';
 import {
   Add,
-  GridView,
   CameraAlt,
   TimerOutlined,
   Cloud,
@@ -122,10 +121,13 @@ export function LayoutLibraryPanel() {
   // (see `deriveChips` / `filterByChip`). Reset when switching tabs.
   const [selectedChip, setSelectedChip] = useState<string | null>(null);
 
+  // Closing the library only HIDES the panel. The library is optional in planner
+  // mode — the plugin's lpm subscription keeps edit bindings active while in
+  // planner mode (and releases them only in the standalone, pre-mode path), so
+  // we must NOT call setActive(false) here.
   const handleClose = useCallback(() => {
     lpm.close(PANEL_ID);
-    plugin?.setActive(false);
-  }, [lpm, plugin]);
+  }, [lpm]);
 
   // Make `id` the active library: update both the React tab state and (for
   // store-backed catalogs) the store's activeTabUrl so the grid, chips and
@@ -367,8 +369,9 @@ export function LayoutLibraryPanel() {
 
   return (
     <>
+      {/* Right-docked library window (toggled from the toolbar Library button). */}
       <LeftPanel
-        title="Planner (Beta)"
+        title="Library"
         anchor="right"
         onClose={handleClose}
         // Width is driven by the panel manager — it owns persistence via
@@ -380,13 +383,6 @@ export function LayoutLibraryPanel() {
         maxWidth={600}
         onResize={(w) => lpm.open(PANEL_ID, w, 'right')}
         footer={
-          // Footer just shows the placed-objects count.
-          //  - Grid snap toggle + size and Drop-to-surface toggle moved to the
-          //    left-vertical button-group toolbar (PlannerToolbarButtons.tsx).
-          //  - Save / Load / Clear were removed entirely: the unified Scene
-          //    window now owns scene persistence, JSON import/export, and
-          //    discard. Per-layout JSON download lived only as a legacy escape
-          //    hatch and is superseded.
           snapshot.placed.length > 0 ? (
             <Box sx={{ px: 1.5, py: 0.75 }}>
               <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10 }}>
@@ -578,41 +574,6 @@ export function LayoutLibraryPanel() {
         </DialogActions>
       </Dialog>
     </>
-  );
-}
-
-// ─── Toggle Button (for toolbar-button slot) ────────────────────────────
-
-export function LayoutPlannerButton() {
-  const viewer = useViewer();
-  const lpm = viewer.leftPanelManager;
-  const lpmSnapshot = useSyncExternalStore(lpm.subscribe, lpm.getSnapshot);
-  // Planner is on the right slot — read it directly so the toggle button
-  // doesn't react to left-side changes (hierarchy etc.).
-  const isOpen = lpmSnapshot.right.activePanel === PANEL_ID;
-  const plugin = viewer.getPlugin<LayoutPlannerPlugin>('layout-planner');
-
-  const handleToggle = useCallback(() => {
-    if (isOpen) {
-      lpm.close(PANEL_ID);
-      plugin?.setActive(false);
-    } else {
-      lpm.open(PANEL_ID, LAYOUT_PANEL_WIDTH, 'right');
-      plugin?.setActive(true);
-    }
-  }, [isOpen, lpm, plugin]);
-
-  return (
-    <Tooltip title={isOpen ? 'Close Planner' : 'Planner'} placement="right">
-      <IconButton
-        size="small"
-        color={isOpen ? 'primary' : 'inherit'}
-        sx={{ p: 0.75 }}
-        onClick={handleToggle}
-      >
-        <GridView sx={{ fontSize: 18 }} />
-      </IconButton>
-    </Tooltip>
   );
 }
 

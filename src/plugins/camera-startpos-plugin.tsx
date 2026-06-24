@@ -146,21 +146,29 @@ export class CameraStartPosPlugin implements RVViewerPlugin {
     { slot: 'settings-tab', component: CameraStartTab, label: 'Start View', order: 290 },
   ];
 
-  onModelLoaded(_result: LoadResult, viewer: RVViewer): void {
-    // Priority 0: per-scene camera preset from the unified Scene model.
-    // The active scene's edit log may include `setCamera` ops — the latest
-    // one wins. RVViewer.loadScene() stashes `currentScene` BEFORE invoking
-    // loadModel so this read is reliable when the load came via the Scene panel.
+  /**
+   * Resolve the camera preset that would be applied for the currently loaded
+   * model, or null if there is none. Priority order:
+   *   0. per-scene `setCamera` op (unified Scene model, latest wins)
+   *   1. localStorage user override (per-base default)
+   *   2. GLB rv_extras author default (`rv_camera_start`)
+   *
+   * Public + side-effect-free so the loader (RVViewer.loadScene) can tell
+   * whether a preset already positioned the camera before deciding to fall
+   * back to fit-to-content framing.
+   */
+  resolvePreset(viewer: RVViewer): ModelCameraStart | null {
     let preset: ModelCameraStart | null = extractScenePreset(viewer.currentScene);
-
     const key = deriveModelKey(viewer.pendingModelUrl ?? viewer.currentModelUrl);
-    if (!preset && !key) return;
-
-    // Priority 1: LocalStorage user override (per-base default)
     if (!preset && key) preset = loadStartPos(key);
-
-    // Priority 2: GLB rv_extras author default — scan scene top-level for userData.realvirtual.rv_camera_start
     if (!preset) preset = this._extractFromScene(viewer);
+    return preset;
+  }
+
+  onModelLoaded(_result: LoadResult, viewer: RVViewer): void {
+    // RVViewer.loadScene() stashes `currentScene` BEFORE invoking loadModel so
+    // the per-scene preset read inside resolvePreset is reliable here.
+    const preset = this.resolvePreset(viewer);
 
     if (!preset) return; // → Fit-to-Bounds Fallback
 

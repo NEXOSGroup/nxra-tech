@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
-import { Object3D, Mesh, Vector3, Quaternion, MeshBasicMaterial, type Sprite, type Texture } from 'three';
+import {
+  Object3D, Mesh, Vector3, Quaternion, MeshBasicMaterial,
+  LineSegments, EdgesGeometry, LineBasicMaterial,
+  type Material, type Sprite, type Texture,
+} from 'three';
 import {
   RVMovingUnit, InstancedMovingUnit, MUInstancePool,
   computeTemplateAABBInfo, analyzeTemplate,
@@ -28,6 +32,7 @@ import {
 const _sourcePos = new Vector3();
 const _lastMUPos = new Vector3();
 const _placementPos = new Vector3();
+const _dischargeDir = new Vector3();
 const _identityQuat = new Quaternion();
 
 /** How often (seconds) a source re-resolves what it stands on. Matches the Conveyor behavior's
@@ -58,20 +63,22 @@ function stripComponentMetadata(obj: Object3D): void {
   });
 }
 
-// Shared white transparent OVERLAY material for the always-visible source
-// ghost. The ghost is a clone of the real source visual (keeping its real
-// materials); on top of every ghost mesh we add a translucent white shell
-// using this material so the part stays recognizable but reads clearly as a
-// "template preview" distinct from the solid spawned MUs. Shared across all
-// sources (read-only) — never disposed (module-lived). `depthWrite:false`
-// keeps it from occluding, the high `renderOrder` set on each overlay mesh
-// draws it after the real ghost surface.
-const _sourceGhostOverlayMaterial = new MeshBasicMaterial({
+// Transparent-source look: the real source fill is hidden (no colour/depth
+// write → full x-ray, never occludes the scene behind it) and replaced by a
+// translucent white shell + a white edge outline, so the template reads as a
+// frosted ghost distinct from the solid spawned MUs. Cheap (no stencil / no
+// render-target changes); where the object's own faces overlap in x-ray the
+// shell blends slightly denser, which is acceptable for this marker. All shared
+// + module-lived (never disposed); `depthWrite:false` keeps them from occluding
+// and the high `renderOrder` per overlay draws them on top.
+const _sourceFillHiddenMaterial = new MeshBasicMaterial({ colorWrite: false, depthWrite: false });
+const _sourceFillShellMaterial = new MeshBasicMaterial({
   color: 0xffffff,
   transparent: true,
-  opacity: 0.3,
+  opacity: 0.22,
   depthWrite: false,
 });
+const _sourceEdgeMaterial = new LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 });
 
 /**
  * RVSource - Spawns new MU instances at regular intervals or by distance.
@@ -149,19 +156,31 @@ export class RVSource implements RVComponent {
   private _placementResolved = false;
 
   /** Always-visible ghost CLONE of the spawned MU (separate-template case),
-   *  shown at the source position: a clone of the MU template keeping its real
-   *  materials, with translucent white overlay shells. Lets the user always see
-   *  (and select / place in the Layout-Planner) the source, even before the
-   *  first MU spawns and while the simulation runs. The real source/template
-   *  materials are NEVER mutated. Null for the self-template case (which adds
-   *  overlay shells directly onto the source node — see `_overlayMeshes`).
+   *  shown at the source position: a clone of the MU template with its fill
+   *  hidden and a white edge outline (the transparent-source look). Lets the
+   *  user always see (and select / place in the Layout-Planner) the source, even
+   *  before the first MU spawns and while the simulation runs. The real
+   *  source/template materials are NEVER mutated. Null for the self-template case
+   *  (which adds edges directly onto the source node — see `_edgeOverlays`).
    *  Built in `setTemplate`, removed in `dispose`. */
   private _ghostNode: Object3D | null = null;
 
-  /** White overlay-shell meshes added on top of real meshes for the ghost look
-   *  (self-template: on the source node; separate-template: on the ghost
-   *  clone). Detached on dispose. Shared geometry/material are NOT disposed. */
+  /** White stencil-FILL shell meshes (the uniform translucent silhouette) added
+   *  on top of real meshes for the transparent-source look. Share the source
+   *  geometry by reference + a module-lived material; detached on `dispose`. */
   private _overlayMeshes: Mesh[] = [];
+
+  /** White edge-outline LineSegments added on top of real meshes for the
+   *  transparent-source look (self-template: on the source node; separate-
+   *  template: on the ghost clone). Each owns a per-geometry EdgesGeometry that
+   *  must be disposed; the edge material is module-lived. Detached + disposed on
+   *  `dispose`. */
+  private _edgeOverlays: LineSegments[] = [];
+  /** Real source meshes whose fill we hid for the transparent look, paired with
+   *  their ORIGINAL material. Stored here (NOT in userData) because Object3D.clone()
+   *  JSON-round-trips userData, which would corrupt a Material into a plain object
+   *  and break spawned MUs. */
+  private _hiddenFillMeshes: { mesh: Mesh; real: Material | Material[] }[] = [];
 
   /** Showcase instance: a real-material preview MU held at the source origin
    *  while spawning is disabled (planner). Rendered ALONGSIDE the ghost. When
@@ -432,17 +451,35 @@ export class RVSource implements RVComponent {
     });
 
     for (const mesh of meshes) {
-      // Don't double-shell a mesh that already has an overlay child.
+      // Don't double-process a mesh that already carries our overlay.
       if (mesh.children.some((c) => c.userData._isGhostOverlay)) continue;
-      const overlay = new Mesh(mesh.geometry, _sourceGhostOverlayMaterial);
-      overlay.name = `${mesh.name}_ghostOverlay`;
-      overlay.userData._isGhostOverlay = true;
-      overlay.userData._isSourceGhost = true;
-      overlay.renderOrder = (mesh.renderOrder ?? 0) + 1;
-      overlay.castShadow = false;
-      overlay.receiveShadow = false;
-      mesh.add(overlay);
-      this._overlayMeshes.push(overlay);
+
+      // Translucent white shell. renderOrder above the mesh so it draws on top.
+      const fill = new Mesh(mesh.geometry, _sourceFillShellMaterial);
+      fill.name = `${mesh.name}_ghostFill`;
+      fill.userData._isGhostOverlay = true;
+      fill.userData._isSourceGhost = true;
+      fill.renderOrder = (mesh.renderOrder ?? 0) + 1;
+      fill.castShadow = false;
+      fill.receiveShadow = false;
+      mesh.add(fill);
+      this._overlayMeshes.push(fill);
+
+      // White edge outline on top of the fill.
+      const edges = new LineSegments(new EdgesGeometry(mesh.geometry), _sourceEdgeMaterial);
+      edges.name = `${mesh.name}_ghostEdges`;
+      edges.userData._isGhostOverlay = true;
+      edges.userData._isSourceGhost = true;
+      edges.renderOrder = (mesh.renderOrder ?? 0) + 2;
+      edges.castShadow = false;
+      edges.receiveShadow = false;
+      mesh.add(edges);
+      this._edgeOverlays.push(edges);
+
+      // Hide the real fill (no colour/depth write → x-ray, no scene occlusion).
+      this._hiddenFillMeshes.push({ mesh, real: mesh.material });
+      mesh.material = _sourceFillHiddenMaterial;
+      mesh.castShadow = false;
     }
   }
 
@@ -519,11 +556,20 @@ export class RVSource implements RVComponent {
       if (this._ghostNode.parent) this._ghostNode.parent.remove(this._ghostNode);
       this._ghostNode = null;
     }
-    // Detach overlay shells (self-template: from the source node; separate-
-    // template clone is already removed with `_ghostNode` above). Shared
-    // geometry + module-lived material are NOT disposed.
-    for (const overlay of this._overlayMeshes) overlay.parent?.remove(overlay);
+    // Translucent fill shells (self-template: on the source node; separate-
+    // template clone is already removed with `_ghostNode` above). Shared geometry
+    // + module-lived material are NOT disposed.
+    for (const fill of this._overlayMeshes) fill.parent?.remove(fill);
     this._overlayMeshes = [];
+    // Edge outlines: detach AND dispose their per-geometry EdgesGeometry (not
+    // shared). The edge material is module-lived and is NOT disposed.
+    for (const edges of this._edgeOverlays) {
+      edges.parent?.remove(edges);
+      edges.geometry.dispose();
+    }
+    this._edgeOverlays = [];
+    for (const { mesh, real } of this._hiddenFillMeshes) mesh.material = real;
+    this._hiddenFillMeshes = [];
     // Marker disposal — frees ring geometry/material + label texture/material
     // and detaches the marker node from `this.node`.
     if (this._markerDispose) {
@@ -645,6 +691,24 @@ export class RVSource implements RVComponent {
     );
   }
 
+  /**
+   * Horizontal world-space direction MUs travel when discharged from this source,
+   * derived from the surface it stands on (`_placement.surface` or the first
+   * conveyor surface). Returns `null` for a free-standing source with no surface,
+   * or when the direction is degenerate. Written into `out` and returned. Used to
+   * orient the spawn grow-out effect. No allocation in the hot path.
+   */
+  getDischargeDirection(out: Vector3): Vector3 | null {
+    const surface = this._placement.surface ?? this._placement.conveyorSurfaces[0] ?? null;
+    if (!surface) return null;
+    surface.getWorldDirection(out);
+    out.multiplyScalar(Math.sign(surface.speed) || 1); // stopped belt → assume forward
+    out.y = 0;
+    if (out.lengthSq() < 1e-8) return null;
+    out.normalize();
+    return out;
+  }
+
   /** True when any live MU sits on the conveyor's belt surface(s) (conveyor mode). */
   private _conveyorOccupied(): boolean {
     if (!this.transportManager) return false;
@@ -699,7 +763,16 @@ export class RVSource implements RVComponent {
    * showcase preview.
    */
   private _buildRealClone(): Object3D {
+    // Self-template sources hide their own fill (transparent look) by swapping
+    // each mesh's material. The clone must inherit the REAL materials, so we
+    // un-hide the source meshes for the duration of clone() (Mesh.clone copies
+    // `material` by reference) and immediately re-hide them. This is synchronous
+    // (no render in between) so the source never flickers. We must NOT stash the
+    // real material in userData — Object3D.clone() JSON-round-trips userData and
+    // would corrupt the Material into a useless plain object.
+    for (const e of this._hiddenFillMeshes) e.mesh.material = e.real;
     const clone = this.muTemplate!.clone();
+    for (const e of this._hiddenFillMeshes) e.mesh.material = _sourceFillHiddenMaterial;
 
     // Strip any editor-only ghost / overlay / showcase-preview subtrees that
     // were cloned in. This happens when the MU template subtree overlaps the

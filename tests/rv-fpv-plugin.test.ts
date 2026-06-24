@@ -43,7 +43,7 @@ vi.mock('../src/core/hmi/visual-settings-store', () => ({
     fpvSprintSpeed: 5.0,
     fpvSensitivity: 0.002,
     fpvEyeHeight: 1.7,
-    lightingMode: 'default',
+    renderMode: 'default',
     modeSettings: { simple: {}, default: {} },
     projection: 'perspective',
     fov: 45,

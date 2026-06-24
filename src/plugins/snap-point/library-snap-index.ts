@@ -19,6 +19,7 @@ import type { LibraryCatalogEntry } from '../layout-planner/rv-layout-store';
 import {
   parseSnapName,
   flowsCompatible,
+  forcesBidiPort,
   type SnapDirection,
   type SnapDirectionCode,
   type SnapFlow,
@@ -38,7 +39,10 @@ export interface LibraryAssetSnapEntry {
   }>;
 }
 
-const LS_PREFIX = 'rv-snap-index-v1:';
+// v2: snap flow is now normalized through `forcesBidiPort` at index time (e.g.
+// the ChainTransfer's convchain port → bidi), so v1 caches that stored the raw
+// authored flow must be discarded.
+const LS_PREFIX = 'rv-snap-index-v2:';
 const _memoryCache = new Map<string, LibraryAssetSnapEntry>();
 let _loader: GLTFLoader | null = null;
 let _dracoLoader: DRACOLoader | null = null;
@@ -95,7 +99,11 @@ export async function ensureAssetIndex(
         nodeName: node.name,
         dir: parsed.dir,
         typeId: parsed.typeId,
-        flow: parsed.flow,
+        // Apply the same bidi-force the runtime scanner uses, keyed off the GLB
+        // url (it contains the model keyword, e.g. "ChainTransfer"), so the
+        // quick-add picker matches a forced-bidi port (convchain) the same way a
+        // placed asset would.
+        flow: forcesBidiPort(glbUrl, parsed.typeId) ? 'bidi' : parsed.flow,
       });
     }
   });

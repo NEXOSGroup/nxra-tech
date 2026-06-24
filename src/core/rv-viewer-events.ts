@@ -20,6 +20,8 @@ import type { HoverableType, ObjectHoverData, ObjectUnhoverData, ObjectClickData
 import type { SelectionSnapshot } from './engine/rv-selection-manager';
 import type { MultiuserSnapshot } from '../plugins/multiuser-plugin';
 import type { McpBridgeSnapshot } from '../plugins/mcp-bridge-plugin';
+import type { ModeId } from './rv-mode-manager';
+import type { RenderMode } from './rv-render-modes';
 import type { Object3D } from 'three';
 
 export interface ViewerEvents {
@@ -39,6 +41,12 @@ export interface ViewerEvents {
 
   // ── Connection state ──
   'connection-state-changed': { state: 'Connected' | 'Disconnected'; previous: 'Connected' | 'Disconnected' };
+
+  /** Fired whenever the active render mode changes (dropdown, settings apply, or
+   *  programmatic `viewer.renderMode = …`). UI that gates controls by mode
+   *  capabilities (e.g. the Environment tab hiding Reflection in toon) listens
+   *  here to stay in sync without polling. */
+  'render-mode-changed': { mode: RenderMode };
 
   // ── Generic component event ──
   /** Emitted by any RVComponent (drive, sensor, MU, custom plugin component) when
@@ -136,6 +144,14 @@ export interface ViewerEvents {
   /** Fired when the gizmo drag ends, before the planner writes the final
    *  transform to its store. */
   'layout-drag-end': { node: Object3D };
+
+  // ── Workspace mode events (plan-198) ──
+  /** Fired BEFORE a workspace-mode switch begins (plugins deactivate/activate,
+   *  UI swaps). Distinct from the kernel's `simulation-mode-changed`
+   *  (Realtime/DES execution) — this is the Blender-style UI workspace mode. */
+  'mode-changing': { from: ModeId | null; to: ModeId };
+  /** Fired AFTER a workspace-mode switch has fully applied. */
+  'mode-changed': { from: ModeId | null; to: ModeId };
 
   // ── Simulation pause events ──
   /** Fired when the overall simulation pause state transitions (idle ↔ paused).

@@ -411,7 +411,7 @@ export function HierarchyBrowser({ viewer }: HierarchyBrowserProps) {
       minWidth={HIERARCHY_MIN_WIDTH}
       maxWidth={HIERARCHY_MAX_WIDTH}
       onResize={(w) => plugin.setPanelWidth(w)}
-      headerSx={{ px: 1.5, py: 0.75 }}
+      headerSx={{ px: 1.5, py: 1.25 }}
       footer={
         <Box sx={{ px: 1, py: 0.25, display: 'flex', alignItems: 'center' }}>
           <Typography sx={{ fontSize: 10, color: 'text.disabled' }}>
@@ -441,11 +441,11 @@ export function HierarchyBrowser({ viewer }: HierarchyBrowserProps) {
           slotProps={{
             input: {
               startAdornment: (
-                <InputAdornment position="start">
+                <InputAdornment position="start" sx={{ mr: 0.5 }}>
                   <Search sx={{ fontSize: 16, color: 'text.disabled' }} />
                 </InputAdornment>
               ),
-              sx: { fontSize: 12, height: 26 },
+              sx: { fontSize: 12, height: 26, pl: 1.25 },
             },
           }}
           sx={{

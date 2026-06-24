@@ -56,6 +56,16 @@ export interface SceneMutationDeps {
   getModelRoot(): Object3D | null;
 }
 
+/** Options for {@link addPlacedToScene}. */
+export interface AddPlacedOptions {
+  /** When true, skip the VISUAL-prep half (markers / shadow flags / pivot /
+   *  align / parent.add / render-mode) because the caller already ran
+   *  {@link prepPlacedVisual} and the node is parented + positioned. Only the
+   *  REGISTRATION half runs. Used by the layout planner's drag-preview commit,
+   *  where the dragged node IS the node being placed (no re-clone). */
+  alreadyPrepared?: boolean;
+}
+
 /**
  * Resolve a unique name for a placed object by checking the model root's
  * direct children. Uses the clone's existing name (GLB internal root
@@ -106,7 +116,30 @@ export function addPlacedToScene(
   id: string,
   label: string,
   catalogId: string,
+  opts?: AddPlacedOptions,
 ): ProcessExtrasResult | null {
+  if (!opts?.alreadyPrepared) prepPlacedVisual(deps, clone, id, label, catalogId);
+  return registerPlaced(deps, clone, id, label, catalogId);
+}
+
+/**
+ * VISUAL-prep half of {@link addPlacedToScene}. Makes the node look exactly
+ * like a placed object — layout markers, shadow flags, floor pivot/align,
+ * parenting under the model root, and active render-mode conversion — WITHOUT
+ * any registration (no signals/drives/components/snap-points/raycast). This is
+ * the part the layout planner runs eagerly when a library drag begins, so the
+ * dragged node is visually identical to the final placement from frame 1.
+ *
+ * Does NOT touch `visible` — the combined callers expect a visible node, and
+ * the planner's drag-preview path manages visibility itself.
+ */
+export function prepPlacedVisual(
+  deps: SceneMutationDeps,
+  clone: Object3D,
+  id: string,
+  label: string,
+  catalogId: string,
+): void {
   // Mark layout metadata — ADD alongside existing rv-extras, don't overwrite
   clone.userData._layoutObject = true;
   clone.userData._layoutId = id;
@@ -132,15 +165,42 @@ export function addPlacedToScene(
     deps.getLayoutRoot().add(clone); // fallback if no model loaded
   }
 
-  // NOTE: dropToSurface is NOT called here — it runs at drag-end when the
-  // user has finished positioning the object at its final XZ location.
-  // Calling it here would raycast at XZ=(0,0) before the position is set.
-
-  // Capture the original GLB root name BEFORE the rename. RVSource's
-  // self-template detection compares the authored `ThisObjectAsMU` against this
-  // original name — without it the 2nd placement (renamed `Foo_2`) would be
-  // mis-classified and resolve its template to the first source's node.
+  // Capture the original GLB root name BEFORE the rename (in registerPlaced).
+  // RVSource's self-template detection compares the authored `ThisObjectAsMU`
+  // against this original name — without it the 2nd placement (renamed `Foo_2`)
+  // would be mis-classified and resolve its template to the first source's node.
   clone.userData._originalName = clone.name;
+
+  // Match the subtree to the active render mode (toon material swap + shader
+  // recompile) so the drag preview is render-mode faithful immediately. Mirrors
+  // the `model-loaded` toon hook for full GLB loads. registerPlaced re-applies
+  // it after component meshes are created.
+  deps.getViewer()?.applyRenderModeToSubtree?.(clone);
+}
+
+/**
+ * REGISTRATION half of {@link addPlacedToScene}. Wires the (already-prepped,
+ * already-positioned) node into every runtime system: signals, drives,
+ * components, behaviors, the node registry, raycast aux-targets and snap
+ * points. The layout planner runs this at drop/commit time — by then the
+ * dragged node is at its final transform, so nothing here moves it.
+ *
+ * Two mandatory guards run first:
+ *   1. Clear `_isGhost` (and the source-preview flags + stale snap cache) on
+ *      the whole subtree — `processExtras` SKIPS ghost-flagged nodes, so a
+ *      preview node committed without this would get zero drives/signals.
+ *   2. Reset the layer mask to layer 0 — the drag preview is `markNoAO`'d
+ *      (which REPLACES the mask, dropping layer 0); a placed object must
+ *      participate in SSAO. No-op for fresh combined-caller clones.
+ */
+export function registerPlaced(
+  deps: SceneMutationDeps,
+  clone: Object3D,
+  id: string,
+  label: string,
+  catalogId: string,
+): ProcessExtrasResult | null {
+  clearPreviewFlags(clone);
 
   // Resolve unique name (uses GLB root name, adds _2, _3 for dupes)
   resolveUniqueName(deps, clone);
@@ -222,7 +282,28 @@ export function addPlacedToScene(
   // Dirty it once so the newly placed object's shadow appears immediately.
   viewer?.markShadowsDirty?.();
 
+  // Re-apply render mode now that processExtras may have created component
+  // sub-meshes (e.g. a Source's preview MU) that weren't present during prep.
+  viewer?.applyRenderModeToSubtree?.(clone);
+
   return result;
+}
+
+/**
+ * Clear the drag-preview flags so the node behaves as a fully placed object.
+ * `processExtras` skips `_isGhost`/`_isSourcePreview`/`_isSourceGhost` nodes,
+ * and `_ghostSnapCache` is the parsed-snap cache from the drag matcher — all
+ * must be dropped before registration. Also restores the SSAO layer (a preview
+ * is `markNoAO`'d, which drops layer 0). No-op for fresh combined-caller clones.
+ */
+function clearPreviewFlags(clone: Object3D): void {
+  clone.traverse((n) => {
+    delete n.userData._isGhost;
+    delete n.userData._isSourcePreview;
+    delete n.userData._isSourceGhost;
+    delete n.userData._ghostSnapCache;
+    n.layers.set(0);
+  });
 }
 
 /**
@@ -298,6 +379,17 @@ export function placeAtSnapPoint(
   });
   if (!ownSnap) return null;
 
+  // Normalize the clone to the floor-center pivot frame BEFORE computing the
+  // snap matrix. The reload path (prepPlacedVisual → pivotToFloorCenter) always
+  // re-centers geometry by the AABB centroid; if we snap-align in the raw
+  // authored-origin frame, the saved transform ends up in a different frame
+  // than reload reconstructs, so asymmetric assets (e.g. a chain transfer)
+  // drift horizontally by the centroid offset on reload. Pivoting here keeps
+  // the placement frame identical to the restore frame. (alignToFloor is not
+  // needed — the snap matrix sets the root pose, and only the pivot child-shift
+  // persists through the saved transform.)
+  pivotToFloorCenter(clone as Group);
+
   // Compute alignment BEFORE adding to scene so existing world matrices are
   // taken from the clone's pre-place transform. Parse the own snap's name to
   // get its outward direction — the alignment math needs both to compute the
@@ -319,9 +411,10 @@ export function placeAtSnapPoint(
   clone.matrixAutoUpdate = true;
   clone.updateMatrixWorld(true);
 
-  // Add to scene under the layout root using the standard pipeline.
-  // Note: addPlacedToScene calls pivotToFloorCenter + alignToFloor which would
-  // override our snap-aligned matrix. Replicate the essential parts inline.
+  // Mark layout metadata + shadows inline, then attach preserving the
+  // snap-aligned world transform. addPlacedToScene's pivotToFloorCenter /
+  // alignToFloor would override our matrix, so this is the visual-prep done
+  // inline (NO pivot/align). registerPlacedAtSnap then does the registration.
   clone.userData._layoutObject = true;
   clone.userData._layoutId = id;
   if (clone.userData.realvirtual && typeof clone.userData.realvirtual === 'object') {
@@ -346,6 +439,27 @@ export function placeAtSnapPoint(
   // Capture original GLB root name before rename (see addPlacedToScene).
   clone.userData._originalName = clone.name;
 
+  return registerPlacedAtSnap(deps, clone, id, target, ownSnapName, snapRegistry);
+}
+
+/**
+ * REGISTRATION half of {@link placeAtSnapPoint}. Like {@link registerPlaced}
+ * but additionally marks `target` occupied, registers + pairs the asset's own
+ * snap with it, and rebuilds the marker mesh (snap-chain bookkeeping). Runs the
+ * same preview-flag / AO guards. Assumes the node is already visually prepped
+ * AND at its final snap-aligned transform (no pivot/align, no matrix recompute),
+ * so the layout planner can commit a dragged-and-snapped preview node directly.
+ */
+export function registerPlacedAtSnap(
+  deps: SceneMutationDeps,
+  clone: Object3D,
+  id: string,
+  target: SnapPoint,
+  ownSnapName: string,
+  snapRegistry: SnapPointRegistry,
+): ProcessExtrasResult | null {
+  clearPreviewFlags(clone);
+
   resolveUniqueName(deps, clone);
 
   // Naming-convention scan (see _applyNamingConventionScan docstring).
@@ -369,7 +483,7 @@ export function placeAtSnapPoint(
       viewer.drives.push(...result.drives);
       viewer.rebuildGroupedBvh();
     }
-    // Dispatch behaviors for this placement — mirrors addPlacedToScene. Without
+    // Dispatch behaviors for this placement — mirrors registerPlaced. Without
     // this, an asset that snaps to a neighbour during drag never binds its
     // behaviors (only the floor-dropped first placement did), so a 2nd / 3rd
     // conveyor in a snapped line had no Conveyor.* signals and no belt control.
@@ -398,7 +512,7 @@ export function placeAtSnapPoint(
   // The own snap that was paired with `target` is now also occupied. Locate
   // it by name (the picker passed `ownSnapName`) and establish the
   // bidirectional pairing so chain-resolver walks across this edge.
-  const ownSnapReg = placedSnaps.find((s) => s.object3D.name === ownSnapName);
+  const ownSnapReg = placedSnaps.find((sp) => sp.object3D.name === ownSnapName);
   if (ownSnapReg) {
     snapRegistry.markOccupied(ownSnapReg.id, target.occupiedBy ?? id);
     snapRegistry.pair(target.id, ownSnapReg.id);
@@ -414,7 +528,41 @@ export function placeAtSnapPoint(
   // (shadowMap.autoUpdate is off — see addPlacedToScene).
   viewer?.markShadowsDirty?.();
 
+  // Re-apply render mode for any component sub-meshes created by processExtras.
+  viewer?.applyRenderModeToSubtree?.(clone);
+
   return result;
+}
+
+/**
+ * Commit-time snap occupancy + pairing WITHOUT re-registration. In the live-
+ * draft model the dragged object is registered on drag-ENTER, so by drop time
+ * its `Snap-*` ports are already in the registry (with `ownerRoot = node`).
+ * This marks the mated pair occupied and pairs them — the occupancy/pairing
+ * half of {@link registerPlacedAtSnap}, minus the processExtras/scan re-run.
+ * The own snap is found by name via `getByOwnerRoot` (no re-scan).
+ */
+export function markSnapOccupied(
+  deps: SceneMutationDeps,
+  node: Object3D,
+  id: string,
+  target: SnapPoint,
+  ownSnapName: string,
+  snapRegistry: SnapPointRegistry,
+): void {
+  if (target.occupied) return;
+  snapRegistry.markOccupied(target.id, id);
+  const ownSnap = snapRegistry.getByOwnerRoot(node).find((sp) => sp.object3D.name === ownSnapName);
+  if (ownSnap) {
+    snapRegistry.markOccupied(ownSnap.id, target.occupiedBy ?? id);
+    snapRegistry.pair(target.id, ownSnap.id);
+  }
+  // Resize marker InstancedMesh so the occupied-state colour refreshes.
+  const viewer = deps.getViewer();
+  if (viewer) {
+    const snapPlugin = viewer.getPlugin<SnapPointPlugin>('snap-point');
+    snapPlugin?.getMarkerRenderer?.()?.rebuild(snapRegistry.size);
+  }
 }
 
 /** Remove a placed layout object from the scene with full system cleanup. */

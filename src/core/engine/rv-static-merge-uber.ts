@@ -119,6 +119,10 @@ export function mergeStaticUberMeshes(
     if (mesh.userData?._rvStaticUberMerged) return;
     if ((mesh as Mesh & { skeleton?: unknown }).skeleton) return;
     if (mesh.morphTargetInfluences && mesh.morphTargetInfluences.length > 0) return;
+    // NOTE: interactive/hoverable objects (RuntimeMetadata, Sensor, …) ARE merged
+    // here for performance. Their hidden originals stay in the graph, and the
+    // highlight manager builds an on-hover overlay from that hidden geometry
+    // (see RVHighlightManager.highlight — the no-visible-mesh → overlay path).
 
     candidates.push(mesh);
   });

@@ -162,10 +162,9 @@ export function SceneWindow({ store, onClose }: SceneWindowProps) {
 
   return (
     <LeftPanel
-      title={<Typography variant="subtitle2" sx={{ fontWeight: 600, fontSize: '0.8rem' }}>Models</Typography>}
+      title="Models"
       onClose={onClose}
       width={SCENE_PANEL_WIDTH}
-      headerSx={{ px: 1.5, py: 0.75 }}
     >
       <Box sx={{ flex: 1, overflow: 'auto', minHeight: 0, p: 1.5, display: 'flex', flexDirection: 'column', gap: 2 }}>
 

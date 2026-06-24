@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { BoxGeometry, Mesh, MeshStandardMaterial, Object3D } from 'three';
+import { BoxGeometry, Mesh, MeshStandardMaterial, LineSegments, Object3D } from 'three';
 import { RVSource } from '../src/core/engine/rv-source';
 import { RVMovingUnit } from '../src/core/engine/rv-mu';
 import { RVTransportManager } from '../src/core/engine/rv-transport-manager';
@@ -37,31 +37,52 @@ function hasOverlay(obj: Object3D): boolean {
   return found;
 }
 
+function hasEdges(obj: Object3D): boolean {
+  let found = false;
+  obj.traverse((c) => { if (c instanceof LineSegments) found = true; });
+  return found;
+}
+
+/** A mesh's fill is "hidden" (transparent-source look) when its material writes
+ *  neither colour nor depth — set by RVSource without touching `visible`. */
+function fillHidden(m: Mesh): boolean {
+  const mat = m.material as { colorWrite?: boolean; depthWrite?: boolean };
+  return mat.colorWrite === false && mat.depthWrite === false;
+}
+
 describe('RVSource — self-template ghost overlay', () => {
-  it('keeps real meshes visible + adds white overlay shells, materials untouched', () => {
+  it('hides the fill + adds a translucent white shell and edge outline', () => {
     const { node, meshes } = makeMultiMeshNode('Pallet');
-    const originalMats = meshes.map((m) => m.material);
 
     const source = new RVSource(node);
     source.sourceIsTemplate = true;
     source.spawnParent = new Object3D();
     source.setTemplate(node);
 
-    // Real meshes stay visible and keep their original materials (never recolored).
-    for (let i = 0; i < meshes.length; i++) {
-      expect(meshes[i].visible).toBe(true);
-      expect(meshes[i].material).toBe(originalMats[i]);
-    }
-    // Each real mesh gained exactly one overlay-shell child.
     for (const m of meshes) {
-      const shells = m.children.filter((c) => c.userData._isGhostOverlay);
-      expect(shells.length).toBe(1);
-      expect(shells[0].userData._isSourceGhost).toBe(true);
+      // Mesh stays visible (so its overlay children render) but the real fill is
+      // hidden (no colour/depth write → x-ray, no scene occlusion).
+      expect(m.visible).toBe(true);
+      expect(fillHidden(m)).toBe(true);
+      // Exactly one translucent white shell mesh + one edge outline child.
+      const fillShells = m.children.filter((c) => c.userData._isGhostOverlay && (c as Mesh).isMesh && !(c instanceof LineSegments));
+      const edges = m.children.filter((c) => c instanceof LineSegments);
+      expect(fillShells.length).toBe(1);
+      expect((fillShells[0] as Mesh).material).toHaveProperty('transparent', true);
+      expect(fillShells[0].userData._isSourceGhost).toBe(true);
+      expect(edges.length).toBe(1);
+      expect(edges[0].userData._isGhostOverlay).toBe(true);
+      expect(edges[0].userData._isSourceGhost).toBe(true);
     }
   });
 
-  it('spawned MU has real materials and NO overlay/ghost subtree', () => {
-    const { node } = makeMultiMeshNode('Pallet');
+  // Regression guard: the original material must NOT be stashed in userData — a
+  // spawned MU clone JSON-round-trips userData, which would corrupt a Material
+  // into a plain object and make the spawn dissolve effect throw `mat.clone is
+  // not a function` every frame (freezing the sim + navigation).
+  it('spawned MU has REAL, cloneable materials and NO overlay/ghost/edge subtree', () => {
+    const { node, meshes } = makeMultiMeshNode('Pallet');
+    const originalMats = meshes.map((m) => m.material);
     const sceneRoot = new Object3D();
 
     const source = new RVSource(node);
@@ -76,11 +97,42 @@ describe('RVSource — self-template ghost overlay', () => {
     const spawned = sceneRoot.children.find((c) => c.name.startsWith('Pallet_'));
     expect(spawned, 'spawned clone added to spawn parent').toBeTruthy();
     expect(hasOverlay(spawned!)).toBe(false);
+    expect(hasEdges(spawned!)).toBe(false);
+
+    spawned!.traverse((c) => {
+      if (!(c instanceof Mesh)) return;
+      // Solid real fill (not the hidden no-write material) …
+      expect(fillHidden(c)).toBe(false);
+      // … and a genuine Material instance (the .clone() the dissolve effect needs).
+      expect(c.material).toBeInstanceOf(MeshStandardMaterial);
+      expect(typeof (c.material as MeshStandardMaterial).clone).toBe('function');
+    });
+    // The spawned materials are the source's real materials (shared by reference).
+    const spawnedMats: unknown[] = [];
+    spawned!.traverse((c) => { if (c instanceof Mesh) spawnedMats.push(c.material); });
+    for (const om of originalMats) expect(spawnedMats).toContain(om);
+  });
+
+  it('dispose() restores the real fill material on the persisting source node', () => {
+    const { node, meshes } = makeMultiMeshNode('Pallet');
+    const originalMats = meshes.map((m) => m.material);
+
+    const source = new RVSource(node);
+    source.sourceIsTemplate = true;
+    source.spawnParent = new Object3D();
+    source.setTemplate(node);
+    expect(fillHidden(meshes[0])).toBe(true);
+
+    source.dispose();
+    for (let i = 0; i < meshes.length; i++) {
+      expect(meshes[i].material).toBe(originalMats[i]);
+      expect(meshes[i].children.some((c) => c instanceof LineSegments)).toBe(false);
+    }
   });
 });
 
 describe('RVSource — separate-template ghost clone', () => {
-  it('builds a ghost clone with overlay shells; template materials untouched', () => {
+  it('builds a ghost clone with hidden fill + edge outline; template materials untouched', () => {
     const sceneRoot = new Object3D();
     const sourceNode = new Object3D();
     sourceNode.name = 'Spawner';
@@ -97,7 +149,13 @@ describe('RVSource — separate-template ghost clone', () => {
     const ghost = sourceNode.children.find((c) => c.name === 'Box_ghost');
     expect(ghost, 'ghost clone exists under the source').toBeTruthy();
     expect(hasOverlay(ghost!)).toBe(true);
-    // The separate template is hidden, and its materials are untouched.
+    expect(hasEdges(ghost!)).toBe(true);
+    // The ghost clone's own fill is hidden (transparent look)…
+    ghost!.traverse((c) => {
+      if (c instanceof Mesh && !c.userData._isGhostOverlay) expect(fillHidden(c)).toBe(true);
+    });
+    // …while the separate template (what spawned MUs clone) is hidden and its
+    // materials are untouched.
     expect(template.visible).toBe(false);
     for (let i = 0; i < tMeshes.length; i++) {
       expect(tMeshes[i].material).toBe(originalMats[i]);

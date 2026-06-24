@@ -21,15 +21,7 @@ import {
 import type { Renderer } from 'three/webgpu';
 import type { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { ProjectionType } from './hmi/visual-settings-store';
-import { INSPECTOR_PANEL_WIDTH } from './hmi/layout-constants';
-import type { RvExtrasEditorPlugin } from './hmi/rv-extras-editor';
 import type { LeftPanelManager } from './hmi/left-panel-manager';
-
-/** Check if property inspector is in detached (floating) mode. */
-function isInspectorDetached(): boolean {
-  try { return localStorage.getItem('rv-inspector-detached') === 'true'; }
-  catch { return false; }
-}
 
 /** Pixel offsets for panels obscuring the 3D viewport. */
 export interface ViewportOffset {
@@ -257,26 +249,16 @@ export class CameraManager {
 
   // ─── Viewport Offset ──────────────────────────────────────────────
 
-  /** Compute current viewport offset from open panels. */
+  /**
+   * Panel offset for camera framing. The WebGL canvas is now confined to the
+   * central viewport region (see ViewportFrame) — docked windows and the
+   * activity bar no longer overlap it — so focus/fit should center within the
+   * real visible canvas with NO extra compensation. Returns undefined (which
+   * makes `_panelFitScale` a no-op, scale 1). Kept as a method so callers and
+   * the public viewer API stay intact.
+   */
   getCurrentViewportOffset(): ViewportOffset | undefined {
-    let left = 0;
-
-    const editorPlugin = this.state.getPlugin<RvExtrasEditorPlugin>('rv-extras-editor');
-    if (editorPlugin) {
-      const snapshot = editorPlugin.getSnapshot();
-      if (snapshot.panelOpen) {
-        // Only count inspector width when docked (not detached as floating window)
-        const inspectorDocked = snapshot.selectedNodePath && snapshot.showInspector
-          && !isInspectorDetached();
-        left = snapshot.panelWidth + (inspectorDocked ? INSPECTOR_PANEL_WIDTH : 0);
-      }
-    }
-
-    if (left === 0 && this.state.leftPanelManager.activePanelWidth > 0) {
-      left = this.state.leftPanelManager.activePanelWidth;
-    }
-
-    return left > 0 ? { left } : undefined;
+    return undefined;
   }
 
   // ─── Focus & Fit ──────────────────────────────────────────────────

@@ -7,6 +7,7 @@ import { ChevronRight, ChevronLeft } from '@mui/icons-material';
 import { useViewer } from '../../hooks/use-viewer';
 import { useSlot } from '../../hooks/use-slot';
 import { useMobileLayout } from '../../hooks/use-mobile-layout';
+import { useViewportInsets } from '../../hooks/use-viewport-insets';
 import { useMaintenanceMode } from '../../hooks/use-maintenance-mode';
 import {
   useMessagePanelOpen,
@@ -27,6 +28,7 @@ export function MessagePanel() {
   const maintenanceState = useMaintenanceMode();
   const messagePanelOpen = useMessagePanelOpen();
   const minimized = useMessagePanelMinimized();
+  const topOffset = useViewportInsets().top;
 
   const isMaintenanceActive = maintenanceState.mode !== 'idle';
 
@@ -38,7 +40,7 @@ export function MessagePanel() {
         sx={{
           position: 'fixed',
           right: 8,
-          top: 0,
+          top: topOffset,
           bottom: 0,
           width: 320,
           zIndex: 1200,
@@ -119,7 +121,7 @@ export function MessagePanel() {
         sx={{
           position: 'fixed',
           right: 8,
-          top: 0,
+          top: topOffset,
           bottom: 0,
           width: 300,
           zIndex: 1200,

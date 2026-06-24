@@ -1813,6 +1813,7 @@ The built-in demo model (`DemoRealvirtualWeb.glb`) registers its plugins in `src
 
 ```
 src/plugins/models/DemoRealvirtualWeb/index.ts
+  ├── ModelOptionPlugin    (supplier variants — see Model Options below)
   ├── KpiDemoPlugin        (OEE KPI cards)
   ├── DemoHMIPlugin        (buttons, messages, navigation)
   ├── TestAxesPlugin       (manual axis control)
@@ -1836,6 +1837,57 @@ projects/mauser3dhmi/plugins/index.ts
   ├── AnnotationPlugin     (3D markers)
   └── (custom Mauser HMI plugins)
 ```
+
+### Model Options (selectable variants)
+
+A **model option** is a named variant of the *same* GLB geometry — for example swapping a component's supplier — surfaced as its own entry in the model selector. There is no duplicate GLB and no build step: the option is carried as an `?option=<id>` marker on the model URL and applied at load time.
+
+Command-based by design: `model-options.ts` declares only the selectable options (id + label); what each option *does* is spelled out imperatively in the model's `index.ts` using generic rv_extras commands — readable next to the model it belongs to.
+
+**1. Declaration** — drop a `model-options.ts` next to the model's `index.ts` (selector metadata only):
+
+```typescript
+// src/plugins/models/<ModelName>/model-options.ts
+import type { ModelOptionDef } from '../model-option-plugin';
+
+export const baseModel = 'DemoRealvirtualWeb';   // base GLB (filename without .glb)
+
+export const modelOptions: ModelOptionDef[] = [
+  { id: 'sew', label: 'SEW' },   // → ?option=sew, selector entry "DemoRealvirtualWeb (SEW)"
+];
+```
+
+**2. Apply** — in the model's `index.ts`, write an `apply(viewer, optionId)` that issues rv_extras commands, and register `ModelOptionPlugin` with it. Register the plugin **first** when an option swaps AAS ids, so the swap lands before `AasLinkPlugin` pre-parses the AASX:
+
+```typescript
+import { ModelOptionPlugin, remapAasLink, setComponentField } from '../model-option-plugin';
+
+function applyModelOption(viewer: RVViewer, option: string): void {
+  if (option === 'sew') {
+    // Re-point every node whose AAS currently equals the Festo motor to the SEW AAS
+    // (updates the tooltip AND the property inspector). Value-matched, hits all nodes.
+    remapAasLink(viewer,
+      'http://smart.festo.com/aas/99920200617190044000012858',
+      'https://demo.realvirtual.io/aas/sew/KA47-DRN90M4-Demo-0001',
+      'SEW KA47-DRN90M4 Gearmotor');
+    // Generic: set any rv_extras component field on any node.
+    // setComponentField(viewer, 'DemoCell/.../Motor', 'Drive', 'TargetSpeed', 250);
+  }
+}
+
+const instances = [
+  new ModelOptionPlugin(applyModelOption),  // first
+  // ...other model plugins
+];
+```
+
+**How it surfaces:** `main.ts` eager-globs every `models/<name>/model-options.ts` and, for each discovered GLB whose name matches `baseModel`, adds one selector entry per option (`<base> (<label>)`) pointing at the same GLB url with `?option=<id>` appended. The base model with no option stays unchanged. Activating an option is also a shareable deep link: `…/?model=<glb>&option=sew`.
+
+**Commands** (`model-option-plugin.ts`) mutate the loaded scene in place after construction, so they reflect immediately in the property inspector and live consumers (tooltips, AAS panel):
+- `remapAasLink(viewer, fromAasId, toAasId, description)` — value-matched AAS swap across all matching nodes; updates derived `_rvAasLink` and the raw `AASLink` component.
+- `setComponentField(viewer, nodePath, component, field, value)` — set any rv_extras component field on a node.
+
+They do NOT retroactively reconfigure already-constructed behavioural components (e.g. a running Drive) — use a GLB/overlay for that.
 
 ---
 

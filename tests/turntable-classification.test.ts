@@ -91,3 +91,70 @@ describe('classifyConnections — direction relative to the turntable centre', (
     expect(roleOf('tt-b')).toBe('output');  // belt moves away from the table
   });
 });
+
+/**
+ * Build a turntable at the origin fed (in +Z) by a ChainTransfer upstream. A
+ * ChainTransfer carries TWO transport surfaces: a perpendicular cross chain
+ * (Transport-X) AND the straight roller line (Transport-Z) aligned with the
+ * handover. The X node is added FIRST so a first-match lookup (mirroring
+ * findTransport's traversal) returns the perpendicular surface — whose ~0
+ * projection used to fall back to the turntable port's forced-bidi flow and
+ * misclassify the upstream as an 'output', stalling the handover.
+ */
+function setupChainTransferUpstreamScene() {
+  const ttRoot = new Object3D(); ttRoot.name = 'Turntable'; ttRoot.position.set(0, 0, 0);
+
+  // Turntable-side bidi port (all turntable ports are forced bidi).
+  const inPort = new Object3D(); inPort.name = 'Snap-ZB-In'; ttRoot.add(inPort);
+
+  // Upstream ChainTransfer: roller line feeds +Z toward the table; cross chain is X.
+  const ct = new Object3D(); ct.name = 'ChainTransfer'; ct.position.set(0, 0, -0.5);
+  const ctX = new Object3D(); ctX.name = 'Transport-X'; ct.add(ctX); // perpendicular — added FIRST
+  const ctZ = new Object3D(); ctZ.name = 'Transport-Z'; ct.add(ctZ); // aligned with the handover
+  const ctMating = new Object3D(); ctMating.name = 'Snap-ZP-convroll'; ctMating.position.set(0, 0, -1);
+  const xDir = new Vector3(1, 0, 0); // cross chain — perpendicular to the centre vector
+  const zDir = new Vector3(0, 0, 1); // roller line — +Z, toward the table
+
+  const snaps: SnapLite[] = [
+    { id: 'tt-in', object3D: inPort,   flow: 'bidi', pairedSnapId: 'ct-out', ownerRoot: ttRoot },
+    { id: 'ct-out', object3D: ctMating, flow: 'out',  pairedSnapId: 'tt-in', ownerRoot: ct },
+  ];
+  const byId = new Map(snaps.map(s => [s.id, s]));
+  const byOwner = new Map<Object3D, SnapLite[]>();
+  for (const s of snaps) { const l = byOwner.get(s.ownerRoot) ?? []; l.push(s); byOwner.set(s.ownerRoot, l); }
+
+  const surfaceByTransport = new Map<Object3D, SurfaceMock>([
+    [ctX, { getWorldDirection: (out = new Vector3()) => out.copy(xDir) }],
+    [ctZ, { getWorldDirection: (out = new Vector3()) => out.copy(zDir) }],
+  ]);
+
+  const host = {
+    getPlugin: (id: string) => id === 'snap-point' ? {
+      getRegistry: () => ({
+        getByOwnerRoot: (r: Object3D) => byOwner.get(r) ?? [],
+        getById: (id: string) => byId.get(id),
+      }),
+    } : undefined,
+    registry: {
+      findInChildren: <T,>(node: Object3D, type: string): T | null => {
+        if (type !== 'TransportSurface') return null;
+        let found: SurfaceMock | null = null;
+        node.traverse((n) => { if (!found && surfaceByTransport.has(n)) found = surfaceByTransport.get(n)!; });
+        return found as unknown as T | null;
+      },
+    },
+  };
+
+  return { host, ttRoot };
+}
+
+describe('classifyConnections — multi-transport upstream (ChainTransfer → Turntable)', () => {
+  it('classifies a ChainTransfer feeding in +Z as input despite its perpendicular cross chain', () => {
+    const { host, ttRoot } = setupChainTransferUpstreamScene();
+    const conns = classifyConnections(host, ttRoot);
+
+    const roleOf = (snapId: string) => conns.find(c => c.snap.id === snapId)?.role;
+    // Must pick the aligned roller surface (Transport-Z), not the first-found X.
+    expect(roleOf('tt-in')).toBe('input');
+  });
+});

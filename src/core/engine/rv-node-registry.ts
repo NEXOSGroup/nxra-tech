@@ -58,6 +58,8 @@ export class NodeRegistry {
   private suffixMap = new Map<string, string[]>();
   /** targetPath → Set of {sourcePath, fieldName, componentType} (reverse ref index) */
   private reverseRefs = new Map<string, Array<{ sourcePath: string; fieldName: string; componentType: string }>>();
+  /** Whether the reverse-ref index has been built (built lazily on first getReferencesTo). */
+  private _reverseRefsBuilt = false;
 
   // ─── Path Computation ───────────────────────────────────────────
 
@@ -417,8 +419,9 @@ export class NodeRegistry {
 
   /**
    * Build a reverse-reference index from all rv_extras ComponentReference fields.
-   * Call once after scene load (Phase 2 complete). Replaces the O(n*m) scan
-   * in PropertyInspector's referencedBy useMemo with O(1) lookup.
+   * Built lazily on first getReferencesTo() access (no longer called eagerly
+   * on the model-load critical path). Replaces the O(n*m) scan in
+   * PropertyInspector's referencedBy useMemo with O(1) lookup.
    */
   buildReverseRefIndex(): void {
     this.reverseRefs.clear();
@@ -441,13 +444,16 @@ export class NodeRegistry {
         }
       }
     }
+    this._reverseRefsBuilt = true;
   }
 
   /**
    * O(1) lookup of which nodes reference the given path via ComponentReference.
-   * Returns empty array if none. Must call buildReverseRefIndex() first.
+   * Returns empty array if none. The reverse-ref index is built lazily on
+   * first access.
    */
   getReferencesTo(targetPath: string): ReadonlyArray<{ sourcePath: string; fieldName: string; componentType: string }> {
+    if (!this._reverseRefsBuilt) this.buildReverseRefIndex();
     return this.reverseRefs.get(targetPath) ?? [];
   }
 

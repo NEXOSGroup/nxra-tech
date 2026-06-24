@@ -3,10 +3,12 @@
 
 import { useState, useCallback, useMemo } from 'react';
 import { Typography, Box, Button } from '@mui/material';
-import { RestartAlt, FileDownload, FileUpload, CleaningServices } from '@mui/icons-material';
+import { RestartAlt, FileDownload, FileUpload, CleaningServices, Cookie } from '@mui/icons-material';
 import { useViewer } from '../../../hooks/use-viewer';
 import { clearAllRVStorage } from '../rv-storage-keys';
 import { isSettingsLocked } from '../../rv-app-config';
+import { isAnalyticsConfigured, useAnalyticsConsent, resetAnalyticsConsent } from '../../consent-store';
+import { SettingsSection } from './settings-helpers';
 
 /**
  * Enumerate legacy WebViewer localStorage keys that the unified Scene model
@@ -54,6 +56,14 @@ export function BackupTab() {
   // Import confirmation state
   const [pendingImport, setPendingImport] = useState<RVSettingsBundle | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+
+  // Analytics consent (only relevant when a tracker is configured).
+  const analyticsConfigured = isAnalyticsConfigured();
+  const analyticsConsented = useAnalyticsConsent();
+  const handleWithdrawConsent = useCallback(() => {
+    resetAnalyticsConsent();
+    window.location.reload();
+  }, []);
 
   const handleResetAll = () => {
     clearAllRVStorage();
@@ -116,13 +126,10 @@ export function BackupTab() {
   }, []);
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
       {/* Export / Import Settings */}
       {!isSettingsLocked() && (
-        <Box>
-          <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1, mb: 1, display: 'block' }}>
-            Settings
-          </Typography>
+        <SettingsSection id="model-settings" title="Settings">
           <Box sx={{ display: 'flex', gap: 1 }}>
             <Button
               variant="outlined"
@@ -186,45 +193,79 @@ export function BackupTab() {
               </Box>
             </Box>
           )}
-        </Box>
+        </SettingsSection>
       )}
 
       {/* Reset all settings (hidden when locked) */}
       {!isSettingsLocked() && (
-        <Box sx={{ borderTop: '1px solid rgba(255,255,255,0.08)', pt: 2 }}>
-          <Button
-            variant="outlined"
-            size="small"
-            color="warning"
-            startIcon={<RestartAlt sx={{ fontSize: 14 }} />}
-            onClick={handleResetAll}
-            sx={{ fontSize: 11, textTransform: 'none' }}
-          >
-            Reset All Settings to Defaults
-          </Button>
-          <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mt: 0.5, fontSize: 10 }}>
-            Clears all saved browser settings and reloads the page.
-          </Typography>
-        </Box>
+        <SettingsSection id="model-reset" title="Reset">
+          <Box>
+            <Button
+              variant="outlined"
+              size="small"
+              color="warning"
+              startIcon={<RestartAlt sx={{ fontSize: 14 }} />}
+              onClick={handleResetAll}
+              sx={{ fontSize: 11, textTransform: 'none' }}
+            >
+              Reset All Settings to Defaults
+            </Button>
+            <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mt: 0.5, fontSize: 10 }}>
+              Clears all saved browser settings and reloads the page.
+            </Typography>
+          </Box>
+        </SettingsSection>
       )}
 
       {/* Legacy data cleanup — orphaned keys from before the unified Scene model */}
       {!isSettingsLocked() && legacyKeyCount > 0 && (
-        <Box sx={{ borderTop: '1px solid rgba(255,255,255,0.08)', pt: 2 }}>
-          <Button
-            variant="outlined"
-            size="small"
-            color="inherit"
-            startIcon={<CleaningServices sx={{ fontSize: 14 }} />}
-            onClick={handleClearLegacy}
-            sx={{ fontSize: 11, textTransform: 'none' }}
-          >
-            Clear legacy WebViewer data ({legacyKeyCount})
-          </Button>
-          <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mt: 0.5, fontSize: 10 }}>
-            Removes orphaned entries from the previous Layout / overlay storage scheme. Saved scenes are unaffected.
-          </Typography>
-        </Box>
+        <SettingsSection id="model-legacy" title="Legacy Data">
+          <Box>
+            <Button
+              variant="outlined"
+              size="small"
+              color="inherit"
+              startIcon={<CleaningServices sx={{ fontSize: 14 }} />}
+              onClick={handleClearLegacy}
+              sx={{ fontSize: 11, textTransform: 'none' }}
+            >
+              Clear legacy WebViewer data ({legacyKeyCount})
+            </Button>
+            <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mt: 0.5, fontSize: 10 }}>
+              Removes orphaned entries from the previous Layout / overlay storage scheme. Saved scenes are unaffected.
+            </Typography>
+          </Box>
+        </SettingsSection>
+      )}
+
+      {/* Analytics consent — only shown when a tracker is configured (GDPR withdrawal). */}
+      {analyticsConfigured && (
+        <SettingsSection id="model-privacy" title="Privacy">
+          <Box>
+            <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mb: 0.75, fontSize: 10 }}>
+              {analyticsConsented
+                ? 'Google Analytics is active — you opted in.'
+                : 'Google Analytics is disabled — you have not opted in.'}
+            </Typography>
+            {analyticsConsented && (
+              <>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  color="warning"
+                  startIcon={<Cookie sx={{ fontSize: 14 }} />}
+                  onClick={handleWithdrawConsent}
+                  sx={{ fontSize: 11, textTransform: 'none' }}
+                >
+                  Withdraw analytics consent
+                </Button>
+                <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mt: 0.5, fontSize: 10 }}>
+                  Stops Google Analytics and reloads the page.
+                </Typography>
+              </>
+            )}
+          </Box>
+        </SettingsSection>
       )}
     </Box>
   );

@@ -14,7 +14,7 @@
 
 import { debug, logInfo, debugWarn } from './engine/rv-debug';
 import type { RVViewer } from './rv-viewer';
-import { applyEnvironmentPreset, type EnvironmentPresetName } from './hmi/environment-presets';
+import { applyEnvironmentPreset, hasUserEnvironmentOverride, type EnvironmentPresetName } from './hmi/environment-presets';
 import { isContextActive, _subscribe as subscribeUiContext } from './hmi/ui-context-store';
 import { peekPersistedActivePanels } from './hmi/left-panel-manager';
 
@@ -228,14 +228,19 @@ export class ModelPluginManager {
             viewer.projectAssetsPath = `/private-assets/${projectFolder}/`;
           }
         }
-        // Always apply the model's default environment preset on model switch
-        // so each model reliably loads with its intended look. Any user tweaks
-        // to the Environment tab persist within a session until the next model
-        // switch — at which point the incoming model's preset takes over
-        // (applyEnvironmentPreset clears the user-modified flag).
+        // Apply the model's default environment preset so each model loads with
+        // its intended look — but NOT when the user has an explicit environment
+        // override (set via the Environment/Visual settings, or by applying a
+        // visual preset, which calls markEnvironmentUserModified). A page reload
+        // is indistinguishable from a model switch here; without this guard the
+        // reload would re-clobber the environment portion (ground/floor/background)
+        // of an active visual preset, so it no longer matched and the preset
+        // dropdown fell back to "Custom". A fresh user (no override) is unaffected.
         // Lighting changes regardless of planner state — it's a scene visual,
         // not a plugin UI.
-        applyEnvironmentPreset(viewer, mod.defaultEnvironmentPreset ?? 'Bright');
+        if (!hasUserEnvironmentOverride()) {
+          applyEnvironmentPreset(viewer, mod.defaultEnvironmentPreset ?? 'Bright');
+        }
 
         this.activeModule = mod;
         this.activeModelName = modelName;
@@ -253,9 +258,13 @@ export class ModelPluginManager {
       }
     } else {
       debug('plugins', `No model-specific plugins found for '${modelName}'`);
-      // Apply the generic 'Bright' fallback so every model switch leaves the
-      // environment in a predictable state.
-      applyEnvironmentPreset(viewer, 'Bright');
+      // Apply the generic 'Bright' fallback so a fresh model load leaves the
+      // environment in a predictable state — but never override an explicit user
+      // environment choice (see note above), else a reload would reset it and an
+      // active visual preset's environment would stop matching ("Custom").
+      if (!hasUserEnvironmentOverride()) {
+        applyEnvironmentPreset(viewer, 'Bright');
+      }
     }
   }
 

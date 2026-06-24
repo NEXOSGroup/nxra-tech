@@ -148,12 +148,12 @@ describe('rv-app-config', () => {
     defaults.modeSettings.default.lightIntensity = 1.0;
     saveVisualSettings(defaults);
 
-    // Step 2: Set config override (lightingMode override)
+    // Step 2: Set config override (legacy `lightingMode` key — exercises back-compat)
     setAppConfig({ visual: { lightingMode: 'default' } });
 
     // Step 3: Load — config must win over localStorage for overridden fields
     const result = loadVisualSettings();
-    expect(result.lightingMode).toBe('default');
+    expect(result.renderMode).toBe('default');
     // localStorage values preserved for non-overridden fields
     expect(result.modeSettings.default.shadowEnabled).toBe(false);
     expect(result.modeSettings.default.lightIntensity).toBe(1.0);
@@ -166,11 +166,11 @@ describe('rv-app-config', () => {
     const defaults = loadVisualSettings();
     defaults.modeSettings.default.shadowEnabled = false;
     defaults.modeSettings.default.lightIntensity = 1.5;
-    defaults.lightingMode = 'default';
+    defaults.renderMode = 'default';
     saveVisualSettings(defaults);
 
     const result = loadVisualSettings();
-    expect(result.lightingMode).toBe('default');
+    expect(result.renderMode).toBe('default');
     expect(result.modeSettings.default.shadowEnabled).toBe(false);
     expect(result.modeSettings.default.lightIntensity).toBe(1.5);
   });

@@ -20,6 +20,7 @@ import type { SignalStore } from './engine/rv-signal-store';
 import type { NodeRegistry } from './engine/rv-node-registry';
 import type { RVDrive } from './engine/rv-drive';
 import type { RVTransportSurface } from './engine/rv-transport-surface';
+import type { ModeId } from './rv-mode-manager';
 
 // TickStage wird in Phase 0 bereits in rv-tick-stages.ts definiert — Re-Export hier
 // damit Plugin-Autoren `import { TickStage } from '@rv/core/rv-plugin-context'` nutzen können.
@@ -71,6 +72,15 @@ export interface ControlsFacade {
 export interface TransportFacade {
   forEachSurface(fn: (surface: RVTransportSurface, path: string) => void): void;
   getSurfaceByPath(path: string): RVTransportSurface | null;
+}
+
+/** Narrow workspace-mode API for plugins (plan-198). Read the active mode and
+ *  request a switch; registration of modes stays a host/bootstrap concern. */
+export interface ModeFacade {
+  /** Active workspace mode id, or null before the first switch. */
+  readonly active: ModeId | null;
+  /** Switch to a mode (no-op if already active / unknown / switching). */
+  set(id: ModeId): void;
 }
 
 /** Simulation-Loop-API: Pause + Tick-Subscription. */
@@ -133,6 +143,8 @@ export interface PluginContext {
   readonly simLoop: SimLoopFacade;
   /** Null wenn kein Model geladen ODER kein TransportManager initialisiert. */
   readonly transport: TransportFacade | null;
+  /** Workspace mode (plan-198) — read active mode + request a switch. */
+  readonly modes: ModeFacade;
 }
 
 // ─── PluginContextImpl (Phase 4a of plan-182) ────────────────────────────
@@ -203,6 +215,14 @@ export class PluginContextImpl implements PluginContext {
 
   get connectionState(): 'Connected' | 'Disconnected' {
     return this._viewer.connectionState;
+  }
+
+  get modes(): ModeFacade {
+    const mgr = this._viewer.modes;
+    return {
+      get active() { return mgr.activeMode; },
+      set: (id: ModeId) => mgr.setMode(id),
+    };
   }
 
   loadModel = (url: string, _opts?: { signalMap?: string }): Promise<void> => {

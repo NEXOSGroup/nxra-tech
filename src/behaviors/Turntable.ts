@@ -159,12 +159,18 @@ const refreshTopology = (self: TurntableSelf): void => {
 const inputs = (l: TurntableLocal): PortConnection[] => l.connections.filter(c => c.role === 'input');
 const outputs = (l: TurntableLocal): PortConnection[] => l.connections.filter(c => c.role === 'output');
 
-// Deliberate root-only free-output read, kept for parity (NOT the per-port linkOf().occupied() lookup).
+// Per-port-then-root free-output read. The per-port lookup is ESSENTIAL against a
+// downstream turntable / chaintransfer: it goes root-"busy" the moment it starts
+// receiving FROM us (a mutual-busy deadlock) yet OPENS this exact port
+// (Occupied=false) to accept. Falls back to root for plain conveyors (no per-port
+// signal), so it matches the old behaviour there.
 const freeOutputs = (self: TurntableSelf): PortConnection[] => {
   const out: PortConnection[] = [];
   for (const c of outputs(self.local)) {
-    const sigName = flowOccupiedRootSignal(c.ownerRoot.name);
-    if (self.signals.get(sigName) === true) continue;
+    const rootSig = flowOccupiedRootSignal(c.ownerRoot.name);
+    const perPort = `${rootSig}@${c.pairedSnap.id}`;
+    const v = self.signals.get(perPort);
+    if ((v !== undefined ? v : self.signals.get(rootSig)) === true) continue;
     out.push(c);
   }
   return out;

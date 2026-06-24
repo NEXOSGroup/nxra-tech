@@ -25,6 +25,11 @@ export interface UIVisibilityRule {
   hiddenIn?: UIContext[];
   /** Element is visible ONLY when ALL of these contexts are active. */
   shownOnlyIn?: UIContext[];
+  /** Element is visible ONLY when AT LEAST ONE of these contexts is active (OR
+   *  semantics). Used for multi-mode plugins (e.g. `['mode:hmi','mode:des']`)
+   *  where exactly one mode context is ever active. Combined with `shownOnlyIn`
+   *  / `hiddenIn` via AND. */
+  shownOnlyInAny?: UIContext[];
 }
 
 // ─── Module-Level Singleton State ───────────────────────────────────────
@@ -97,8 +102,16 @@ export function resetDynamicContexts(initialContexts?: string[]): void {
 /**
  * Register (or override) a visibility rule for a named UI element.
  * Later calls overwrite earlier rules for the same ID.
+ *
+ * IMPORTANT: SlotRenderer calls this DURING render for entries carrying a
+ * `visibilityRule` (plan-198 mode-gated slots inject one). Notifying on every
+ * call would bump the context store mid-render and re-trigger SlotRenderer →
+ * infinite render loop (page hangs). So we no-op when the rule object is
+ * unchanged (same reference) — slot entries hold a stable rule object across
+ * renders, so the first registration notifies once and subsequent renders skip.
  */
 export function registerUIElement(id: string, rule: UIVisibilityRule): void {
+  if (_registeredRules.get(id) === rule) return; // unchanged → no notify (prevents render loop)
   _registeredRules.set(id, rule);
   _ruleVersion++;
   _notify(); // trigger re-evaluation in subscribed components
@@ -111,9 +124,10 @@ export function registerUIElement(id: string, rule: UIVisibilityRule): void {
  *
  * Precedence:
  *   1. Unknown element (no rule) → visible
- *   2. `shownOnlyIn` defined and not ALL listed contexts active → hidden
- *   3. `hiddenIn` — if ANY listed context is active → hidden
- *   4. Otherwise → visible
+ *   2. `shownOnlyInAny` defined and NO listed context active → hidden (OR gate)
+ *   3. `shownOnlyIn` defined and not ALL listed contexts active → hidden
+ *   4. `hiddenIn` — if ANY listed context is active → hidden
+ *   5. Otherwise → visible
  */
 export function isUIElementVisible(id: string, contexts: ReadonlySet<string>): boolean {
   const rule = _registeredRules.get(id);
@@ -133,6 +147,10 @@ export function evaluateVisibilityRule(
   rule: UIVisibilityRule,
   contexts: ReadonlySet<string>,
 ): boolean {
+  if (rule.shownOnlyInAny && rule.shownOnlyInAny.length > 0) {
+    const anyPresent = rule.shownOnlyInAny.some((c) => contexts.has(c));
+    if (!anyPresent) return false;
+  }
   if (rule.shownOnlyIn && rule.shownOnlyIn.length > 0) {
     const allPresent = rule.shownOnlyIn.every((c) => contexts.has(c));
     if (!allPresent) return false;

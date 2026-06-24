@@ -28,7 +28,7 @@ describe('navigation-sensitivity settings — store', () => {
     expect(s.orbitRotateSpeed).toBe(1.0);
     expect(s.orbitPanSpeed).toBe(1.0);
     expect(s.orbitZoomSpeed).toBe(1.0);
-    expect(s.orbitDampingFactor).toBe(0.08);
+    expect(s.orbitDampingFactor).toBe(0.2);
   });
 
   it('persists and reloads custom values', () => {
@@ -69,7 +69,7 @@ describe('navigation-sensitivity settings — store', () => {
     expect(s.orbitRotateSpeed).toBe(1.0);
     expect(s.orbitPanSpeed).toBe(1.0);
     expect(s.orbitZoomSpeed).toBe(1.0);
-    expect(s.orbitDampingFactor).toBe(0.08);
+    expect(s.orbitDampingFactor).toBe(0.2);
   });
 
   it('falls back to defaults for null, string, and undefined values', () => {
@@ -82,7 +82,7 @@ describe('navigation-sensitivity settings — store', () => {
     expect(s.orbitRotateSpeed).toBe(1.0);
     expect(s.orbitPanSpeed).toBe(1.0);
     expect(s.orbitZoomSpeed).toBe(1.0);
-    expect(s.orbitDampingFactor).toBe(0.08);
+    expect(s.orbitDampingFactor).toBe(0.2);
   });
 
   it('falls back to default for NaN (typeof number but Number.isNaN)', () => {
@@ -97,7 +97,7 @@ describe('navigation-sensitivity settings — store', () => {
     }));
     const s = loadVisualSettings();
     expect(s.orbitRotateSpeed).toBe(1.0);
-    expect(s.orbitDampingFactor).toBe(0.08);
+    expect(s.orbitDampingFactor).toBe(0.2);
   });
 
   it('handles partial migration (old localStorage without nav fields)', () => {
@@ -111,14 +111,14 @@ describe('navigation-sensitivity settings — store', () => {
     expect(s.orbitRotateSpeed).toBe(1.0);
     expect(s.orbitPanSpeed).toBe(1.0);
     expect(s.orbitZoomSpeed).toBe(1.0);
-    expect(s.orbitDampingFactor).toBe(0.08);
+    expect(s.orbitDampingFactor).toBe(0.2);
   });
 
   it('recovers from corrupted JSON in localStorage', () => {
     localStorage.setItem('rv-visual-settings', 'NOT_VALID_JSON{');
     const s = loadVisualSettings();
     expect(s.orbitRotateSpeed).toBe(1.0);
-    expect(s.orbitDampingFactor).toBe(0.08);
+    expect(s.orbitDampingFactor).toBe(0.2);
   });
 
   it('saveVisualSettings serialises nav fields without undefined/NaN', () => {

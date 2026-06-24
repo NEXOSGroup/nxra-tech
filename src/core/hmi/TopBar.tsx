@@ -1,49 +1,32 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
-import { useState, useEffect, useCallback, useSyncExternalStore, useRef } from 'react';
+import { useState, useEffect, useSyncExternalStore, useRef } from 'react';
 import { useEditorPlugin } from '../../hooks/use-editor-plugin';
-import { Typography, Box, IconButton, Paper, Tabs, Tab, Tooltip, Divider } from '@mui/material';
-import { Settings, AccountTree, ViewInAr, People, PushPin, FolderOpen } from '@mui/icons-material';
-import { useMobileLayout } from '../../hooks/use-mobile-layout';
+import { Typography, Box, Paper } from '@mui/material';
+import { Layers } from '@mui/icons-material';
+import { useMobileLayout, isMobileDevice } from '../../hooks/use-mobile-layout';
 import { useViewer } from '../../hooks/use-viewer';
-import { isSettingsLocked, isTabLocked } from './rv-app-config';
+import { useMode } from '../../hooks/use-mode';
 import { HierarchyBrowser } from './rv-hierarchy-browser';
 import { PropertyInspector } from './rv-property-inspector';
 import { AasDetailPanel } from '../../plugins/aas-link-plugin';
-import { LeftPanel } from './LeftPanel';
-import { SETTINGS_PANEL_WIDTH, SCENE_PANEL_WIDTH } from './layout-constants';
-import { LogoBadge } from './ButtonPanel';
+import { FLOATING_TOP_MARGIN, ACTIVITY_BAR_WIDTH } from './layout-constants';
+import { useLeftWindowWidth, useRightWindowWidth } from '../../hooks/use-left-window-width';
+import { useViewportInsets } from '../../hooks/use-viewport-insets';
+import { ModeDropdown } from './ModeDropdown';
+import { CameraBookmarks, HmiToggleButton, FpvBarButton } from './CameraBar';
+import { ActionGroupPill, ActionSegment, ActionDivider } from './action-group';
+import { SettingsPanel } from './SettingsPanel';
 import { SceneWindow } from './scene/SceneWindow';
 import { getSceneStore } from './scene/scene-store-singleton';
 import { MachineControlPanel } from './MachineControlPanel';
-import { MultiuserPanel } from './MultiuserPanel';
 import { SlotRenderer } from './HMIShell';
-import { useMultiuser } from '../../hooks/use-multiuser';
-import { loadMultiuserSettings } from './multiuser-settings-store';
-import type { MultiuserPluginAPI, WebXRPluginAPI } from '../types/plugin-types';
-import { ISA_GREEN } from './isa-colors';
-import { useToolbarShowLabels } from './visual-settings-store';
-
-// Settings tab components (extracted for maintainability)
-import { BackupTab, MouseTab, VisualTab, EnvironmentTab, InterfacesTab, MultiuserTab, McpTab, DevToolsTab, TestsTab, GroupsTab, LocalFolderTab } from './settings';
-import { usePluginSettingsTabs, PluginSettingsTabContent } from './PluginSettingsTabs';
-
-/** Persisted open/closed state for the Models window. The panel is otherwise
- *  driven by local React state, but users expect the dock to survive page
- *  reloads (same UX as Hierarchy, which persists via the plugin's own LS). */
-const LS_KEY_MODELS_OPEN = 'rv-models-window-open';
+import { useSlot } from '../../hooks/use-slot';
 
 export function TopBar() {
   const viewer = useViewer();
-  const [settingsTab, setSettingsTab] = useState(0);
   const [vrOpen, setVrOpen] = useState(false);
-  const [muOpen, setMuOpen] = useState(false);
-  // Hydrate from localStorage so the Models panel reopens on page reload.
-  const [sceneOpen, setSceneOpen] = useState<boolean>(() => {
-    try { return localStorage.getItem(LS_KEY_MODELS_OPEN) === 'true'; } catch { return false; }
-  });
-  const pluginSettingsTabs = usePluginSettingsTabs(viewer);
   const sceneStore = getSceneStore();
 
   // Hierarchy panel state from plugin
@@ -53,35 +36,10 @@ export function TopBar() {
 
   const lpm = viewer.leftPanelManager;
 
-  const setSettingsOpen = useCallback((open: boolean) => {
-    plugin?.setSettingsOpen(open);
-    // Sync with leftPanelManager so MachineControlPanel knows to close
-    if (open) {
-      lpm.open('settings', SETTINGS_PANEL_WIDTH);
-    } else if (lpm.isOpen('settings')) {
-      lpm.close('settings');
-    }
-  }, [plugin, lpm]);
-
-  const toggleHierarchy = useCallback(() => {
-    if (!plugin) return;
-    plugin.togglePanel();
-    setSettingsOpen(false);
-    setVrOpen(false);
-    setMuOpen(false);
-    setSceneOpen(false);
-    // Sync with leftPanelManager
-    if (!plugin.panelOpen) {
-      // Was closed, now opening (togglePanel already flipped)
-      lpm.open('hierarchy', pluginState.panelWidth);
-    } else {
-      lpm.close('hierarchy');
-    }
-    // Scene also lives on leftPanelManager — release its slot too.
-    if (lpm.isOpen('scene')) lpm.close('scene');
-  }, [plugin, setSettingsOpen, lpm, pluginState.panelWidth]);
-
-  // Listen to leftPanelManager changes — if another panel opens, close settings/hierarchy
+  // leftPanelManager is the single source of truth for which left window is
+  // open (the activity bar buttons drive it). The Hierarchy plugin and Settings
+  // keep their own open flags, so reconcile them here whenever the active left
+  // panel changes — closing any plugin-tracked panel that lost the slot.
   const panelSnapshot = useSyncExternalStore(lpm.subscribe, lpm.getSnapshot);
   const settingsOpenRef = useRef(settingsOpen);
   settingsOpenRef.current = settingsOpen;
@@ -89,213 +47,129 @@ export function TopBar() {
   hierarchyOpenRef.current = hierarchyOpen;
   const pluginRef = useRef(plugin);
   pluginRef.current = plugin;
-  const sceneOpenRef = useRef(sceneOpen);
-  sceneOpenRef.current = sceneOpen;
-  // Persist the Models open/closed state + keep lpm in sync. Runs on mount
-  // too, so a sceneOpen=true value hydrated from localStorage triggers
-  // lpm.open('scene', ...) — that in turn fires the activePanel useEffect
-  // below, which closes any Settings/Hierarchy state still hanging around
-  // from a stale plugin restore.
-  useEffect(() => {
-    try { localStorage.setItem(LS_KEY_MODELS_OPEN, String(sceneOpen)); } catch { /* ignore */ }
-    if (sceneOpen && sceneStore) {
-      lpm.open('scene', SCENE_PANEL_WIDTH);
-    } else if (!sceneOpen && lpm.isOpen('scene')) {
-      lpm.close('scene');
-    }
-  }, [sceneOpen, sceneStore, lpm]);
-
   useEffect(() => {
     const active = panelSnapshot.activePanel;
-    // Models / Settings / Hierarchy all dock to the LEFT slot. lpm enforces
-    // last-one-wins inside the slot, but each panel has its own independent
-    // React state ('sceneOpen', 'settingsOpen', and the plugin's panelOpen
-    // for Hierarchy). Mirror lpm's view into those states: close any whose
-    // id no longer matches the currently active panel.
-    //
-    // This makes the useEffect self-healing for every transition — clicking
-    // Settings while Models is open, opening annotations from the toolbar,
-    // a plugin panel taking over via `lpm.open`, or any future panel that
-    // joins the LEFT slot — without each button handler having to remember
-    // to clear every other panel's state.
     if (active !== 'settings' && settingsOpenRef.current) {
       pluginRef.current?.setSettingsOpen(false);
     }
     if (active !== 'hierarchy' && hierarchyOpenRef.current) {
       pluginRef.current?.togglePanel();
     }
-    if (active !== 'scene' && sceneOpenRef.current) {
-      setSceneOpen(false);
-    }
   }, [panelSnapshot.activePanel]);
 
   const isMobile = useMobileLayout();
 
-  // Toolbar label visibility — user-configurable in Settings → Visual. Mobile
-  // always renders icon-only regardless of the stored preference (toolbar is
-  // tight on phone screens).
-  const showLabels = useToolbarShowLabels() && !isMobile;
-  const labelSx = { fontSize: 12, fontWeight: 500, lineHeight: 1, whiteSpace: 'nowrap' as const };
-  // Chip-style sx fragment for labelled buttons — gives each one a subtle
-  // background so adjacent buttons are visually distinct. When labels are
-  // off, the IconButton stays round/transparent (default MUI styling).
-  const chipSx = showLabels ? {
-    px: 1,
-    py: 0.5,
-    gap: 0.75,
-    borderRadius: 1.5,
-    bgcolor: 'rgba(255,255,255,0.06)',
-    '&:hover': { bgcolor: 'rgba(255,255,255,0.14)' },
-  } : {};
+  // Re-render when a model loads so the right-region Groups button appears
+  // once the loaded scene exposes groups (groupCount > 0).
+  const [, setModelTick] = useState(0);
+  useEffect(() => {
+    const handler = () => setModelTick(t => t + 1);
+    viewer.on('model-loaded', handler);
+    return () => { viewer.off('model-loaded', handler); };
+  }, [viewer]);
 
-  // WebXR plugin for AR button on mobile
-  const xrPlugin = viewer.getPlugin<WebXRPluginAPI>('webxr');
-  // Show AR button on any touch device that supports WebXR AR (phones + tablets)
-  const hasTouchInput = isMobile || navigator.maxTouchPoints > 0;
-  const showMobileAR = hasTouchInput && xrPlugin?.arSupported;
-
-  // Multiuser plugin — only show button when enabled in settings
-  const muPlugin = viewer.getPlugin<MultiuserPluginAPI>('multiuser');
-  const muState = useMultiuser();
-  const [muEnabled, setMuEnabled] = useState(() => loadMultiuserSettings().enabled);
-  const showMultiuser = !!muPlugin && muEnabled;
+  // Shift the floating mode switcher right to stay in the *visible* viewport
+  // next to an open left-docked window (shared with the floating tool toolbar).
+  const openWindowWidth = useLeftWindowWidth();
+  const modeLeftOffset = ACTIVITY_BAR_WIDTH + (openWindowWidth > 0 ? openWindowWidth + 8 : 8);
+  // A mode-locked (kiosk / single-purpose HMI like Mauser) workspace hides the
+  // Play/Pause + Reset sim controls along with the mode dropdown — there is no
+  // workspace to drive, only a fixed display.
+  const { locked: modeLocked } = useMode();
+  const hasSimControls = useSlot('toolbar-button-leading').length > 0 && !modeLocked;
+  // Shift the floating camera cluster left of an open right-docked window
+  // (e.g. the Layout Planner library) so it stays visible — same as the left.
+  const rightWindowWidth = useRightWindowWidth();
+  const camRightOffset = rightWindowWidth > 0 ? rightWindowWidth + 8 : 8;
+  // Push the floating top-left cluster below the optional title bar when present.
+  const topInset = useViewportInsets().top;
 
   return (
     <>
-      {/* Hierarchy + VR + Settings buttons — fixed top-left */}
-      <Paper elevation={4} data-ui-panel sx={{ position: 'fixed', top: 8, left: 8, borderRadius: 2, pointerEvents: 'auto', zIndex: 9001, display: 'flex', alignItems: 'center', gap: isMobile ? 0.5 : showLabels ? 0.5 : 0.25, px: isMobile ? 0.5 : showLabels ? 0.5 : 0.25, py: showLabels ? 0.5 : 0 }}>
-        <LogoBadge />
-        {/* Models is the primary entry point — first button after the logo,
-            even before the sim controls. Users typically open Models first
-            to load a scene, so it gets the prime real estate. */}
-        {sceneStore && (
-          <Tooltip title={sceneOpen ? 'Close Models' : 'Models'} placement="bottom">
-            <IconButton
-              size={isMobile ? 'medium' : 'small'}
-              color={sceneOpen ? 'primary' : 'inherit'}
-              sx={{ p: isMobile ? 1 : 0.75, ...chipSx }}
-              onClick={() => {
-                const next = !sceneOpen;
-                setSceneOpen(next);
-                setVrOpen(false);
-                setMuOpen(false);
-                setSettingsOpen(false);
-                if (hierarchyOpen) plugin?.togglePanel();
-                if (next) lpm.open('scene', SCENE_PANEL_WIDTH);
-                else if (lpm.isOpen('scene')) lpm.close('scene');
-              }}
-            >
-              <FolderOpen fontSize={isMobile ? 'medium' : 'small'} />
-              {showLabels && <Typography sx={labelSx}>Models</Typography>}
-            </IconButton>
-          </Tooltip>
+      {/* The top app bar was removed — the realvirtual logo now lives at the top
+          of the left activity bar, window-openers live in the activity bar, and
+          the sim/mode + camera/view controls float in the viewport corners
+          (below). TopBar remains the HMI host for those floating clusters, the
+          docked windows, and the modals. */}
+
+      {/* Floating top-left cluster — workspace mode switcher + the sim-control
+          action group (Play/Pause + Reset). Sits in the 3D viewport's top-left
+          corner, just right of the activity bar's logo, and shifts right past an
+          open left-docked window so it stays in the visible view. */}
+      <Box
+        sx={{
+          position: 'fixed',
+          top: topInset + FLOATING_TOP_MARGIN,
+          left: { xs: 8, sm: modeLeftOffset },
+          zIndex: 1200,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 0.5,
+          pointerEvents: 'none',
+          '& > *': { pointerEvents: 'auto' },
+        }}
+      >
+        <ModeDropdown />
+        {/* Sim-control action group (Play/Pause + Reset) — renders the
+            toolbar-button-leading slot as its own glassy pill. */}
+        {hasSimControls && (
+          <ActionGroupPill>
+            <SlotRenderer slot="toolbar-button-leading" />
+          </ActionGroupPill>
         )}
-        {/* Visual separator — Models is its own section (scene/model
-            management), distinct from the sim controls and panel toggles
-            that follow. */}
-        {sceneStore && (
-          <Divider
-            orientation="vertical"
-            flexItem
-            sx={{ mx: 0.5, my: 0.5, borderColor: 'rgba(255,255,255,0.15)' }}
-          />
+      </Box>
+
+      {/* Floating BOTTOM-right cluster — separate camera / view action groups,
+          each its own glassy pill (CAM bookmarks, HMI toggle, optional Groups,
+          FPV). Shifts left of an open right-docked window so it stays visible.
+          The orientation gizmo now owns the top-right corner. Hidden on mobile. */}
+      <Box
+        sx={{
+          position: 'fixed',
+          bottom: FLOATING_TOP_MARGIN,
+          right: camRightOffset,
+          zIndex: 1200,
+          display: { xs: 'none', sm: 'flex' },
+          alignItems: 'center',
+          gap: 0.5,
+          pointerEvents: 'none',
+          '& > *': { pointerEvents: 'auto' },
+        }}
+      >
+        <SlotRenderer slot="toolbar-button-trailing" />
+        <ActionGroupPill><CameraBookmarks /></ActionGroupPill>
+        <ActionGroupPill><HmiToggleButton /></ActionGroupPill>
+        {viewer.groups && viewer.groups.groupCount > 0 && (
+          <ActionGroupPill>
+            <ActionSegment
+              title="Toggle Groups panel"
+              active={viewer.groupsOverlayOpen}
+              onClick={() => viewer.toggleGroupsOverlay()}
+              icon={<Layers />}
+            />
+          </ActionGroupPill>
         )}
-        {/* Leading slot — primary sim controls (Play/Pause + Reset) render
-            here, after Models, so they sit between the model selector and
-            the panel buttons (Hierarchy, Annotations, …). */}
-        <SlotRenderer slot="toolbar-button-leading" />
-        {plugin && !isMobile && (
-          <Tooltip title={hierarchyOpen ? 'Close Hierarchy' : 'Hierarchy'} placement="bottom">
-            <IconButton
-              size="small"
-              color={hierarchyOpen ? 'primary' : 'inherit'}
-              sx={{ p: 0.75, ...chipSx }}
-              onClick={toggleHierarchy}
-            >
-              <AccountTree fontSize="small" />
-              {showLabels && <Typography sx={labelSx}>Hierarchy</Typography>}
-            </IconButton>
-          </Tooltip>
-        )}
-        <SlotRenderer slot="toolbar-button" />
-        {!isMobile && (
-          <Tooltip title="Annotations" placement="bottom">
-            <IconButton
-              size="small"
-              color={panelSnapshot.activePanel === 'annotations' ? 'primary' : 'inherit'}
-              sx={{ p: 0.75, ...chipSx }}
-              onClick={() => {
-                lpm.toggle('annotations', 280);
-                setVrOpen(false);
-                setMuOpen(false);
-                setSettingsOpen(false);
-                if (hierarchyOpen) plugin?.togglePanel();
-              }}
-            >
-              <PushPin fontSize="small" />
-              {showLabels && <Typography sx={labelSx}>Annotations</Typography>}
-            </IconButton>
-          </Tooltip>
-        )}
-        {showMultiuser && !isMobile && (
-          <Tooltip title={muOpen ? 'Close Multiuser' : 'Multiuser'} placement="bottom">
-            <IconButton
-              size="small"
-              color={muOpen ? 'primary' : 'inherit'}
-              sx={{ p: 0.75, position: 'relative', ...chipSx }}
-              onClick={() => { setMuOpen(!muOpen); setVrOpen(false); setSettingsOpen(false); if (hierarchyOpen) plugin?.togglePanel(); }}
-            >
-              <People fontSize="small" />
-              {showLabels && <Typography sx={labelSx}>Multiuser</Typography>}
-              {muState.connected && !muOpen && (
-                <Box sx={{ position: 'absolute', top: 4, right: 4, width: 6, height: 6, borderRadius: '50%', bgcolor: ISA_GREEN }} />
+        {/* VR/AR + First-Person share one action group. */}
+        {(() => {
+          const showVr = !isMobile;
+          const showFpv = !isMobileDevice();
+          if (!showVr && !showFpv) return null;
+          return (
+            <ActionGroupPill>
+              {showVr && (
+                <ActionSegment
+                  title={vrOpen ? 'Close VR/AR' : 'VR / AR'}
+                  active={vrOpen}
+                  onClick={() => setVrOpen(!vrOpen)}
+                  label="VR"
+                />
               )}
-            </IconButton>
-          </Tooltip>
-        )}
-        {!isMobile && (
-          <Tooltip title={vrOpen ? 'Close VR/AR' : 'VR / AR'} placement="bottom">
-            <IconButton
-              size="small"
-              color={vrOpen ? 'primary' : 'inherit'}
-              sx={{ p: 0.75, ...chipSx }}
-              onClick={() => { setVrOpen(!vrOpen); setMuOpen(false); setSettingsOpen(false); if (hierarchyOpen) plugin?.togglePanel(); }}
-            >
-              {showLabels ? (
-                <>
-                  <ViewInAr fontSize="small" />
-                  <Typography sx={labelSx}>VR / AR</Typography>
-                </>
-              ) : (
-                <Typography sx={{ fontSize: 11, fontWeight: 700, px: 0.25 }}>VR</Typography>
-              )}
-            </IconButton>
-          </Tooltip>
-        )}
-        {showMobileAR && (
-          <Tooltip title="Start AR" placement="bottom">
-            <IconButton
-              sx={{ p: 1, color: '#81c784' }}
-              onClick={() => xrPlugin?.startAR()}
-            >
-              <ViewInAr />
-            </IconButton>
-          </Tooltip>
-        )}
-        {!isSettingsLocked() && (
-          <Tooltip title={settingsOpen ? 'Close Settings' : 'Settings'} placement="bottom">
-            <IconButton
-              size={isMobile ? 'medium' : 'small'}
-              color={settingsOpen ? 'primary' : 'inherit'}
-              sx={{ p: isMobile ? 1 : 0.75, ...chipSx }}
-              onClick={() => { setSettingsOpen(!settingsOpen); setVrOpen(false); setMuOpen(false); if (hierarchyOpen) plugin?.togglePanel(); }}
-            >
-              <Settings fontSize={isMobile ? 'medium' : 'small'} />
-              {showLabels && <Typography sx={labelSx}>Settings</Typography>}
-            </IconButton>
-          </Tooltip>
-        )}
-      </Paper>
+              {showVr && showFpv && <ActionDivider />}
+              {showFpv && <FpvBarButton />}
+            </ActionGroupPill>
+          );
+        })()}
+      </Box>
 
       {/* Hierarchy browser panel (disabled on mobile, hidden when settings open) */}
       {!isMobile && hierarchyOpen && !settingsOpen && <HierarchyBrowser viewer={viewer} />}
@@ -314,83 +188,21 @@ export function TopBar() {
       {/* Slot-based overlay panels (Layout Planner, etc.) */}
       <SlotRenderer slot="overlay" />
 
-      {/* Multiuser popup */}
-      {muOpen && <MultiuserPanel onClose={() => setMuOpen(false)} />}
-
       {/* VR/AR modal */}
       {vrOpen && <VRModal onClose={() => setVrOpen(false)} />}
 
-      {/* Settings side panel */}
+      {/* Settings side panel (opened from the activity bar) */}
       {settingsOpen && (
-        <LeftPanel
-          title={<Typography variant="subtitle2" sx={{ fontWeight: 600, fontSize: '0.8rem' }}>Settings</Typography>}
-          onClose={() => setSettingsOpen(false)}
-          width={SETTINGS_PANEL_WIDTH}
-          headerSx={{ px: 1.5, py: 0.75 }}
-        >
-          {/* Tabs - scrollable with visible scroll buttons on mobile (MUI hides them by default). */}
-          <Tabs
-            value={settingsTab}
-            onChange={(_, v: number) => setSettingsTab(v)}
-            variant="scrollable"
-            scrollButtons
-            allowScrollButtonsMobile
-            sx={{
-              borderBottom: '1px solid rgba(255,255,255,0.08)',
-              minHeight: 40,
-              flexShrink: 0,
-              '& .MuiTab-root': { minHeight: 40, py: 1, textTransform: 'none', fontSize: 13, minWidth: 0, px: { xs: 1, sm: 2 } },
-              '& .MuiTabs-scrollButtons.Mui-disabled': { opacity: 0.3 },
-            }}
-          >
-            {!isTabLocked('model') && <Tab label="Backup" value={0} />}
-            {/* Plugin-registered settings-tab slots (value = 100..N), rendered right
-                after Model so project-level tabs (e.g. "Start View") appear prominently.
-                Rendered inline (not wrapped in a component) so MUI Tabs
-                enumerates them via React.Children.map. */}
-            {pluginSettingsTabs.map((entry, i) => (
-              <Tab key={entry.pluginId ?? i} label={entry.label ?? 'Tab'} value={100 + i} />
-            ))}
-            {!isTabLocked('mouse') && <Tab label="Mouse & Touch" value={9} />}
-            {!isTabLocked('visual') && <Tab label="Visual" value={1} />}
-            {!isTabLocked('environment') && <Tab label="Environment" value={10} />}
-            {!isTabLocked('interfaces') && <Tab label="Interfaces" value={3} />}
-            {!isTabLocked('multiuser') && muPlugin && <Tab label="Multiuser" value={4} />}
-            {!isTabLocked('mcp') && viewer.getPlugin('mcp-bridge') && <Tab label="AI" value={5} />}
-            {!isTabLocked('devtools') && <Tab label="Dev Tools" value={6} />}
-            {!isTabLocked('tests') && <Tab label="Tests" value={7} />}
-            {!isTabLocked('groups') && <Tab label="Groups" value={8} />}
-            <Tab label="Local Folder" value={11} />
-          </Tabs>
-
-          {/* Tab content - minHeight: 0 for correct flexbox scrolling */}
-          <Box sx={{ flex: 1, overflow: 'auto', minHeight: 0, px: { xs: 1.5, sm: 2 }, py: 1.5 }}>
-            {settingsTab === 0 && !isTabLocked('model') && <BackupTab />}
-            {settingsTab === 9 && !isTabLocked('mouse') && <MouseTab />}
-            {settingsTab === 1 && !isTabLocked('visual') && <VisualTab />}
-            {settingsTab === 10 && !isTabLocked('environment') && <EnvironmentTab />}
-            {settingsTab === 3 && !isTabLocked('interfaces') && <InterfacesTab />}
-            {settingsTab === 4 && !isTabLocked('multiuser') && muPlugin && <MultiuserTab muEnabled={muEnabled} onMuEnabledChange={setMuEnabled} />}
-            {settingsTab === 5 && !isTabLocked('mcp') && viewer.getPlugin('mcp-bridge') && <McpTab />}
-            {settingsTab === 6 && !isTabLocked('devtools') && <DevToolsTab />}
-            {settingsTab === 7 && !isTabLocked('tests') && <TestsTab />}
-            {settingsTab === 8 && !isTabLocked('groups') && <GroupsTab />}
-            {settingsTab === 11 && <LocalFolderTab />}
-            {settingsTab >= 100 && (
-              <PluginSettingsTabContent viewer={viewer} value={settingsTab} offset={100} />
-            )}
-          </Box>
-        </LeftPanel>
+        <SettingsPanel
+          onClose={() => { plugin?.setSettingsOpen(false); lpm.close('settings'); }}
+        />
       )}
 
-      {/* Scene panel */}
-      {sceneOpen && sceneStore && (
+      {/* Scene / Models panel (opened from the activity bar) */}
+      {panelSnapshot.activePanel === 'scene' && sceneStore && (
         <SceneWindow
           store={sceneStore}
-          onClose={() => {
-            setSceneOpen(false);
-            if (lpm.isOpen('scene')) lpm.close('scene');
-          }}
+          onClose={() => lpm.close('scene')}
         />
       )}
     </>

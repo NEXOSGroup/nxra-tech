@@ -21,6 +21,7 @@ import { isHiddenComponentType, baseComponentType } from './rv-inspector-helpers
 import { isEphemeralField } from './rv-value-resolver';
 import { getFieldDescriptor, isFieldDisplayReadonly } from '../engine/rv-component-registry';
 import { openSetPositionDialog } from './SetPositionDialog';
+import { INSPECTOR_PANEL_WIDTH, INSPECTOR_MIN_WIDTH, INSPECTOR_MAX_WIDTH } from './layout-constants';
 
 // ─── Layout Object Helpers (for context menu) ──────────────────────────
 
@@ -86,6 +87,7 @@ export const HIERARCHY_MAX_WIDTH = 600;
 export const HIERARCHY_DEFAULT_WIDTH = 280;
 
 const LS_KEY_PANEL_WIDTH = 'rv-extras-editor-width';
+const LS_KEY_INSPECTOR_WIDTH = 'rv-inspector-width';
 const LS_KEY_PANEL_OPEN = 'rv-extras-editor-open';
 const LS_KEY_SELECTED_NODE = 'rv-extras-editor-selected';
 
@@ -93,6 +95,8 @@ const LS_KEY_SELECTED_NODE = 'rv-extras-editor-selected';
 export interface ExtrasEditorState {
   panelOpen: boolean;
   panelWidth: number;
+  /** Live width of the property inspector panel (resizable, persisted). */
+  inspectorWidth: number;
   overlay: RVExtrasOverlay | null;
   editableNodes: EditableNodeInfo[];
   selectedNodePath: string | null;
@@ -113,6 +117,7 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
   // ── State ──
   private _panelOpen = false;
   private _panelWidth: number;
+  private _inspectorWidth: number;
   private _overlay: RVExtrasOverlay | null = null;
   private _editableNodes: EditableNodeInfo[] = [];
   private _selectedNodePath: string | null = null;
@@ -129,11 +134,14 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
   constructor() {
     const storedWidth = localStorage.getItem(LS_KEY_PANEL_WIDTH);
     this._panelWidth = storedWidth ? Math.max(HIERARCHY_MIN_WIDTH, Math.min(HIERARCHY_MAX_WIDTH, Number(storedWidth))) : HIERARCHY_DEFAULT_WIDTH;
+    const storedInspectorWidth = localStorage.getItem(LS_KEY_INSPECTOR_WIDTH);
+    this._inspectorWidth = storedInspectorWidth ? Math.max(INSPECTOR_MIN_WIDTH, Math.min(INSPECTOR_MAX_WIDTH, Number(storedInspectorWidth))) : INSPECTOR_PANEL_WIDTH;
     this._panelOpen = localStorage.getItem(LS_KEY_PANEL_OPEN) === 'true';
     this._selectedNodePath = localStorage.getItem(LS_KEY_SELECTED_NODE) || null;
     this._snapshot = {
       panelOpen: this._panelOpen,
       panelWidth: this._panelWidth,
+      inspectorWidth: this._inspectorWidth,
       overlay: null,
       editableNodes: [],
       selectedNodePath: this._selectedNodePath,
@@ -151,6 +159,7 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
   private _snapshot: ExtrasEditorState = {
     panelOpen: false,
     panelWidth: HIERARCHY_DEFAULT_WIDTH,
+    inspectorWidth: INSPECTOR_PANEL_WIDTH,
     overlay: null,
     editableNodes: [],
     selectedNodePath: null,
@@ -172,6 +181,7 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
     this._snapshot = {
       panelOpen: this._panelOpen,
       panelWidth: this._panelWidth,
+      inspectorWidth: this._inspectorWidth,
       overlay: this._overlay,
       editableNodes: this._editableNodes,
       selectedNodePath: this._selectedNodePath,
@@ -208,6 +218,12 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
   setPanelWidth(width: number): void {
     this._panelWidth = Math.max(HIERARCHY_MIN_WIDTH, Math.min(HIERARCHY_MAX_WIDTH, width));
     localStorage.setItem(LS_KEY_PANEL_WIDTH, String(this._panelWidth));
+    this.notify();
+  }
+
+  setInspectorWidth(width: number): void {
+    this._inspectorWidth = Math.max(INSPECTOR_MIN_WIDTH, Math.min(INSPECTOR_MAX_WIDTH, width));
+    localStorage.setItem(LS_KEY_INSPECTOR_WIDTH, String(this._inspectorWidth));
     this.notify();
   }
 

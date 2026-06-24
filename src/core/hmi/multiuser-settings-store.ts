@@ -8,6 +8,7 @@
  * the default server URL, display name, role, and optional join code.
  */
 
+import { useSyncExternalStore } from 'react';
 import { lsLoad } from './ls-store-utils';
 
 const LS_KEY = 'rv-multiuser-settings';
@@ -43,6 +44,18 @@ export function loadMultiuserSettings(): MultiuserSettings {
   return lsLoad<MultiuserSettings>(LS_KEY, DEFAULTS);
 }
 
+// ── Reactivity ──────────────────────────────────────────────────────────
+// A tiny pub/sub so UI that depends on these settings (notably the activity-bar
+// Multiuser button's visibility, driven by `enabled`) updates live when the
+// Settings → Multiuser tab toggles them — no prop drilling needed.
+
+const listeners = new Set<() => void>();
+
+function subscribe(cb: () => void): () => void {
+  listeners.add(cb);
+  return () => listeners.delete(cb);
+}
+
 export function saveMultiuserSettings(settings: MultiuserSettings): void {
   // Intentionally no isSettingsLocked() guard — the prior implementation did
   // not enforce one, and multiuser settings are user-identity (display name,
@@ -52,4 +65,14 @@ export function saveMultiuserSettings(settings: MultiuserSettings): void {
   } catch {
     /* quota exceeded — silently ignore */
   }
+  for (const l of listeners) l();
+}
+
+/** Reactive read of the multiuser "enabled" master toggle. Re-renders the
+ *  caller whenever `saveMultiuserSettings` runs (e.g. the Settings toggle). */
+export function useMultiuserEnabled(): boolean {
+  return useSyncExternalStore(
+    subscribe,
+    () => loadMultiuserSettings().enabled,
+  );
 }

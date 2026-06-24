@@ -34,7 +34,7 @@ import {
   type RaycastGeometrySet,
   type RaycastGroup,
 } from './rv-raycast-geometry';
-import { getCapabilities } from './rv-component-registry';
+import { getCapabilities, getTypesWithCapability } from './rv-component-registry';
 import { pointerToNDC } from './rv-pointer-utils';
 
 // ─── Public types ───────────────────────────────────────────────────
@@ -408,8 +408,9 @@ export class RaycastManager {
   } | null {
     if (this._targets.length === 0) return null;
     const cam = xrCamera ?? this.getCamera();
-    const w = window.innerWidth;
-    const h = window.innerHeight;
+    // Map taps against the canvas rect (not the window) so picking stays correct
+    // when the canvas is confined to a sub-region of the viewport.
+    const rect = this.renderer.domElement.getBoundingClientRect();
 
     const TAP_RADIUS = 20;
     const offsets = [
@@ -424,8 +425,8 @@ export class RaycastManager {
     let bestDist = Infinity;
 
     for (const [ox, oy] of offsets) {
-      this.pointer.x = ((clientX + ox) / w) * 2 - 1;
-      this.pointer.y = -((clientY + oy) / h) * 2 + 1;
+      this.pointer.x = ((clientX + ox - rect.left) / rect.width) * 2 - 1;
+      this.pointer.y = -((clientY + oy - rect.top) / rect.height) * 2 + 1;
       this.raycaster.setFromCamera(this.pointer, cam);
 
       const hits = this.raycaster.intersectObjects(this._targets, false);
@@ -572,12 +573,40 @@ export class RaycastManager {
       }
     }
 
-    // Apply isolation gate (group/auto-filter/external) and any plugin-specific filter
-    if (this._isolationGate && !this._isolationGate(node)) return null;
-    if (this._allowFilter && !this._allowFilter(node)) return null;
+    // Promote to the NEAREST RuntimeMetadata node, including the hit object
+    // itself (an object with its own metadata counts — no walk past it). Stop at
+    // the first node up the chain that carries metadata and highlight EVERYTHING
+    // under it. No-op when there is no metadata in the chain, so non-metadata
+    // objects (drives, sensors, …) are unaffected.
+    let resolvedNode = node;
+    let resolvedPath = objectPath;
+    const meta = this._nearestMetadataAncestor(node);
+    if (meta) {
+      const metaPath = this.registry.getPathForNode(meta);
+      if (metaPath) { resolvedNode = meta; resolvedPath = metaPath; }
+    }
 
-    const nodeType = this._resolveNodeType(node);
-    return { node, nodeType, nodePath: objectPath };
+    // Apply isolation gate (group/auto-filter/external) and any plugin-specific filter
+    if (this._isolationGate && !this._isolationGate(resolvedNode)) return null;
+    if (this._allowFilter && !this._allowFilter(resolvedNode)) return null;
+
+    const nodeType = this._resolveNodeType(resolvedNode);
+    return { node: resolvedNode, nodeType, nodePath: resolvedPath };
+  }
+
+  /**
+   * Walk up from `node` and return the FIRST node that carries RuntimeMetadata
+   * (`userData._rvMetadata`, stamped by the RVMetadata component) — including
+   * `node` itself (an object with its own metadata stops the walk immediately).
+   * Returns null when no node in the chain has metadata.
+   */
+  private _nearestMetadataAncestor(node: Object3D): Object3D | null {
+    let cur: Object3D | null = node;
+    while (cur) {
+      if (cur.userData?._rvMetadata) return cur;
+      cur = cur.parent;
+    }
+    return null;
   }
 
   /** Determine the primary node type from cached data or registry. */
@@ -596,9 +625,9 @@ export class RaycastManager {
       if (types.length > 0) return types[0];
     }
 
-    // Walk up parent chain to find a hoverable type
-    const hoverableTypes = ['Drive', 'Sensor', 'MU', 'Pipe', 'Tank', 'Pump', 'ProcessingUnit'];
-    for (const type of hoverableTypes) {
+    // Walk up parent chain to find a hoverable type — derived from the
+    // capabilities registry (no hardcoded type list, no per-type special-case).
+    for (const type of getTypesWithCapability('hoverable')) {
       if (this.registry.findInParent(node, type)) return type;
     }
 
@@ -610,25 +639,6 @@ export class RaycastManager {
     }
 
     return 'Unknown';
-  }
-
-  /**
-   * Walk up from `node` to find the ancestor that actually owns the
-   * component of the given type. Mirrors what the click handler does
-   * (e.g. findInParent<RVDrive>) so hover highlights the same subtree.
-   */
-  private _findComponentOwner(node: Object3D, nodeType: string): Object3D | null {
-    if (!isKnownHoverableType(nodeType)) return null;
-    let current: Object3D | null = node;
-    while (current) {
-      const path = this.registry.getPathForNode(current);
-      if (path) {
-        const types = this.registry.getComponentTypes(path);
-        if (types.includes(nodeType)) return current;
-      }
-      current = current.parent;
-    }
-    return null;
   }
 
   /** Check if a node type is allowed by the current enabled hover types. */
@@ -675,11 +685,11 @@ export class RaycastManager {
       return;
     }
 
-    // Walk up to the component-owning parent to match click/selection behavior.
-    // _resolveNodeType uses findInParent which may report a type from an ancestor
-    // (e.g. 'Drive' for a child mesh under a Drive). The click handler walks up
-    // to that ancestor for selection, so hover should highlight the same node.
-    const highlightNode = (hitType ? this._findComponentOwner(hitNode, hitType) : null) ?? hitNode;
+    // The node from _resolveHit IS the canonical interactive owner: the BVH
+    // face-ranges were built by findContentAncestor (nearest hoverable ancestor),
+    // so hover and click/selection share this exact resolution. No extra walk-up
+    // here — that used to diverge from the click path and is the unification point.
+    const highlightNode = hitNode;
     const highlightPath = this.registry.getPathForNode(highlightNode) ?? hitPath;
 
     // Apply isolation gate + allow filter on the final highlight node (after component owner resolution)

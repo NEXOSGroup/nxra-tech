@@ -183,3 +183,38 @@ describe('ViewerEvents type map', () => {
     expect(eventsSrc).toMatch(/'fpv-exit':\s*void/);
   });
 });
+
+// ─── Ground / checker-floor sizing ──────────────────────────────────────
+// Locks in the floor-resize wiring so the disc never reverts to the previous
+// "frozen at load size" behavior (floor looked too small on empty / planner
+// scenes). See _updateGroundPlane / _fitGroundToContent in rv-viewer.ts.
+
+describe('checker floor sizing', () => {
+  it('has a single _updateGroundPlane sizing helper', () => {
+    expect(viewerSrc).toContain('_updateGroundPlane(center: Vector3, fullExtent: number)');
+  });
+
+  it('defines an authoring minimum floor extent', () => {
+    expect(viewerSrc).toContain('MIN_AUTHORING_GROUND_EXTENT');
+  });
+
+  it('loadEmptyScene resets the floor to the playground size', () => {
+    // loadEmptyScene must call the sizing helper (clearModel alone leaves the
+    // ground frozen at the previous model's size).
+    expect(viewerSrc).toMatch(/loadEmptyScene[\s\S]*?_updateGroundPlane\(\s*new Vector3\(0, 0, 0\),\s*MIN_AUTHORING_GROUND_EXTENT\s*\)/);
+  });
+
+  it('grows the floor on layout placement / drag (coalesced)', () => {
+    expect(viewerSrc).toContain("this.on('layout-transform-update', () => this._queueGroundFit())");
+    expect(viewerSrc).toContain("this.on('layout-drag-end', () => this._queueGroundFit())");
+    expect(viewerSrc).toContain('requestAnimationFrame(');
+  });
+
+  it('floor fit is grow-only (never shrinks on edits)', () => {
+    expect(viewerSrc).toMatch(/_fitGroundToContent[\s\S]*?desiredGroundSize <= currentGroundSize \* 1\.001[\s\S]*?return/);
+  });
+
+  it('floor fit clamps to the authoring minimum', () => {
+    expect(viewerSrc).toMatch(/_fitGroundToContent[\s\S]*?Math\.max\(size\.x, size\.z, MIN_AUTHORING_GROUND_EXTENT\)/);
+  });
+});

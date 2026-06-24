@@ -19,6 +19,8 @@ import {
   addSplatPlacedToScene,
   removePlacedFromScene,
   resolveUniqueName,
+  prepPlacedVisual,
+  registerPlaced,
   type SceneMutationDeps,
 } from '../src/plugins/layout-planner/scene-mutations';
 
@@ -174,6 +176,88 @@ describe('layout-planner/scene-mutations', () => {
       for (const [, target] of calls) {
         expect(target).toBe(clone);
       }
+    });
+  });
+
+  // The drag-preview model splits add into a VISUAL-prep half (run eagerly when
+  // a drag starts) and a REGISTRATION half (run at drop/commit on the SAME node).
+  describe('prepPlacedVisual / registerPlaced split', () => {
+    test('prepPlacedVisual parents + marks but does NOT register', () => {
+      const h = makeHarness();
+      const clone = makeClone('belt');
+      prepPlacedVisual(h.deps, clone, 'id-1', 'Belt', 'cat:belt');
+
+      // Visual prep ran: parented + markers.
+      expect(clone.parent).toBe(h.modelRoot);
+      expect(clone.userData._layoutObject).toBe(true);
+      expect(clone.userData._layoutId).toBe('id-1');
+      // Visibility is owned by the planner, not prep.
+      expect(clone.visible).toBe(true);
+      // Registration did NOT run: not in objectMap, no aux raycast targets.
+      expect(h.objectMap.has('id-1')).toBe(false);
+      expect(h.viewer.raycastManager!.addAuxRaycastTarget).not.toHaveBeenCalled();
+    });
+
+    test('registerPlaced registers a prepped node into objectMap + raycast', () => {
+      const h = makeHarness();
+      const clone = makeClone('belt');
+      prepPlacedVisual(h.deps, clone, 'id-1', 'Belt', 'cat:belt');
+      registerPlaced(h.deps, clone, 'id-1', 'Belt', 'cat:belt');
+
+      expect(h.objectMap.get('id-1')).toBe(clone);
+      expect(h.idByObject.get(clone)).toBe('id-1');
+      expect(h.viewer.raycastManager!.addAuxRaycastTarget).toHaveBeenCalled();
+    });
+
+    test('registerPlaced clears _isGhost on the whole subtree before registering', () => {
+      const h = makeHarness();
+      const clone = makeClone('belt');
+      // Simulate a preview node: ghost-flagged root + child.
+      clone.userData._isGhost = true;
+      clone.children[0].userData._isGhost = true;
+      prepPlacedVisual(h.deps, clone, 'id-1', 'Belt', 'cat:belt');
+      registerPlaced(h.deps, clone, 'id-1', 'Belt', 'cat:belt');
+
+      expect(clone.userData._isGhost).toBeUndefined();
+      expect(clone.children[0].userData._isGhost).toBeUndefined();
+    });
+
+    test('registerPlaced restores the SSAO layer (undoes markNoAO)', () => {
+      const h = makeHarness();
+      const clone = makeClone('belt');
+      // Simulate markNoAO: replace the layer mask (drops layer 0).
+      clone.layers.set(3);
+      clone.children[0].layers.set(3);
+      expect(clone.layers.isEnabled(0)).toBe(false);
+
+      prepPlacedVisual(h.deps, clone, 'id-1', 'Belt', 'cat:belt');
+      registerPlaced(h.deps, clone, 'id-1', 'Belt', 'cat:belt');
+
+      expect(clone.layers.isEnabled(0)).toBe(true);
+      expect(clone.children[0].layers.isEnabled(0)).toBe(true);
+    });
+
+    test('addPlacedToScene({alreadyPrepared:true}) skips prep but still registers', () => {
+      const h = makeHarness();
+      const clone = makeClone('belt');
+      // alreadyPrepared means the caller did NOT run prep — so the node is NOT
+      // parented and has no markers, yet registration must still wire it up.
+      addPlacedToScene(h.deps, clone, 'id-1', 'Belt', 'cat:belt', { alreadyPrepared: true });
+
+      // Prep skipped → not parented under model root.
+      expect(clone.parent).toBeNull();
+      // Registration ran → objectMap + raycast.
+      expect(h.objectMap.get('id-1')).toBe(clone);
+      expect(h.viewer.raycastManager!.addAuxRaycastTarget).toHaveBeenCalled();
+    });
+
+    test('addPlacedToScene (no opts) still runs the full combined pipeline', () => {
+      const h = makeHarness();
+      const clone = makeClone('belt');
+      addPlacedToScene(h.deps, clone, 'id-1', 'Belt', 'cat:belt');
+      // Combined: parented AND registered (the pre-split behavior).
+      expect(clone.parent).toBe(h.modelRoot);
+      expect(h.objectMap.get('id-1')).toBe(clone);
     });
   });
 

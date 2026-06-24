@@ -50,10 +50,17 @@ describe('isSensorName', () => {
     expect(isSensorName('Sensor-1')).toBe(true);
     expect(isSensorName('Sensor-Infeed')).toBe(true);
   });
+  it('tolerates Unity/exporter duplicate-name suffixes', () => {
+    expect(isSensorName('Sensor_(1)')).toBe(true);       // GLB export of "Sensor (1)"
+    expect(isSensorName('Sensor (1)')).toBe(true);       // Unity duplicate name
+    expect(isSensorName('Sensor(1)')).toBe(true);
+    expect(isSensorName('Sensor-Infeed_(2)')).toBe(true); // dashed id + dup suffix
+  });
   it('rejects non-sensor names', () => {
-    expect(isSensorName('Sensor_1')).toBe(false);     // underscore, not hyphen
-    expect(isSensorName('SensorMount')).toBe(false);  // no separator
-    expect(isSensorName('MySensor-1')).toBe(false);   // prefix only
+    expect(isSensorName('Sensor_1')).toBe(false);       // underscore + digit, no parens
+    expect(isSensorName('Sensor_Housing')).toBe(false); // underscore word, not a dup suffix
+    expect(isSensorName('SensorMount')).toBe(false);    // no separator
+    expect(isSensorName('MySensor-1')).toBe(false);     // prefix only
   });
 });
 

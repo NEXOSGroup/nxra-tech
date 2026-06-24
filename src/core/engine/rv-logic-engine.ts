@@ -26,6 +26,8 @@ import {
   StepState,
 } from './rv-logic-step';
 import type { RVGrip } from './rv-grip';
+import type { RVIKPath } from './rv-ik-path';
+import { RVIKPathStep } from './rv-ik-path-step';
 import { validateExtras } from './rv-extras-validator';
 import { debug } from './rv-debug';
 
@@ -379,6 +381,13 @@ function buildStep(
       const grip = ref?.path ? registry.getByPath<RVGrip>('Grip', ref.path) : null;
       const blocking = (data?.['Blocking'] as boolean) ?? false;
       step = new RVGripPlace(grip, blocking);
+      break;
+    }
+
+    case 'LogicStep_IKPath': {
+      const ref = data?.['IKPath'] as ComponentRef | undefined;
+      const ikPath = ref?.path ? registry.getByPath<RVIKPath>('IKPath', ref.path) : null;
+      step = new RVIKPathStep(ikPath);
       break;
     }
 

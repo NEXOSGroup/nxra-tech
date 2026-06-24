@@ -85,3 +85,69 @@ describe('RVTransportSurface — rotation-aware AABB footprint', () => {
     expect(surface.aabb.halfSize.z).toBeCloseTo(0.1, 3);
   });
 });
+
+describe('RVTransportSurface — child-sensor geometry excluded from footprint', () => {
+  // A Transport-Z belt (half 0.1 × 0.05 × 1.0) with one extra child node attached.
+  function makeSurfaceWithChild(child: Object3D): RVTransportSurface {
+    const parent = new Object3D();
+    parent.updateMatrixWorld(true);
+
+    const node = new Object3D();
+    node.name = 'Transport-Z';
+    node.add(new Mesh(new BoxGeometry(0.2, 0.1, 2.0), new MeshBasicMaterial())); // belt
+    node.add(child);
+    parent.add(node);
+    parent.updateMatrixWorld(true);
+
+    const surface = new RVTransportSurface(node, AABB.fromNode(node));
+    surface.init(stubContext());
+    return surface;
+  }
+
+  it('excludes a child sensor subtree (and its children) from the footprint', () => {
+    // Sensor node carries the canonical marker; a WIDE child (half-X 1.5) and a
+    // LONG grandchild (half-Z 3.0) would dominate the footprint if not pruned.
+    const sensor = new Object3D();
+    sensor.name = 'Sensor_(1)';
+    sensor.userData.realvirtual = { Sensor: {} };
+    const ray = new Mesh(new BoxGeometry(3.0, 0.1, 0.2), new MeshBasicMaterial());
+    ray.add(new Mesh(new BoxGeometry(0.1, 0.1, 6.0), new MeshBasicMaterial())); // grandchild
+    sensor.add(ray);
+
+    const surface = makeSurfaceWithChild(sensor);
+    surface.updateAABB();
+    // Belt only — the sensor's wide/long geometry is excluded.
+    expect(surface.aabb.halfSize.x).toBeCloseTo(0.1, 3);
+    expect(surface.aabb.halfSize.z).toBeCloseTo(1.0, 3);
+  });
+
+  it('still includes ordinary (non-sensor) child meshes', () => {
+    // The same wide mesh, but NOT marked as a sensor, must widen the footprint
+    // (guards against pruning more than just sensors).
+    const extra = new Mesh(new BoxGeometry(3.0, 0.1, 0.2), new MeshBasicMaterial());
+    const surface = makeSurfaceWithChild(extra);
+    surface.updateAABB();
+    expect(surface.aabb.halfSize.x).toBeCloseTo(1.5, 3);
+  });
+
+  it('excludes a baked raycast-BVH helper (it re-bundles belt + sensor geometry)', () => {
+    // The per-Drive raycast BVH bakes the whole drive subtree (belt + sensor)
+    // into one mesh under the surface; counting it would re-add the sensor.
+    const bvh = new Mesh(new BoxGeometry(3.0, 0.5, 0.2), new MeshBasicMaterial());
+    bvh.name = '__raycastBVH_Transport-Z';
+    bvh.userData._rvRaycastBVH = true;
+    const surface = makeSurfaceWithChild(bvh);
+    surface.updateAABB();
+    expect(surface.aabb.halfSize.x).toBeCloseTo(0.1, 3); // belt only, not 1.5
+    expect(surface.aabb.halfSize.y).toBeCloseTo(0.05, 3);
+  });
+
+  it('excludes a merged kinematic-group chunk', () => {
+    const merged = new Mesh(new BoxGeometry(3.0, 0.5, 0.2), new MeshBasicMaterial());
+    merged.name = '__kinGroupMerge_Transport-Z_0';
+    merged.userData._rvKinGroupMerged = true;
+    const surface = makeSurfaceWithChild(merged);
+    surface.updateAABB();
+    expect(surface.aabb.halfSize.x).toBeCloseTo(0.1, 3);
+  });
+});

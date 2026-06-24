@@ -11,6 +11,8 @@
 
 import type { RVViewer } from '../../../core/rv-viewer';
 import type { ModelPluginModule } from '../../../core/rv-model-plugin-manager';
+import { ModelOptionPlugin, remapAasLink } from '../model-option-plugin';
+import { OperatorHmiControlsPlugin } from './operator-hmi-controls';
 
 // Demo HMI plugins
 import { KpiDemoPlugin } from '../../demo/kpi-demo-plugin';
@@ -40,14 +42,40 @@ import '../../aas-link-plugin';
 // "Position / Speed / Target" hover card import it here.
 import '../../../core/hmi/tooltip/DriveTooltipContent';
 
+/** The Festo EMME-AS-40 servo motor AAS that ships in the base GLB. */
+const FESTO_MOTOR_AAS = 'http://smart.festo.com/aas/99920200617190044000012858';
+
+/**
+ * Apply the active supplier option (`?option=`) by issuing rv_extras commands.
+ * Each option re-points the Drive 1 motor's AAS to a different supplier — the Festo
+ * electric cylinder (a separate AAS) is left untouched. Add more commands per option
+ * here (e.g. setComponentField) to manipulate any rv_extras property.
+ */
+function applyModelOption(viewer: RVViewer, option: string): void {
+  if (option === 'bosch') {
+    remapAasLink(viewer, FESTO_MOTOR_AAS,
+      'https://aas.boschrexroth.com/ctrlxdrive/R911410072-MS2N-Demo-0001',
+      'Bosch Rexroth ctrlX DRIVE - MS2N Servomotor');
+  } else if (option === 'sew') {
+    remapAasLink(viewer, FESTO_MOTOR_AAS,
+      'https://demo.realvirtual.io/aas/sew/KA47-DRN90M4-Demo-0001',
+      'SEW KA47-DRN90M4 Gearmotor');
+  }
+}
+
 /** Model filenames (without .glb) that this module handles. */
-export const models = ['DemoRealvirtualWeb', 'DemoRealvirtualWebBosch', 'RealvirtualWebTest'];
+export const models = ['DemoRealvirtualWeb', 'RealvirtualWebTest'];
 
 /** Track registered plugin IDs for clean unregister. */
 const registeredIds: string[] = [];
 
 export function registerModelPlugins(viewer: RVViewer): void {
   const instances = [
+    // Model options (AAS supplier swap) — MUST be first so the remap runs
+    // before AasLinkPlugin pre-parses the AASX for the swapped ids.
+    new ModelOptionPlugin(applyModelOption),
+    // Hide engineering sim controls (Play/Pause/Reset + Realtime/DES) in HMI mode.
+    new OperatorHmiControlsPlugin(),
     // Demo HMI
     new KpiDemoPlugin(),
     new DemoHMIPlugin(),

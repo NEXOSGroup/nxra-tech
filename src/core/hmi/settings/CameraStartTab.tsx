@@ -16,6 +16,7 @@ import { useCameraStartPos } from '../../../hooks/use-camera-startpos';
 import {
   saveCurrentCameraAsStart, clearCurrentCameraStart,
 } from '../../../plugins/camera-startpos-plugin';
+import { SettingsSection } from './settings-helpers';
 
 export function CameraStartTab({ viewer }: UISlotProps) {
   const status = useCameraStartPos(viewer);
@@ -39,35 +40,34 @@ export function CameraStartTab({ viewer }: UISlotProps) {
   const clearDisabled = !status.has || status.source === 'author';
 
   return (
-    <Box>
-      <Typography variant="subtitle2" sx={{ mb: 1 }}>
-        Camera Start Position
-      </Typography>
-      <Typography variant="caption" sx={{ display: 'block', mb: 2, opacity: 0.8 }}>
-        {status.modelKey ? `Model: ${status.modelKey}` : 'No model loaded'}
-      </Typography>
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+      <SettingsSection id="camera-start" title="Camera Start Position">
+        <Typography variant="caption" sx={{ display: 'block', opacity: 0.8 }}>
+          {status.modelKey ? `Model: ${status.modelKey}` : 'No model loaded'}
+        </Typography>
 
-      <Typography variant="body2" sx={{ mb: 2 }}>
-        Status:&nbsp;
-        {status.has
-          ? status.source === 'author'
-            ? 'Author default (from GLB)'
-            : `Saved (user)${status.savedAt ? ` — ${new Date(status.savedAt).toLocaleString()}` : ''}`
-          : 'No start view — using fit-to-bounds'}
-      </Typography>
+        <Typography variant="body2">
+          Status:&nbsp;
+          {status.has
+            ? status.source === 'author'
+              ? 'Author default (from GLB)'
+              : `Saved (user)${status.savedAt ? ` — ${new Date(status.savedAt).toLocaleString()}` : ''}`
+            : 'No start view — using fit-to-bounds'}
+        </Typography>
 
-      <Stack direction="column" spacing={1} sx={{ maxWidth: 320 }}>
-        <Button variant="contained" size="small" disabled={saveDisabled} onClick={handleSave}>
-          Save current camera as start view
-        </Button>
-        <Button variant="outlined" size="small" disabled={clearDisabled} onClick={handleClear}>
-          Clear start view
-        </Button>
-      </Stack>
+        <Stack direction="column" spacing={1} sx={{ maxWidth: 320 }}>
+          <Button variant="contained" size="small" disabled={saveDisabled} onClick={handleSave}>
+            Save current camera as start view
+          </Button>
+          <Button variant="outlined" size="small" disabled={clearDisabled} onClick={handleClear}>
+            Clear start view
+          </Button>
+        </Stack>
+      </SettingsSection>
 
       {toast && (
         <Alert severity={toast.kind === 'error' ? 'error' : 'success'}
-               onClose={() => setToast(null)} sx={{ mt: 2 }}>
+               onClose={() => setToast(null)}>
           {toast.msg}
         </Alert>
       )}

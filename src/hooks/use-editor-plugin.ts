@@ -15,6 +15,7 @@ import { useSyncExternalStore, useRef, useCallback } from 'react';
 import { useViewer } from './use-viewer';
 import type { RvExtrasEditorPlugin, ExtrasEditorState } from '../core/hmi/rv-extras-editor';
 import { HIERARCHY_DEFAULT_WIDTH } from '../core/hmi/rv-extras-editor';
+import { INSPECTOR_PANEL_WIDTH } from '../core/hmi/layout-constants';
 
 const NOOP_UNSUB = () => () => {};
 
@@ -28,6 +29,7 @@ function getEmptySnapshot(): ExtrasEditorState {
   _emptySnapshot = {
     panelOpen: false,
     panelWidth: HIERARCHY_DEFAULT_WIDTH,
+    inspectorWidth: INSPECTOR_PANEL_WIDTH,
     overlay: null,
     editableNodes: [],
     selectedNodePath: null,

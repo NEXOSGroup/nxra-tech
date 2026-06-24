@@ -6,7 +6,7 @@ import { Typography, Box, Button, CircularProgress, Select, MenuItem, Switch, Te
 import { useViewer } from '../../../hooks/use-viewer';
 import { loadInterfaceSettings, saveInterfaceSettings, type InterfaceSettings, type InterfaceType, INTERFACE_DEFAULTS } from '../../../interfaces/interface-settings-store';
 import { InterfaceManager } from '../../../interfaces/interface-manager';
-import { StatRow, tfSx } from './settings-helpers';
+import { StatRow, tfSx, SettingsSection, FieldRow } from './settings-helpers';
 import { connectionStateColor } from '../isa-colors';
 
 const INTERFACE_OPTIONS: { value: InterfaceType; label: string; available: boolean }[] = [
@@ -83,113 +83,108 @@ export function InterfacesTab() {
   const stateColor = connectionStateColor(connectionState) ?? 'rgba(255,255,255,0.5)';
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
       {/* Interface selector */}
-      <Box>
-        <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-          Interface Protocol
-        </Typography>
-        <Select
-          size="small"
-          fullWidth
-          value={settings.activeType}
-          onChange={(e) => {
-            const type = e.target.value as InterfaceType;
-            if (isConnected) handleDisconnect();
-            persist({ activeType: type });
-          }}
-          sx={{ mt: 0.5, fontSize: 13, '& .MuiSelect-select': { py: 0.75 } }}
-        >
-          {INTERFACE_OPTIONS.map((opt) => (
-            <MenuItem key={opt.value} value={opt.value} disabled={!opt.available} sx={{ fontSize: 13 }}>
-              {opt.label}
-              {!opt.available && (
-                <Typography component="span" sx={{ ml: 1, fontSize: 10, color: 'text.disabled' }}>coming soon</Typography>
-              )}
-            </MenuItem>
-          ))}
-        </Select>
-      </Box>
+      <SettingsSection id="interfaces-protocol" title="Interface Protocol">
+        <FieldRow label="Protocol">
+          <Select
+            size="small"
+            fullWidth
+            value={settings.activeType}
+            onChange={(e) => {
+              const type = e.target.value as InterfaceType;
+              if (isConnected) handleDisconnect();
+              persist({ activeType: type });
+            }}
+          >
+            {INTERFACE_OPTIONS.map((opt) => (
+              <MenuItem key={opt.value} value={opt.value} disabled={!opt.available} sx={{ fontSize: 13 }}>
+                {opt.label}
+                {!opt.available && (
+                  <Typography component="span" sx={{ ml: 1, fontSize: 10, color: 'text.disabled' }}>coming soon</Typography>
+                )}
+              </MenuItem>
+            ))}
+          </Select>
+        </FieldRow>
+      </SettingsSection>
 
       {/* WebSocket-based settings */}
       {showSettings && isWsBased && (
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-          <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-            Connection
-          </Typography>
-          <Box sx={{ display: 'flex', gap: 1 }}>
+        <SettingsSection id="interfaces-connection" title="Connection">
+          <FieldRow label="Address">
+            <Box sx={{ display: 'flex', gap: 1, flex: 1, minWidth: 0 }}>
+              <TextField
+                size="small"
+                fullWidth
+                value={settings.wsAddress}
+                onChange={(e) => persist({ wsAddress: e.target.value })}
+                placeholder="localhost"
+                sx={tfSx}
+              />
+              <TextField
+                size="small"
+                type="number"
+                value={settings.wsPort}
+                onChange={(e) => persist({ wsPort: Number(e.target.value) || INTERFACE_DEFAULTS.wsPort })}
+                placeholder="Port"
+                sx={{ ...tfSx, width: 90, flexShrink: 0 }}
+              />
+            </Box>
+          </FieldRow>
+          <FieldRow label="Path">
             <TextField
-              label="Address"
               size="small"
               fullWidth
-              value={settings.wsAddress}
-              onChange={(e) => persist({ wsAddress: e.target.value })}
-              placeholder="localhost"
+              value={settings.wsPath}
+              onChange={(e) => persist({ wsPath: e.target.value })}
+              placeholder="/"
               sx={tfSx}
             />
-            <TextField
-              label="Port"
-              size="small"
-              type="number"
-              value={settings.wsPort}
-              onChange={(e) => persist({ wsPort: Number(e.target.value) || INTERFACE_DEFAULTS.wsPort })}
-              sx={{ ...tfSx, width: 90, flexShrink: 0 }}
-            />
-          </Box>
-          <TextField
-            label="Path"
-            size="small"
-            fullWidth
-            value={settings.wsPath}
-            onChange={(e) => persist({ wsPath: e.target.value })}
-            placeholder="/"
-            sx={tfSx}
-          />
-          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Typography variant="body2" sx={{ color: 'text.primary', fontSize: 13 }}>Use SSL (wss://)</Typography>
+          </FieldRow>
+          <FieldRow label="Use SSL (wss://)">
             <Switch size="small" checked={settings.wsUseSSL} onChange={(_, v) => persist({ wsUseSSL: v })} />
-          </Box>
+          </FieldRow>
           {(settings.wsUseSSL || settings.activeType === 'ctrlx' || settings.activeType === 'twincat-hmi') && (
-            <TextField
-              label="Auth Token"
-              size="small"
-              fullWidth
-              type="password"
-              value={settings.wsAuthToken}
-              onChange={(e) => persist({ wsAuthToken: e.target.value })}
-              placeholder={settings.activeType === 'twincat-hmi' ? 'Session token (cid)' : 'Bearer token (ctrlX SSL)'}
-              sx={tfSx}
-            />
+            <FieldRow label="Auth Token">
+              <TextField
+                size="small"
+                fullWidth
+                type="password"
+                value={settings.wsAuthToken}
+                onChange={(e) => persist({ wsAuthToken: e.target.value })}
+                placeholder={settings.activeType === 'twincat-hmi' ? 'Session token (cid)' : 'Bearer token (ctrlX SSL)'}
+                sx={tfSx}
+              />
+            </FieldRow>
           )}
-        </Box>
+        </SettingsSection>
       )}
 
       {/* MQTT settings */}
       {showSettings && isMqtt && (
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-          <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-            MQTT Broker
-          </Typography>
-          <TextField
-            label="Broker URL"
-            size="small"
-            fullWidth
-            value={settings.mqttBrokerUrl}
-            onChange={(e) => persist({ mqttBrokerUrl: e.target.value })}
-            placeholder="ws://localhost:8080/mqtt"
-            sx={tfSx}
-          />
-          <Box sx={{ display: 'flex', gap: 1 }}>
+        <SettingsSection id="interfaces-mqtt" title="MQTT Broker">
+          <FieldRow label="Broker URL">
             <TextField
-              label="Username"
+              size="small"
+              fullWidth
+              value={settings.mqttBrokerUrl}
+              onChange={(e) => persist({ mqttBrokerUrl: e.target.value })}
+              placeholder="ws://localhost:8080/mqtt"
+              sx={tfSx}
+            />
+          </FieldRow>
+          <FieldRow label="Username">
+            <TextField
               size="small"
               fullWidth
               value={settings.mqttUsername}
               onChange={(e) => persist({ mqttUsername: e.target.value })}
               sx={tfSx}
             />
+          </FieldRow>
+          <FieldRow label="Password">
             <TextField
-              label="Password"
               size="small"
               fullWidth
               type="password"
@@ -197,72 +192,63 @@ export function InterfacesTab() {
               onChange={(e) => persist({ mqttPassword: e.target.value })}
               sx={tfSx}
             />
-          </Box>
-          <TextField
-            label="Topic Prefix"
-            size="small"
-            fullWidth
-            value={settings.mqttTopicPrefix}
-            onChange={(e) => persist({ mqttTopicPrefix: e.target.value })}
-            placeholder="rv/"
-            sx={tfSx}
-          />
-        </Box>
+          </FieldRow>
+          <FieldRow label="Topic Prefix">
+            <TextField
+              size="small"
+              fullWidth
+              value={settings.mqttTopicPrefix}
+              onChange={(e) => persist({ mqttTopicPrefix: e.target.value })}
+              placeholder="rv/"
+              sx={tfSx}
+            />
+          </FieldRow>
+        </SettingsSection>
       )}
 
-      {/* Auto-connect toggle */}
+      {/* Connection control — auto-connect toggle + connect/disconnect */}
       {showSettings && (
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Box>
-            <Typography variant="body2" sx={{ color: 'text.primary', fontSize: 13 }}>Auto-Connect</Typography>
-            <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', fontSize: 10 }}>
-              Connect automatically when a model is loaded
-            </Typography>
-          </Box>
-          <Switch size="small" checked={settings.autoConnect} onChange={(_, v) => persist({ autoConnect: v })} />
-        </Box>
-      )}
+        <SettingsSection id="interfaces-control" title="Connection Control">
+          <FieldRow label="Auto-Connect" hint="Connect automatically when a model is loaded">
+            <Switch size="small" checked={settings.autoConnect} onChange={(_, v) => persist({ autoConnect: v })} />
+          </FieldRow>
 
-      {/* Connect / Disconnect button */}
-      {showSettings && (
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-          {isConnected ? (
-            <Button
-              variant="outlined"
-              size="small"
-              color="warning"
-              onClick={handleDisconnect}
-              sx={{ fontSize: 11, textTransform: 'none' }}
-            >
-              Disconnect
-            </Button>
-          ) : (
-            <Button
-              variant="contained"
-              size="small"
-              onClick={handleConnect}
-              disabled={connecting || !manager}
-              startIcon={connecting ? <CircularProgress size={12} color="inherit" /> : undefined}
-              sx={{ fontSize: 11, textTransform: 'none' }}
-            >
-              {connecting ? 'Connecting...' : 'Connect'}
-            </Button>
-          )}
-        </Box>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+            {isConnected ? (
+              <Button
+                variant="outlined"
+                size="small"
+                color="warning"
+                onClick={handleDisconnect}
+                sx={{ fontSize: 11, textTransform: 'none' }}
+              >
+                Disconnect
+              </Button>
+            ) : (
+              <Button
+                variant="contained"
+                size="small"
+                onClick={handleConnect}
+                disabled={connecting || !manager}
+                startIcon={connecting ? <CircularProgress size={12} color="inherit" /> : undefined}
+                sx={{ fontSize: 11, textTransform: 'none' }}
+              >
+                {connecting ? 'Connecting...' : 'Connect'}
+              </Button>
+            )}
+          </Box>
+        </SettingsSection>
       )}
 
       {/* Status */}
       {showSettings && (
-        <Box sx={{ borderTop: '1px solid rgba(255,255,255,0.08)', pt: 1.5 }}>
-          <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-            Status
-          </Typography>
-          <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+        <SettingsSection id="interfaces-status" title="Status">
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
             <StatRow label="State" value={connectionState} color={stateColor} />
             <StatRow label="Signals" value={isConnected ? String(signalCount) : '--'} />
             <StatRow label="Protocol" value={INTERFACE_OPTIONS.find(o => o.value === settings.activeType)?.label ?? '--'} />
           </Box>
-        </Box>
+        </SettingsSection>
       )}
 
       {!manager && (

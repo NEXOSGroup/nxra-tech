@@ -4,6 +4,7 @@
 import { useState, useCallback } from 'react';
 import { Typography, Box, Button, CircularProgress } from '@mui/material';
 import { PlayArrow, CheckCircle, Error as ErrorIcon } from '@mui/icons-material';
+import { SettingsSection } from './settings-helpers';
 
 interface TestResult {
   numPassedTests?: number;
@@ -45,7 +46,8 @@ export function TestsTab() {
   const total = result?.numTotalTests ?? 0;
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+      <SettingsSection id="tests" title="Tests">
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
         <Button
           variant="contained"
@@ -102,6 +104,7 @@ export function TestsTab() {
           Click "Run Tests" to execute vitest browser tests. Only available on the Vite dev server.
         </Typography>
       )}
+      </SettingsSection>
     </Box>
   );
 }

@@ -31,7 +31,7 @@ import type { LayoutPlannerCloudStore } from './cloud-types';
  * Mutates the provided `store` via `addCatalogDirect`. Returns silently on
  * any fetch / parse error so the planner can still boot offline.
  */
-export async function loadBundledLibrary(store: LayoutStore): Promise<void> {
+export async function loadBundledLibrary(store: LayoutStore): Promise<string | null> {
   const baseUrl = (import.meta.env.BASE_URL ?? '/') + 'models/library/';
   const catalogUrl = baseUrl + 'catalog.json';
 
@@ -42,34 +42,70 @@ export async function loadBundledLibrary(store: LayoutStore): Promise<void> {
       if (data.entries && Array.isArray(data.entries)) {
         const catalog = {
           version: '1.0' as const,
-          name: data.name ?? 'Bundled Library',
+          name: data.name ?? 'Standard Library',
           entries: data.entries.map(
             (e: Partial<LibraryCatalogEntry> & { glbUrl: string }) =>
               normalizeCatalogEntry(e, baseUrl),
           ),
         };
         store.addCatalogDirect(catalogUrl, catalog);
-        return;
+        return catalogUrl;
       }
     }
   } catch { /* catalog.json not available — try glob fallback */ }
 
-  // Fallback: build catalog from import.meta.glob results
+  // Fallback: enumerate the bundled GLBs via import.meta.glob. These assets
+  // live in `public/`, so Vite serves them at the ROOT path (WITHOUT the
+  // `/public` prefix) and the `?url` import VALUE is unreliable for them
+  // (Vite warns: "Assets in the public directory are served at the root
+  // path"). We therefore read the glob KEYS and derive the served path
+  // ourselves: strip the `/public/models/library/` prefix to get each asset's
+  // sub-path (e.g. `PalletHandling/CartonBox.glb`), pass it as a RELATIVE
+  // glbUrl resolved against `baseUrl`, and use the first sub-folder as the
+  // collection facet so subfolders become library categories.
   const glbModules = import.meta.glob('/public/models/library/**/*.glb', {
     query: '?url', import: 'default', eager: true,
   }) as Record<string, string>;
 
-  const entries = Object.values(glbModules);
-  if (entries.length === 0) return;
+  const PUBLIC_PREFIX = '/public/models/library/';
+  const keys = Object.keys(glbModules);
+  if (keys.length === 0) return null;
 
   const catalog = {
     version: '1.0' as const,
-    name: 'Bundled Library',
-    entries: entries.map(glbUrl =>
-      normalizeCatalogEntry({ glbUrl }, baseUrl),
-    ),
+    name: 'Standard Library',
+    entries: keys.map((key) => {
+      const sub = key.startsWith(PUBLIC_PREFIX)
+        ? key.slice(PUBLIC_PREFIX.length)
+        : (key.split('/').pop() ?? key);
+      const parts = sub.split('/');
+
+      // Category (enum): first subfolder if it maps to a known category,
+      // otherwise 'custom'. Mirrors the Local Folder convention so existing
+      // category-based UIs keep working.
+      const folder = parts.length > 1 ? parts[0].toLowerCase() : '';
+      const category = (['conveyor', 'robot', 'machine', 'fixture', 'des'].includes(folder)
+        ? folder
+        : 'custom') as LibraryCatalogEntry['category'];
+
+      // Collections (chips): every parent directory becomes a chip, cumulative
+      // for nested folders — `PalletHandling/Conveyors/Roll.glb` →
+      // ["PalletHandling", "PalletHandling/Conveyors"]. Same as Local Folder.
+      const dirSegments = parts.slice(0, -1).filter(Boolean);
+      const collections: string[] = [];
+      for (let i = 0; i < dirSegments.length; i++) {
+        collections.push(dirSegments.slice(0, i + 1).join('/'));
+      }
+
+      return normalizeCatalogEntry(
+        { glbUrl: sub, category, collections: collections.length > 0 ? collections : undefined },
+        baseUrl,
+      );
+    }),
   };
-  store.addCatalogDirect('bundled://library', catalog);
+  const fallbackUrl = 'bundled://library';
+  store.addCatalogDirect(fallbackUrl, catalog);
+  return fallbackUrl;
 }
 
 /** Find a catalog entry by its stable id across all loaded catalogs. */
@@ -98,6 +134,27 @@ export function findCatalogEntryById(
  * just-issued blob URL from `cloud.downloadGlb`. Never returns a saved
  * blob URL — those are always stale by the time we get here.
  */
+/**
+ * Re-root a bundled (local) standard-library path onto the current deploy's
+ * BASE_URL. A scene authored on one deploy (e.g. root `/`) stores each placement
+ * glbUrl as the fully-resolved path of THAT deploy (`/models/library/...`); under
+ * a sub-path deploy (`/demo/`) that root-absolute path resolves against the origin
+ * root and 404s. Stripping to the `models/library/...` suffix and re-prepending
+ * BASE_URL makes published scenes portable across root / sub-path / customer
+ * deploys (and keeps local dev == build).
+ *
+ * Full public web URLs (http/https — e.g. a GitHub-hosted library) and blob/data
+ * URLs are left untouched: those are NOT deploy-relative and resolve the same
+ * everywhere.
+ */
+function rebaseLocalLibraryUrl(url: string): string | null {
+  if (!url || /^(https?:|blob:|data:)/i.test(url)) return null;
+  const m = url.match(/(?:^|\/)(models\/library\/.+)$/);
+  if (!m) return null;
+  const base = import.meta.env.BASE_URL ?? '/';
+  return (base.endsWith('/') ? base : base + '/') + m[1];
+}
+
 export async function resolvePlacementUrl(
   store: LayoutStore,
   cloudStore: LayoutPlannerCloudStore | null,
@@ -114,8 +171,13 @@ export async function resolvePlacementUrl(
     return null;
   }
 
-  // 1. Saved URL is a stable URL (not blob:) — use it as-is.
-  if (comp.glbUrl && !comp.glbUrl.startsWith('blob:')) return comp.glbUrl;
+  // 1. Saved URL is a stable URL (not blob:) — use it as-is, except a bundled
+  //    (local) standard-library path is re-rooted onto THIS deploy's BASE_URL so
+  //    a scene authored on another base (e.g. root) still resolves under a
+  //    sub-path deploy (/demo). Public http(s) library URLs are left untouched.
+  if (comp.glbUrl && !comp.glbUrl.startsWith('blob:')) {
+    return rebaseLocalLibraryUrl(comp.glbUrl) ?? comp.glbUrl;
+  }
 
   // 2. Current catalog entry has a stable URL — use it.
   //    Local-folder catalog entries carry FRESH blob URLs produced by

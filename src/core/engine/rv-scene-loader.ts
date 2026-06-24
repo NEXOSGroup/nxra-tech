@@ -21,6 +21,10 @@ import './rv-connect-signal';
 import './rv-safety-door';
 import './rv-web-sensor';
 import './rv-web-error';
+import './rv-metadata';
+import './rv-ik-target';
+import './rv-ik-path';
+import './rv-robot-ik';
 // Pipeline components — class constructors also register capabilities + tooltip resolvers
 import { RVPipe } from './rv-pipe';
 import { RVTank } from './rv-tank';
@@ -39,10 +43,12 @@ import { GroupRegistry } from './rv-group-registry';
 import { validateExtras, printParitySummary, resetParityValidator } from './rv-extras-validator';
 import { parseActiveOnly, type ActiveOnly } from './rv-active-only';
 import { debug, logInfo } from './rv-debug';
+import { createLoadProfiler } from './rv-load-profiler';
 import { deduplicateMaterials, type DedupResult } from './rv-material-dedup';
 import { applyUberMaterial, type UberResult } from './rv-uber-material';
 import { mergeStaticUberMeshes, type StaticUberMergeResult } from './rv-static-merge-uber';
 import { mergeKinematicGroupMeshes, type KinematicMergeResult } from './rv-kinematic-merge-uber';
+import { freezeStaticMatrices } from './rv-freeze-static';
 import { buildRaycastGeometries, type RaycastGeometrySet } from './rv-raycast-geometry';
 import { applyOverlayToNode, type RVExtrasOverlay } from './rv-extras-overlay-store';
 import { applyKinematicsSpec } from '../behavior-runtime';
@@ -54,6 +60,9 @@ dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5
 
 const gltfLoader = new GLTFLoader();
 gltfLoader.setDRACOLoader(dracoLoader);
+// Warm up the Draco WASM decoder worker before the first model load so the
+// first DRACO-compressed mesh does not pay the worker spin-up cost inline.
+dracoLoader.preload();
 
 // ─── Register capabilities for types without factories ────────────
 
@@ -68,26 +77,10 @@ registerCapabilities('ProcessingUnit', {
   hoverPriority: 10,
   pinPriority: 5,
 });
-registerCapabilities('Metadata', {
-  hoverable: true,
-  tooltipType: 'metadata',
-  badgeColor: '#ffb74d',
-  filterLabel: 'Metadata',
-  hoverEnabledByDefault: true,
-  hoverPriority: 8,
-  pinPriority: 3,
-});
+// RuntimeMetadata/Metadata capabilities are registered by rv-metadata.ts (side-effect
+// import above), like the other factory components.
 // Note: AASLink capabilities are registered by aas-link-plugin.tsx (plugin side-effect).
 // Model plugins load BEFORE loadGLB() so capabilities are available for BVH construction.
-registerCapabilities('RuntimeMetadata', {
-  hoverable: true,
-  tooltipType: 'metadata',
-  badgeColor: '#ffb74d',
-  filterLabel: 'Metadata',
-  hoverEnabledByDefault: true,
-  hoverPriority: 8,
-  pinPriority: 3,
-});
 
 // Recorder types (visible in inspector but not hoverable)
 registerCapabilities('DrivesRecorder', { badgeColor: '#7e57c2' });
@@ -137,7 +130,6 @@ export interface LoadResult {
   uberMergeResult: StaticUberMergeResult | null;
   kinematicMergeResult: KinematicMergeResult | null;
   pipelineNodes: { pipes: Object3D[]; tanks: Object3D[]; pumps: Object3D[]; processingUnits: Object3D[] };
-  metadataNodes: Object3D[];
   /** Group names that were re-parented under Kinematic nodes (for auto-exclude from overlay). */
   kinematicGroupNames: string[];
   /** Grouped BVH raycast geometries (static + per-Drive kinematic). */
@@ -371,7 +363,6 @@ interface TraverseResult {
   recorderSettings: RecorderSettings | null;
   replayRecordingConfigs: { sequence: string; startOnSignal: ComponentRef | null; isReplayingSignal: ComponentRef | null; activeOnly: ActiveOnly }[];
   pipelineNodes: { pipes: Object3D[]; tanks: Object3D[]; pumps: Object3D[]; processingUnits: Object3D[] };
-  metadataNodes: Object3D[];
 }
 
 /**
@@ -399,9 +390,6 @@ export function traverseAndRegister(
   const tankNodes: Object3D[] = [];
   const pumpNodes: Object3D[] = [];
   const processingUnitNodes: Object3D[] = [];
-
-  // Metadata nodes for tooltip hover
-  const metadataNodes: Object3D[] = [];
 
   root.traverse((node: Object3D) => {
     // Register ALL nodes in registry (Phase 1)
@@ -519,19 +507,8 @@ export function traverseAndRegister(
       registry.register('ProcessingUnit', path, node);
     }
 
-    // RuntimeMetadata — tooltip content for interactive objects.
-    // Can coexist with Drive/Pipe/Tank/etc. — only sets _rvType if no other type is present.
-    if (rv['RuntimeMetadata']) {
-      const md = rv['RuntimeMetadata'] as Record<string, unknown>;
-      validateExtras('RuntimeMetadata', md);
-      node.userData._rvMetadata = { content: (md['content'] as string) ?? '' };
-      if (!node.userData._rvType) {
-        // Standalone metadata node — set type and register for raycast
-        node.userData._rvType = 'Metadata';
-        metadataNodes.push(node);
-      }
-      registry.register('Metadata', path, node);
-    }
+    // RuntimeMetadata is handled by the RVMetadata factory component (rv-metadata.ts),
+    // discovered via the registered-factories loop above.
 
     // AASLink — Asset Administration Shell link.
     // Can coexist with Drive/Pipe/etc. — only sets _rvType if no other type is present.
@@ -600,7 +577,6 @@ export function traverseAndRegister(
     recorderSettings,
     replayRecordingConfigs,
     pipelineNodes: { pipes: pipeNodes, tanks: tankNodes, pumps: pumpNodes, processingUnits: processingUnitNodes },
-    metadataNodes,
   };
 }
 
@@ -700,8 +676,14 @@ export function initializeComponents(
 ): void {
   const context: ComponentContext = { registry, signalStore, scene, transportManager, root, gizmoManager, events, errorStore };
   for (const { component } of pending) {
-    resolveComponentRefs(component as unknown as Record<string, unknown>, registry);
-    component.init(context);
+    // Isolate each component: a single component's resolve/init throwing must not
+    // abort the whole model load (which would leave the scene/hierarchy unbuilt).
+    try {
+      resolveComponentRefs(component as unknown as Record<string, unknown>, registry);
+      component.init(context);
+    } catch (e) {
+      console.error(`[loader] component init failed for "${component.node?.name}":`, e);
+    }
   }
 }
 
@@ -728,6 +710,96 @@ export function runOnSceneReady(
       component.onSceneReady(context);
     }
   }
+}
+
+// ─── Runtime node creation (op-log `addNode`) ───────────────────────────
+
+/** Subsystems needed to construct + init a component node at runtime. */
+export interface RuntimeNodeDeps {
+  registry: NodeRegistry;
+  signalStore: SignalStore;
+  scene: Scene;
+  transportManager: RVTransportManager;
+  gizmoManager?: GizmoOverlayManager;
+  events?: EventEmitter<ViewerEvents>;
+  errorStore?: ErrorStore;
+}
+
+/** A node to create at runtime: transform + `userData.realvirtual` content. */
+export interface RuntimeNodeSpec {
+  parentPath: string;
+  name: string;
+  position: [number, number, number];
+  quaternion: [number, number, number, number];
+  scale: [number, number, number];
+  components: Record<string, Record<string, unknown>>;
+}
+
+/**
+ * Create, register, construct and init a single component node at runtime — the
+ * op-log `addNode` path (e.g. an inserted IK path waypoint). Mirrors the loader's
+ * STEP 1 (construct + applySchema + register) and STEP 2 (resolveComponentRefs +
+ * init) for one node. Factory-based components only — Drive and signals are NOT
+ * constructed here (path waypoints don't need them). Returns the node, or null
+ * if the parent is missing. The node is tagged `userData.__rvAdded` so
+ * removeRuntimeNode only ever removes op-created nodes, never original GLB nodes.
+ */
+export function createRuntimeNode(deps: RuntimeNodeDeps, spec: RuntimeNodeSpec): Object3D | null {
+  const parent = deps.registry.getNode(spec.parentPath);
+  if (!parent) return null;
+
+  const node = new Object3D();
+  node.name = spec.name;
+  node.position.fromArray(spec.position);
+  node.quaternion.fromArray(spec.quaternion);
+  node.scale.fromArray(spec.scale);
+  node.userData.realvirtual = JSON.parse(JSON.stringify(spec.components));
+  node.userData.__rvAdded = true;
+  parent.add(node);
+  node.updateMatrix();
+  node.updateMatrixWorld(true);
+
+  const path = NodeRegistry.computeNodePath(node);
+  deps.registry.registerNode(path, node);
+
+  const rv = node.userData.realvirtual as Record<string, unknown>;
+  const constructed: RVComponent[] = [];
+  for (const [type, factory] of getRegisteredFactories()) {
+    const data = rv[type] as Record<string, unknown> | undefined;
+    if (!data) continue;
+    const aabb = factory.needsAABB ? createAABBFromExtras(node, rv) : null;
+    const inst = factory.create(node, aabb);
+    if (factory.beforeSchema) factory.beforeSchema(inst, data);
+    applySchema(inst as unknown as Record<string, unknown>, factory.schema, data);
+    if (factory.afterCreate) factory.afterCreate(inst, node);
+    deps.registry.register(type, path, inst);
+    constructed.push(inst);
+  }
+
+  const context: ComponentContext = {
+    registry: deps.registry, signalStore: deps.signalStore, scene: deps.scene,
+    transportManager: deps.transportManager, root: parent,
+    gizmoManager: deps.gizmoManager, events: deps.events, errorStore: deps.errorStore,
+  };
+  for (const inst of constructed) {
+    try {
+      resolveComponentRefs(inst as unknown as Record<string, unknown>, deps.registry);
+      inst.init?.(context);
+    } catch (e) {
+      console.error(`[loader] runtime node init failed for "${node.name}":`, e);
+    }
+  }
+  return node;
+}
+
+/** Remove an op-created node (inverse of addNode). No-op on original GLB nodes
+ *  (only nodes tagged `__rvAdded` are removed) so a stray removeNode can never
+ *  delete real scene geometry. */
+export function removeRuntimeNode(registry: NodeRegistry, nodePath: string): void {
+  const node = registry.getNode(nodePath);
+  if (!node || !node.userData?.['__rvAdded']) return;
+  registry.unregisterSubtree(node);
+  node.parent?.remove(node);
 }
 
 /**
@@ -1054,11 +1126,15 @@ export async function tryFetchSidecarSpec(glbUrl: string): Promise<import('../be
  * Returns drives, transport manager, signal store, registry, playback, logic engine, and scene metrics.
  */
 export async function loadGLB(url: string, scene: Scene, options?: LoadGLBOptions): Promise<LoadResult> {
+  const prof = createLoadProfiler('loadGLB');
+
   // Phase 1: Load and parse GLTF
   const { root, gltfParser } = await loadAndPrepareGLTF(url, scene);
+  prof.mark('gltf-parse');
 
   // Phase 2: Process meshes (shadow classification, triangle counting, drive/transport node sets)
   const { triangleCount, driveNodeSet } = processMeshes(root);
+  prof.mark('processMeshes');
 
   // Phase 3: Detect renamed nodes (Three.js dedup)
   const renamedNodes = detectRenamedNodes(gltfParser);
@@ -1099,12 +1175,14 @@ export async function loadGLB(url: string, scene: Scene, options?: LoadGLBOption
   // The optional overlay is applied per-node BEFORE component construction
   // so drives/sensors see the overridden field values directly.
   const traverseResult = traverseAndRegister(root, registry, signalStore, renamedNodes, options?.overlay);
+  prof.mark('traverseAndRegister');
 
   // Phase 6: Register node aliases for renamed nodes
   registerNodeAliases(renamedNodes, registry, signalStore);
 
   // Phase 7: Initialize components (Step 2 "Start")
   initializeComponents(traverseResult.pending, registry, signalStore, scene, manager, root, options?.gizmoManager, options?.events, options?.errorStore);
+  prof.mark('initializeComponents');
 
   // Phase 8: Build groups
   const groups = buildGroups(traverseResult.groupNodes, registry);
@@ -1145,12 +1223,14 @@ export async function loadGLB(url: string, scene: Scene, options?: LoadGLBOption
   // the final hierarchy (kinematic re-parenting complete). Used by gizmos that
   // need an accurate subtree AABB (e.g. RVSafetyDoor floor halo + label).
   runOnSceneReady(traverseResult.pending, registry, signalStore, scene, manager, root, options?.gizmoManager, options?.events, options?.errorStore);
+  prof.mark('buildGroups+kinematicParenting');
 
   // Phase 9: WebGPU compatibility fixes
   applyWebGPUFixes(root, options?.isWebGPU ?? false);
 
   // Phase 10: Material deduplication (must run before static merge)
   const dedupResult = deduplicateMaterials(root);
+  prof.mark('deduplicateMaterials');
 
   // Phase 10b: Uber-material pass — collapse every untextured
   // MeshStandardMaterial onto a single shared reference with per-vertex
@@ -1158,6 +1238,7 @@ export async function loadGLB(url: string, scene: Scene, options?: LoadGLBOption
   // collapsed identical references. Mutates dedupResult.uniqueMaterials
   // (removes collapsed materials, adds the shared uber singleton).
   const uberResult = applyUberMaterial(root, dedupResult.uniqueMaterials);
+  prof.mark('applyUberMaterial');
   // Keep reported uniqueCount in sync with the post-uber state so the
   // DevTools panel and getRendererStats() reflect what's actually on the GPU.
   dedupResult.uniqueCount = dedupResult.uniqueMaterials.size;
@@ -1168,6 +1249,7 @@ export async function loadGLB(url: string, scene: Scene, options?: LoadGLBOption
   const uberMergeResult: StaticUberMergeResult = uberResult.sharedMaterial
     ? mergeStaticUberMeshes(root, uberResult.sharedMaterial)
     : { originalCount: 0, mergedCount: 0, totalVertices: 0 };
+  prof.mark('mergeStaticUberMeshes');
 
   // Phase 10d: Kinematic group merge — merge dynamic uber-baked meshes
   // per Drive subtree. Runs after static merge (which only handles
@@ -1181,17 +1263,30 @@ export async function loadGLB(url: string, scene: Scene, options?: LoadGLBOption
         uberResult.sharedMaterial,
       )
     : null;
+  prof.mark('mergeKinematicGroupMeshes');
+
+  // Phase 11: Freeze static matrices — turn off matrixWorldAutoUpdate on every
+  // node with no Drive/Kinematic/Grip/Transport/Source/Sink/MU in its up- or
+  // down-path, so Three.js skips the bulk of the scene graph in the per-frame
+  // updateMatrixWorld recursion. MUST run here, after kinematic re-parenting
+  // (Phase 8b) and the merges (Phase 10c/10d), so the parent chains driving the
+  // mover closure are final. ~2x render-loop speedup on large static CAD scenes.
+  const freezeResult = freezeStaticMatrices(root);
+  debug('loader', `[Freeze] static matrixWorldAutoUpdate=false on ${freezeResult.frozen}/${freezeResult.total} nodes (${freezeResult.dynamic} kept dynamic)`);
 
   // Phase 12: Bounding box (after merge — merged geometry changes bounds)
   const boundingBox = new Box3().setFromObject(root);
+  prof.mark('boundingBox');
 
   // Phase 13: BVH for fast raycasting (per-mesh, still needed by annotation/FPV plugins)
   await computeBVH(root);
+  prof.mark('computeBVH');
 
   // Phase 13b: Build grouped raycast geometries (static + per-Drive kinematic)
   const raycastGeometrySet = buildRaycastGeometries(
     root, traverseResult.drives, registry, driveNodeSet,
   );
+  prof.mark('buildRaycastGeometries');
 
   // Phase 14: Build playback
   const playback = buildPlayback(traverseResult.recordingData, traverseResult.recorderSettings, registry);
@@ -1229,6 +1324,9 @@ export async function loadGLB(url: string, scene: Scene, options?: LoadGLBOption
     `${Math.round(triangleCount / 1000)}K triangles`
   );
 
+  prof.mark('finalize');
+  prof.report();
+
   return {
     root,
     drives: traverseResult.drives,
@@ -1248,7 +1346,6 @@ export async function loadGLB(url: string, scene: Scene, options?: LoadGLBOption
     uberMergeResult,
     kinematicMergeResult,
     pipelineNodes,
-    metadataNodes: traverseResult.metadataNodes,
     kinematicGroupNames,
     raycastGeometrySet,
   };

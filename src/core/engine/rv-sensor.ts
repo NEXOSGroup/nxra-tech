@@ -7,6 +7,7 @@ import {
   BoxGeometry,
   CylinderGeometry,
   MeshBasicMaterial,
+  MeshStandardMaterial,
   DoubleSide,
   EdgesGeometry,
   LineSegments,
@@ -28,6 +29,7 @@ import { debug } from './rv-debug';
 // Shared materials (reused across all sensors to save GPU resources)
 const YELLOW = 0xffcc00;
 const RED = 0xff2222;
+const BLUE = 0x2277ff; // idle ray color
 
 const matYellow = new MeshBasicMaterial({
   color: YELLOW,
@@ -120,14 +122,19 @@ export interface SensorBeam {
   lengthMm: number;
 }
 
-/** Node-local AABB enclosing all mesh geometry under `node` (empty Box3 if none). */
-function localGeometryBounds(node: Object3D): Box3 {
+/**
+ * AABB enclosing all mesh geometry under `source`, expressed in `node`'s LOCAL
+ * frame (empty Box3 if none). `source` defaults to `node`; pass a descendant
+ * (e.g. a "Ray" marker) to derive the beam from just that sub-tree while keeping
+ * the result in the sensor node's local space — the frame `computeRay` expects.
+ */
+function localGeometryBounds(node: Object3D, source: Object3D = node): Box3 {
   node.updateWorldMatrix(true, true);
   const inv = new Matrix4().copy(node.matrixWorld).invert();
   const box = new Box3();
   const childBox = new Box3();
   const m = new Matrix4();
-  node.traverse((child) => {
+  source.traverse((child) => {
     const mesh = child as Mesh;
     if (!mesh.isMesh || !mesh.geometry) return;
     if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
@@ -140,14 +147,33 @@ function localGeometryBounds(node: Object3D): Box3 {
   return box;
 }
 
+/** Matches a "Ray" child name, tolerating duplicate-name suffixes: the glTF
+ *  loader appends `_N` to disambiguate colliding node names (two sensors each
+ *  with a "Ray" child → "Ray", "Ray_1", …), and Unity exports "(N)" duplicates.
+ *  So `Ray`, `Ray_1`, `Ray (1)`, `Ray_(1)` all match; `RayCast`/`Ray_Beam` don't. */
+const RAY_CHILD_NAME = /^Ray(_\d+|[_ ]?\(\d+\))?$/;
+
+/** First descendant matching the "Ray" convention (node itself excluded), or null. */
+export function findRayChild(node: Object3D): Object3D | null {
+  let found: Object3D | null = null;
+  node.traverse((o) => { if (!found && o !== node && RAY_CHILD_NAME.test(o.name)) found = o; });
+  return found;
+}
+
 /**
  * Derive a raycast beam spanning the LONGEST edge of the node's bounding box —
  * from the centre of one end face to the centre of the opposite face. Returns
  * null when the node has no geometry. Assumes ~unit world scale (placed library
  * objects use scale 1); the beam length is the local extent.
+ *
+ * Pass `boundsSource` (e.g. a "Ray" marker child) to span just that sub-tree
+ * instead of the whole node. If that source has no geometry, falls back to the
+ * full node bounds so a misauthored marker never suppresses the beam.
  */
-export function computeBeamFromBounds(node: Object3D): SensorBeam | null {
-  const box = localGeometryBounds(node);
+export function computeBeamFromBounds(node: Object3D, boundsSource?: Object3D | null): SensorBeam | null {
+  const source = boundsSource ?? node;
+  let box = localGeometryBounds(node, source);
+  if (box.isEmpty() && source !== node) box = localGeometryBounds(node);   // fall back to full node
   if (box.isEmpty()) return null;
   const size = box.getSize(new Vector3());
   const center = box.getCenter(new Vector3());
@@ -376,12 +402,19 @@ export class RVSensor implements RVComponent {
 
   // ─── Raycast-mode visualization (tube) ──────────────────────────────
 
-  /** Shared ray tube materials (more visible than Line which has no width on WebGL) */
-  private static readonly rayMatYellow = new MeshBasicMaterial({
-    color: YELLOW, transparent: true, opacity: 0.5, depthWrite: false,
+  /** Shared ray-tube materials — opaque & emissive (glow under bloom).
+   *  Black base color + emissive carries the visible color so the beam renders
+   *  self-lit regardless of scene lighting. UnrealBloomPass runs on the LINEAR
+   *  scene (tone mapping is none), so intensities are sized to push linear
+   *  luminance well past 1.0 (Rec.709): blue ≈0.21/unit, red ≈0.225/unit
+   *  → ~1.75 luminance each, comfortably above a bloom threshold of 1. */
+  private static readonly rayMatBlue = new MeshStandardMaterial({
+    color: 0x000000, emissive: BLUE, emissiveIntensity: 8.5,
+    transparent: false, toneMapped: true,
   });
-  private static readonly rayMatRed = new MeshBasicMaterial({
-    color: RED, transparent: true, opacity: 0.7, depthWrite: false,
+  private static readonly rayMatRed = new MeshStandardMaterial({
+    color: 0x000000, emissive: RED, emissiveIntensity: 8.0,
+    transparent: false, toneMapped: true,
   });
 
   /** Create the ray tube visualization for Raycast mode. */
@@ -401,7 +434,7 @@ export class RVSensor implements RVComponent {
     const geo = indexedGeo.toNonIndexed();
     indexedGeo.dispose();
 
-    this.rayTube = new Mesh(geo, RVSensor.rayMatYellow);
+    this.rayTube = new Mesh(geo, RVSensor.rayMatBlue);
     this.rayTube.renderOrder = 999;
     this.rayTube.frustumCulled = false;
     this.rayTube.name = `${this.node.name}_sensorRay`;
@@ -437,21 +470,24 @@ export class RVSensor implements RVComponent {
     return { origin: _origin, dir: _dir, maxDist };
   }
 
-  /** Derive the raycast beam from the node's bounding box (longest edge, face → face). */
+  /** Derive the raycast beam from the bounding box (longest edge, face → face).
+   *  Prefers a child named "Ray" as the bounds source and hides that marker. */
   private autoConfigureRay(): void {
-    const beam = computeBeamFromBounds(this.node);
+    const rayNode = findRayChild(this.node);
+    const beam = computeBeamFromBounds(this.node, rayNode);
     if (!beam) return;
     this.rayOriginOffset.copy(beam.originOffset);
     this.RayCastDirection = beam.direction;
     this.RayCastLength = beam.lengthMm;
     this.UseRaycast = true;
+    if (rayNode) rayNode.visible = false;   // helper marker — hide once used
   }
 
   /** Update only the ray tube color — position/orientation are baked into the
    *  node-parented local transform at construction (carried by the scene graph). */
   private updateRayTube(): void {
     if (!this.rayTube) return;
-    this.rayTube.material = this.occupied ? RVSensor.rayMatRed : RVSensor.rayMatYellow;
+    this.rayTube.material = this.occupied ? RVSensor.rayMatRed : RVSensor.rayMatBlue;
   }
 
   // ─── Visualization update (both modes) ─────────────────────────────

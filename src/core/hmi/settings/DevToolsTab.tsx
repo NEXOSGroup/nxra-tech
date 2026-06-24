@@ -3,9 +3,11 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Typography, Box, Button, CircularProgress, Switch } from '@mui/material';
-import { PlayArrow } from '@mui/icons-material';
+import { PlayArrow, CleaningServices } from '@mui/icons-material';
 import { useViewer } from '../../../hooks/use-viewer';
-import { StatRow, BudgetRow, budgetPct } from './settings-helpers';
+import { StatRow, BudgetRow, budgetPct, SettingsSection, FieldRow } from './settings-helpers';
+import { ModelCache } from '../../../plugins/layout-planner/model-cache';
+import { clearCache as clearLibrarySnapCache } from '../../../plugins/snap-point/library-snap-index';
 
 interface DevStats {
   // Rendering
@@ -56,15 +58,6 @@ const PERF_BUDGETS = {
   geometries: 500,
   heapMB: 512,
 };
-
-/** Section header. */
-function SectionHeader({ children }: { children: string }) {
-  return (
-    <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-      {children}
-    </Typography>
-  );
-}
 
 /** Color + label for the GPU tier pill next to the section header. */
 function GPUTierBadge({
@@ -170,6 +163,24 @@ export function DevToolsTab() {
     setBenchRunning(false);
   }, [viewer]);
 
+  // Wipe the persistent GLB byte cache (Cache API bucket `rv-planner-glbs`)
+  // plus the per-GLB snap-index localStorage, then reload. Planner GLBs are
+  // cached by URL, so swapping a library file on disk while keeping its
+  // filename serves stale bytes until these caches are cleared. The reload is
+  // required because the in-memory decoded ModelCache still holds the old
+  // Three.js Groups for the rest of the session.
+  const [clearingCache, setClearingCache] = useState(false);
+  const clearLibraryCache = useCallback(async () => {
+    setClearingCache(true);
+    try {
+      await ModelCache.clearPersistentCache();
+      clearLibrarySnapCache();
+    } catch (e) {
+      console.warn('[DevTools] Clear library cache failed:', e);
+    }
+    location.reload();
+  }, []);
+
   useEffect(() => {
     const interval = setInterval(() => {
       const info = viewer.getRendererInfo();
@@ -234,38 +245,32 @@ export function DevToolsTab() {
   const heapNum = s ? parseFloat(s.heapMB) || 0 : 0;
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-      {/* Profiler toggles */}
-      <Box>
-        <SectionHeader>Profiler</SectionHeader>
-        <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Typography variant="body2" sx={{ color: 'text.primary' }}>FPS / GPU Overlay</Typography>
-            <Switch size="small" checked={showStats} onChange={(_, v) => { viewer.showStats = v; setShowStats(v); }} />
-          </Box>
-          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Typography variant="body2" sx={{ color: 'text.primary' }}>Console Perf Log</Typography>
-            <Switch size="small" checked={infoLogging} onChange={(_, v) => { viewer.setDebugLogging(v); setInfoLogging(v); }} />
-          </Box>
-        </Box>
-      </Box>
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
 
-      {/* ─── Scene (from GLB) ─── */}
-      <Box sx={{ borderTop: '1px solid rgba(255,255,255,0.08)', pt: 1.5 }}>
-        <SectionHeader>Scene (from GLB)</SectionHeader>
-        <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+      {/* Profiler toggles */}
+      <SettingsSection id="devtools-profiler" title="Profiler">
+        <FieldRow label="FPS / GPU Overlay">
+          <Switch size="small" checked={showStats} onChange={(_, v) => { viewer.showStats = v; setShowStats(v); }} />
+        </FieldRow>
+        <FieldRow label="Console Perf Log">
+          <Switch size="small" checked={infoLogging} onChange={(_, v) => { viewer.setDebugLogging(v); setInfoLogging(v); }} />
+        </FieldRow>
+      </SettingsSection>
+
+      {/* Scene (from GLB) */}
+      <SettingsSection id="devtools-scene" title="Scene (from GLB)">
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
           <StatRow label="Triangles" value={s ? s.triangles.toLocaleString() : '--'} />
           <StatRow label="Meshes" value={s ? s.meshesInGlb.toLocaleString() : '--'} />
           <StatRow label="Drives" value={s ? String(s.drives) : '--'} />
           <StatRow label="GLB Size" value={s?.glbSize ?? '--'} />
           <StatRow label="Load Time" value={s?.loadTime ?? '--'} />
         </Box>
-      </Box>
+      </SettingsSection>
 
-      {/* ─── Optimization Pipeline ─── */}
-      <Box sx={{ borderTop: '1px solid rgba(255,255,255,0.08)', pt: 1.5 }}>
-        <SectionHeader>Optimization</SectionHeader>
-        <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+      {/* Optimization */}
+      <SettingsSection id="devtools-optimization" title="Optimization">
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
           <PipelineRow
             label="Materials"
             before={s ? s.materialsOriginal.toLocaleString() : '--'}
@@ -299,12 +304,11 @@ export function DevToolsTab() {
             after={s ? `${s.kinMergeOut} meshes` : '--'}
           />
         </Box>
-      </Box>
+      </SettingsSection>
 
-      {/* ─── Rendering ─── */}
-      <Box sx={{ borderTop: '1px solid rgba(255,255,255,0.08)', pt: 1.5 }}>
-        <SectionHeader>Rendering</SectionHeader>
-        <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+      {/* Rendering */}
+      <SettingsSection id="devtools-rendering" title="Rendering">
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
           <StatRow label="FPS" value={s ? String(s.fps) : '--'} />
           <StatRow label="Frame" value={s ? `${s.frameTime} ms` : '--'} />
           <StatRow label="Draw Calls" value={s ? String(s.drawCalls) : '--'} />
@@ -314,15 +318,14 @@ export function DevToolsTab() {
           <StatRow label="JS Heap" value={s ? `${s.heapMB} MB` : '--'} />
           <StatRow label="Renderer" value={s?.renderer ?? '--'} />
         </Box>
-      </Box>
+      </SettingsSection>
 
-      {/* ─── GPU ─── */}
-      <Box sx={{ borderTop: '1px solid rgba(255,255,255,0.08)', pt: 1.5 }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <SectionHeader>GPU</SectionHeader>
+      {/* GPU */}
+      <SettingsSection id="devtools-gpu" title="GPU">
+        <Box sx={{ display: 'flex' }}>
           {s && <GPUTierBadge tier={s.gpuTier} severity={s.gpuSeverity} />}
         </Box>
-        <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
           <StatRow label="Backend" value={s?.renderer ?? '--'} />
           <StatRow label="Active" value={s?.gpuActive ?? '--'} />
           {s?.gpuArchitecture && <StatRow label="Architecture" value={s.gpuArchitecture} />}
@@ -332,12 +335,11 @@ export function DevToolsTab() {
         {s?.gpuMessage && (
           <GPUDiagnosisCallout severity={s.gpuSeverity} message={s.gpuMessage} action={s.gpuAction} />
         )}
-      </Box>
+      </SettingsSection>
 
-      {/* ─── Performance Budget ─── */}
-      <Box sx={{ borderTop: '1px solid rgba(255,255,255,0.08)', pt: 1.5 }}>
-        <SectionHeader>Performance Budget</SectionHeader>
-        <Box sx={{ mt: 1, fontSize: 12, color: 'text.secondary' }}>
+      {/* Performance Budget */}
+      <SettingsSection id="devtools-performance-budget" title="Performance Budget">
+        <Box sx={{ fontSize: 12, color: 'text.secondary' }}>
           {s && <>
             <BudgetRow label="Triangles" {...budgetPct(s.triangles, PERF_BUDGETS.triangles)} />
             <BudgetRow label="Draw Calls" {...budgetPct(s.drawCalls, PERF_BUDGETS.drawCalls)} />
@@ -347,12 +349,11 @@ export function DevToolsTab() {
             <BudgetRow label="JS Heap" {...budgetPct(heapNum, PERF_BUDGETS.heapMB)} />
           </>}
         </Box>
-      </Box>
+      </SettingsSection>
 
-      {/* ─── GPU Benchmark ─── */}
-      <Box sx={{ borderTop: '1px solid rgba(255,255,255,0.08)', pt: 1.5 }}>
-        <SectionHeader>GPU Benchmark</SectionHeader>
-        <Box sx={{ mt: 1 }}>
+      {/* GPU Benchmark */}
+      <SettingsSection id="devtools-gpu-benchmark" title="GPU Benchmark">
+        <Box>
           <Button
             variant="outlined"
             size="small"
@@ -380,7 +381,28 @@ export function DevToolsTab() {
             </Box>
           )}
         </Box>
-      </Box>
+      </SettingsSection>
+
+      {/* Library Cache */}
+      <SettingsSection id="devtools-library-cache" title="Library Cache">
+        <Box>
+          <Button
+            variant="outlined"
+            size="small"
+            onClick={clearLibraryCache}
+            disabled={clearingCache}
+            startIcon={clearingCache ? <CircularProgress size={12} /> : <CleaningServices sx={{ fontSize: 14 }} />}
+            sx={{ fontSize: 11, textTransform: 'none', borderColor: 'rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.6)' }}
+          >
+            {clearingCache ? 'Clearing...' : 'Clear Library Cache'}
+          </Button>
+          <Typography sx={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', mt: 0.75 }}>
+            Wipes the cached library GLB bytes and snap index, then reloads. Use after swapping
+            library .glb files on disk (same filename) so the new assets are re-fetched.
+          </Typography>
+        </Box>
+      </SettingsSection>
+
     </Box>
   );
 }

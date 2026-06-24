@@ -209,6 +209,21 @@ export class SceneStore {
   }
 
   /**
+   * Open a "published" scene transiently — a read-only RvScene fetched from a
+   * static asset (e.g. `public/scenes/<name>.scene.json`) and routed via
+   * `?scene=published:<name>`. Unlike a saved scene it is NOT written to
+   * localStorage, so a shared public link has no side effects on the visitor's
+   * stored scenes. `name` is only used to keep the URL stable across reloads.
+   */
+  async openPublished(scene: RvScene, name: string): Promise<void> {
+    if (!scene || scene.schemaVersion !== 2 || !scene.base || !scene.edits) {
+      throw new Error('Invalid published scene JSON (missing schemaVersion 2 / base / edits)');
+    }
+    await this._loadIntoWorkspace(scene, null);
+    updateUrlSceneParam(`published:${name}`);
+  }
+
+  /**
    * Create a fresh empty scene. Always discards any prior autosaved empty
    * draft and always names the new scene "Untitled" — this is the explicit
    * "New empty scene" gesture from the user (e.g. the SceneWindow button)

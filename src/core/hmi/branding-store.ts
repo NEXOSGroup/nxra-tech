@@ -18,8 +18,11 @@ import { useSyncExternalStore } from 'react';
 // ─── Types ──────────────────────────────────────────────────────────────
 
 export interface CustomBranding {
-  /** URL to the custom logo image. */
-  logoUrl: string;
+  /** URL to the custom activity-bar logo (the top-left mark). Optional: when
+   *  omitted the activity bar keeps the default realvirtual logo, so a project
+   *  can apply title-bar/colour branding while leaving the platform mark in
+   *  place (e.g. Mauser). Set it to let a customer swap in their own mark. */
+  logoUrl?: string;
   /** Company/project name shown next to logo (optional, logo-only if omitted). */
   name?: string;
   /** Logo height in pixels (default: 20). */
@@ -32,6 +35,15 @@ export interface CustomBranding {
   badgeBackground?: string;
   /** If true, badge stretches to match left panel width. Default: false. */
   badgeFullWidth?: boolean;
+
+  /** Show the optional top title bar (full width, right of the top-left logo). Default: false. */
+  titleBar?: boolean;
+  /** Title text shown centered in the title bar. */
+  title?: string;
+  /** URL to an optional leading logo shown left of the title (wide format supported). */
+  titleLogoUrl?: string;
+  /** Height in px of the title-bar leading logo (default: 24). */
+  titleLogoHeight?: number;
 }
 
 // ─── Store ──────────────────────────────────────────────────────────────

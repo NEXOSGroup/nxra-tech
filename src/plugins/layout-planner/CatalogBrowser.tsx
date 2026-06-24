@@ -17,9 +17,9 @@
  */
 
 import type { ReactNode } from 'react';
-import { Box, Typography, TextField, Chip, Tooltip, IconButton } from '@mui/material';
+import { Box, Typography, TextField, Chip, Tooltip, IconButton, InputAdornment } from '@mui/material';
 import { Search } from '@mui/icons-material';
-import { RV_SCROLL_CLASS } from '../../core/hmi/shared-sx';
+import { RV_SCROLL_CLASS, filterChipSx } from '../../core/hmi/shared-sx';
 import type { LibraryChip } from './library-chips';
 
 export interface CatalogBrowserAction {
@@ -58,7 +58,18 @@ export interface CatalogBrowserProps {
   children: ReactNode;
 }
 
-const SEARCH_INPUT_SX = { fontSize: 11, py: 0.25 } as const;
+// Matches the Hierarchy browser's search field exactly (rv-hierarchy-browser.tsx).
+// pl tightens the icon's left inset (default 14px); the adornment's mr tightens
+// the gap to the text (default 8px) — see startAdornment below.
+const SEARCH_INPUT_SX = { fontSize: 12, height: 26, pl: 1.25 } as const;
+const SEARCH_ROOT_SX = {
+  '& .MuiOutlinedInput-root': {
+    bgcolor: 'rgba(255, 255, 255, 0.04)',
+    '& fieldset': { borderColor: 'rgba(255, 255, 255, 0.08)' },
+    '&:hover fieldset': { borderColor: 'rgba(255, 255, 255, 0.15)' },
+    '&.Mui-focused fieldset': { borderColor: 'primary.main' },
+  },
+} as const;
 
 export function CatalogBrowser({
   headerIcon,
@@ -79,7 +90,7 @@ export function CatalogBrowser({
     <Box sx={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
       {/* Header */}
       {(headerText !== undefined || headerIcon || (headerActions?.length ?? 0) > 0) && (
-        <Box sx={{ px: 1, py: 0.5, display: 'flex', alignItems: 'center', gap: 0.5, flexShrink: 0 }}>
+        <Box sx={{ px: 0.75, py: 0.5, display: 'flex', alignItems: 'center', gap: 0.5, flexShrink: 0 }}>
           {headerIcon}
           <Typography
             variant="caption"
@@ -104,8 +115,31 @@ export function CatalogBrowser({
         </Box>
       )}
 
-      {/* Search */}
-      <Box sx={{ px: 1, py: 0.5, flexShrink: 0 }}>
+      {/* Chip row first — same look as the Hierarchy type-filter chips
+          (filterChipSx) incl. the borderBottom separator line. The search bar
+          sits below this line. */}
+      {chips.length > 0 && (
+        <Box sx={{ px: 0.75, py: 0.5, display: 'flex', flexWrap: 'wrap', gap: 0.25, borderBottom: '1px solid rgba(255, 255, 255, 0.05)', flexShrink: 0 }}>
+          <Chip
+            label={`All (${totalCount})`}
+            size="small"
+            onClick={() => onSelectChip(null)}
+            sx={filterChipSx(selectedChip === null)}
+          />
+          {chips.map((chip) => (
+            <Chip
+              key={chip.key}
+              label={`${chip.label} (${chip.count})`}
+              size="small"
+              onClick={() => onSelectChip(selectedChip === chip.key ? null : chip.key)}
+              sx={filterChipSx(selectedChip === chip.key)}
+            />
+          ))}
+        </Box>
+      )}
+
+      {/* Search — sits under the chip-row separator line. */}
+      <Box sx={{ px: 0.75, py: 0.5, borderBottom: '1px solid rgba(255, 255, 255, 0.05)', flexShrink: 0 }}>
         <TextField
           size="small"
           fullWidth
@@ -114,46 +148,27 @@ export function CatalogBrowser({
           onChange={(e) => onSearchChange(e.target.value)}
           slotProps={{
             input: {
-              startAdornment: <Search sx={{ fontSize: 14, color: 'text.secondary', mr: 0.5 }} />,
+              startAdornment: (
+                <InputAdornment position="start" sx={{ mr: 0.5 }}>
+                  <Search sx={{ fontSize: 16, color: 'text.disabled' }} />
+                </InputAdornment>
+              ),
               sx: SEARCH_INPUT_SX,
             },
           }}
+          sx={SEARCH_ROOT_SX}
         />
       </Box>
 
-      {/* Chip row */}
-      {chips.length > 0 && (
-        <Box sx={{ px: 1, py: 0.5, display: 'flex', flexWrap: 'wrap', gap: 0.5, flexShrink: 0 }}>
-          <Chip
-            label={`All (${totalCount})`}
-            size="small"
-            variant={selectedChip === null ? 'filled' : 'outlined'}
-            color={selectedChip === null ? 'primary' : 'default'}
-            onClick={() => onSelectChip(null)}
-            sx={{ fontSize: 10, height: 22 }}
-          />
-          {chips.map((chip) => (
-            <Chip
-              key={chip.key}
-              label={`${chip.label} (${chip.count})`}
-              size="small"
-              variant={selectedChip === chip.key ? 'filled' : 'outlined'}
-              color={selectedChip === chip.key ? 'primary' : 'default'}
-              onClick={() => onSelectChip(selectedChip === chip.key ? null : chip.key)}
-              sx={{ fontSize: 10, height: 22 }}
-            />
-          ))}
-        </Box>
-      )}
-
-      {/* Card grid (or empty content) */}
-      <Box className={RV_SCROLL_CLASS} sx={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', minHeight: 0, pb: 1 }}>
+      {/* Card grid (or empty content). pt gives a margin between the chip-row
+          separator line and the first card row. */}
+      <Box className={RV_SCROLL_CLASS} sx={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', minHeight: 0, pt: 1, pb: 1 }}>
         {empty ? (
           emptyContent
         ) : (
           <Box
             sx={{
-              px: 1,
+              px: 0.75,
               display: 'grid',
               gridTemplateColumns: 'repeat(auto-fill, minmax(72px, 1fr))',
               gap: 0.75,

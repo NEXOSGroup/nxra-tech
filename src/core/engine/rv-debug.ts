@@ -35,6 +35,7 @@ export type DebugCategory =
   | 'multiuser'  // Multiuser synchronization
   | 'interface'  // Industrial interface connections
   | 'render'     // Render loop, performance metrics
+  | 'perf'       // load phase timings
   | 'plugins';   // Model plugin loading/unloading
 
 export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error';
@@ -53,7 +54,7 @@ export interface LogEntry {
 
 const ALL_CATEGORIES: DebugCategory[] = [
   'loader', 'playback', 'drive', 'transport', 'sensor', 'logic', 'signal', 'erratic', 'grip', 'parity',
-  'config', 'multiuser', 'interface', 'render',
+  'config', 'multiuser', 'interface', 'render', 'perf',
 ];
 
 const LOG_LEVELS: LogLevel[] = ['trace', 'debug', 'info', 'warn', 'error'];

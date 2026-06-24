@@ -37,6 +37,7 @@ import {
 } from '@mui/material';
 import {
   Adjust,
+  AutoDelete,
   BorderOuter,
   DeleteOutline,
   GridOn,
@@ -49,11 +50,14 @@ import {
   Tag,
   Undo,
   VerticalAlignBottom,
+  ViewSidebar,
 } from '@mui/icons-material';
 import { useViewer } from '../../hooks/use-viewer';
 import { useSelection } from '../../hooks/use-selection';
+import { useVanishMUs } from '../../core/hmi/visual-settings-store';
 import { useToolButtonInteraction } from '../../hooks/use-tool-button-interaction';
 import { getSceneStore } from '../../core/hmi/scene/scene-store-singleton';
+import { LAYOUT_PANEL_WIDTH } from '../../core/hmi/layout-constants';
 import type { SceneSnapshot } from '../../core/hmi/scene/scene-store';
 import { DragNumberField } from '../../core/hmi/DragNumberField';
 import type { LayoutPlannerPlugin } from './index';
@@ -61,7 +65,7 @@ import type { LayoutSnapshot } from './rv-layout-store';
 
 // Sane bounds for typed values — keeps the gizmo from getting micro-snap or
 // >360° steps. The user can still set anything within these ranges precisely.
-const MIN_TRANSLATION_MM = 1;
+const MIN_TRANSLATION_MM = 0; // 0 = translation snapping off (grid not drawn)
 const MAX_TRANSLATION_MM = 100_000;
 const MIN_ROTATION_DEG = 0.1;
 const MAX_ROTATION_DEG = 180;
@@ -140,7 +144,9 @@ export function PlannerGridButton() {
     }
     plugin.setGridSize(n);
     setTransDraft(String(n));
-    if (!enabled) plugin.toggleGrid(); // typing a value implies "I want snap on"
+    // Typing a non-zero value implies "I want snap on". A 0 means translation
+    // snapping off, so don't auto-enable the grid for it.
+    if (n > 0 && !enabled) plugin.toggleGrid();
   };
 
   const commitRotation = () => {
@@ -158,7 +164,7 @@ export function PlannerGridButton() {
     <>
       <Tooltip
         title={enabled
-          ? `Snap on: ${sizeMm} mm / ${rotDeg}° — right-click for settings`
+          ? `Snap on: ${sizeMm > 0 ? `${sizeMm} mm` : 'translation off'} / ${rotDeg}° — right-click for settings`
           : 'Snap off — click to enable, right-click for settings'}
         placement="right"
       >
@@ -298,6 +304,35 @@ export function PlannerChainModeButton() {
   );
 }
 
+// ─── Vanish-MUs button ───────────────────────────────────────────────────
+
+/**
+ * Toolbar button — toggles "vanish MUs at end of line". When on, an MU that
+ * runs off the last transport surface (no successor belt picks it up) is
+ * deleted after a short delay. State is persisted (localStorage) and pushed
+ * onto the live transport manager via `viewer.setVanishMUs`.
+ */
+export function PlannerVanishMUsButton() {
+  const viewer = useViewer();
+  const on = useVanishMUs();
+
+  return (
+    <Tooltip title={on ? 'Vanish MUs at end of line: ON' : 'Vanish MUs at end of line: OFF'} placement="right">
+      <IconButton
+        size="small"
+        onClick={() => viewer.setVanishMUs(!on)}
+        sx={{
+          p: 0.75,
+          color: on ? 'primary.main' : 'text.disabled',
+        }}
+        aria-label="Toggle vanish MUs at end of line"
+      >
+        <AutoDelete sx={{ fontSize: 18 }} />
+      </IconButton>
+    </Tooltip>
+  );
+}
+
 // ─── Delete-selection button ─────────────────────────────────────────────
 
 /**
@@ -340,6 +375,38 @@ export function PlannerDeleteButton() {
           <DeleteOutline sx={{ fontSize: 18 }} />
         </IconButton>
       </span>
+    </Tooltip>
+  );
+}
+
+// ─── Library toggle ──────────────────────────────────────────────────────
+
+/**
+ * Toolbar button — toggles the planner Library window (the right-docked parts
+ * catalog). Makes the library OPTIONAL in planner mode: closing it just hides
+ * the panel; the planner stays active and the workspace mode is unchanged (the
+ * mode ↔ library coupling lives in the plugin's lpm subscription). Active
+ * (primary) while the library is open.
+ */
+export function PlannerLibraryButton() {
+  const viewer = useViewer();
+  const lpm = viewer.leftPanelManager;
+  const snap = useSyncExternalStore(lpm.subscribe, lpm.getSnapshot);
+  const isOpen = snap.right.activePanel === 'layout-planner';
+
+  return (
+    <Tooltip title={isOpen ? 'Hide Library' : 'Show Library'} placement="right">
+      <IconButton
+        size="small"
+        onClick={() => {
+          if (isOpen) lpm.close('layout-planner');
+          else lpm.open('layout-planner', LAYOUT_PANEL_WIDTH, 'right');
+        }}
+        sx={{ p: 0.75, color: isOpen ? 'primary.main' : 'text.disabled' }}
+        aria-label="Toggle planner library"
+      >
+        <ViewSidebar sx={{ fontSize: 18 }} />
+      </IconButton>
     </Tooltip>
   );
 }

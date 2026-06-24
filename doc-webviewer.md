@@ -41,6 +41,25 @@ environment (use `vitest.node.config.ts`). Files matching `tests/*.test.ts` run 
 browser environment. Use the Node config for tests that require `fs`, glob imports,
 or the ESLint instance itself.
 
+## Workspace Modes
+
+realvirtual WEB is organized into **workspace modes** — switch them from the mode
+dropdown in the top-left toolbar. Exactly one mode is active at a time; switching a
+mode swaps both the active plugin set and the UI (each plugin declares its mode
+membership via `plugin.modes`). The same model stays loaded across a switch.
+
+| Mode | Purpose | What it adds |
+|---|---|---|
+| **HMI** (default) | Operate and monitor a running model — the delivery / 3D-HMI view. | Live PLC signals (WebSocket / MQTT / REST), KPI overlays, message panel, drive & sensor tooltips, camera presets, measurement. |
+| **Planner** | Assemble and edit layouts by dragging reusable library objects (conveyors, robots, fixtures) onto a grid, snapping and positioning them with gizmos. Authoring, not operation. | Library panel, grid + snap toolbar, translate / rotate gizmos, snap-point connections. See [doc-layout-planner.md](doc-layout-planner.md). |
+| **DES** *(coming soon)* | Discrete-event material-flow simulation for throughput and utilization analysis — fast, event-driven rather than per-frame. | DES workspace surface and material-flow statistics. |
+
+**HMI vs Planner vs DES in one line:** HMI *runs and shows* a model, Planner *builds and arranges* it, DES *analyses material flow through* it.
+
+Switch modes via the dropdown or the `?mode=hmi|planner|des` URL parameter, so a shared
+link can boot directly into a workspace (e.g. `?scene=published:MyLayout&mode=planner`).
+A locked-down deployment can pin a single mode (the dropdown then hides).
+
 ## Architecture
 
 ```
@@ -346,9 +365,9 @@ See **[doc-extending-webviewer.md](doc-extending-webviewer.md)** for detailed pl
 Non-physics AABB-based transport (or Rapier.js physics when enabled). Sources spawn MUs, transport surfaces move them, sensors detect overlap, sinks consume.
 
 #### Source markers (floor ring + label)
-Every Source carries an always-visible **floor marker** — a thin semi-transparent ring on the ground plus a kamera-orientiertes label sprite showing the source's node name. The marker is visible in **Play, Pause, AR and Layout-Planner modes** so spawn locations stay identifiable even before the first MU appears. Each source's ring/label color is derived deterministically from its name (golden-ratio hue hash), giving consistent visual separation across sessions.
+Every Source carries an always-visible **floor marker** — a thin semi-transparent ring on the ground plus a camera-oriented label sprite showing the source's node name. The marker is visible in **Play, Pause, AR and Layout-Planner modes** so spawn locations stay identifiable even before the first MU appears. Each source's ring/label color is derived deterministically from its name (golden-ratio hue hash), giving consistent visual separation across sessions.
 
-Markers are children of the source node, so they follow Layout-Planner drags automatically. They are excluded from raycast hits via the central `RaycastManager.excludeFilters` (the same filter also catches the Plan-180 pause-ghost), so clicking through the marker selects the underlying layout object instead.
+Markers are children of the source node, so they follow Layout-Planner drags automatically. They are excluded from raycast hits via the central `RaycastManager.excludeFilters` (the same filter also catches the pause-ghost overlay), so clicking through the marker selects the underlying layout object instead.
 
 Toggle globally via **Settings → Visual → Show source markers** (default ON) or programmatically via `viewer.setSourceMarkersVisible(false)` / the MCP tool `web_set_source_markers`. The choice persists to `localStorage['rv-source-markers-visible']`.
 

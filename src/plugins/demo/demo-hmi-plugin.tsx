@@ -35,9 +35,32 @@ const BOSCH_MS2N_PDF_ZIP_PATH = 'aasx/Documentation/R911347581_MS2N_Synchronous_
 // Page 22 in the MS2N Operating Instructions covers "Thermal motor protection" (chapter 5.1.3).
 const BOSCH_MS2N_F8060_MANUAL_PAGE = 22;
 
-/** True when the Bosch ctrlX demo GLB is currently loaded. */
+const SEW_AAS_ID = 'https://demo.realvirtual.io/aas/sew/KA47-DRN90M4-Demo-0001';
+const SEW_MOTOR_BA_PDF_ZIP_PATH = 'aasx/Documentation/MotorBA_DRN_25957074.pdf';
+// Page 265 = the "9.2 Motor malfunctions" fault table. Its rows include
+// "Severe speed loss under load" (slip) and "Motor heats up excessively (measure temperature)".
+const SEW_DRN_MALFUNCTIONS_PAGE = 265;
+
+/**
+ * Active model option id, e.g. 'sew' | 'bosch'. Checks the loaded model URL
+ * (selector entries embed `?option=`) and falls back to the page URL (`?option=`
+ * deep links such as `?model=…&option=sew`). Mirrors the resolution in
+ * ModelOptionPlugin so the HMI message and the AAS swap stay in sync.
+ */
+function activeModelOption(viewer: { currentModelUrl: string | null }): string | null {
+  const m = viewer.currentModelUrl?.match(/[?&]option=([^&]+)/);
+  if (m) return decodeURIComponent(m[1]);
+  try { return new URLSearchParams(window.location.search).get('option'); } catch { return null; }
+}
+
+/** True when the Bosch supplier option is active. */
 function isBoschModel(viewer: { currentModelUrl: string | null }): boolean {
-  return !!viewer.currentModelUrl && /DemoRealvirtualWebBosch/.test(viewer.currentModelUrl);
+  return activeModelOption(viewer) === 'bosch';
+}
+
+/** True when the SEW supplier option is active. */
+function isSewModel(viewer: { currentModelUrl: string | null }): boolean {
+  return activeModelOption(viewer) === 'sew';
 }
 
 // Hooks
@@ -179,6 +202,9 @@ function DriveInfoMessage({ viewer }: UISlotProps) {
   if (isBoschModel(viewer)) {
     return <BoschMotorOvertempMessage viewer={viewer} />;
   }
+  if (isSewModel(viewer)) {
+    return <SewMotorSlipMessage viewer={viewer} />;
+  }
   return (
     <TileCard
       title="Drive 1 — Entry Conveyor"
@@ -191,21 +217,47 @@ function DriveInfoMessage({ viewer }: UISlotProps) {
   );
 }
 
+const DRIVE1_MOTOR_PATH = 'DemoCell/Conveyors/ConveyorEntry1/Motor';
+const ALARM_PULSE_DURATION_MS = 3500;
+
+/**
+ * Frame the Drive 1 motor in 3D and pulse a red alarm outline for a few seconds
+ * (visual cue matching the error severity). The outline reverts to the default
+ * selection style afterwards so it doesn't bleed into the next regular selection.
+ *
+ * Uses `fitToNodes` (camera-only) instead of `focusByPath` so the click does NOT
+ * emit `object-focus` — that event opens the property inspector / hierarchy, which
+ * an operator clicking an alarm message should not get. Outlines directly on the
+ * selection pass, bypassing the selectionManager (no pinned tooltip). Pure visual cue.
+ */
+function pulseMotorAlarm(viewer: UISlotProps['viewer'], path: string): void {
+  const motorNode = viewer.registry?.getNode(path);
+  if (!motorNode) return;
+  const outline = viewer.outlineManager;
+  const prevStyle = outline.getStyle();
+  outline.setStyle({
+    visibleEdgeColor: 0xff3030,
+    hiddenEdgeColor: 0x8a1a1a,
+    edgeStrength: 20,
+    edgeThickness: 10,
+    edgeGlow: 1.5,
+    pulsePeriod: 0.6,
+  });
+  outline.setOutlined([motorNode]);
+  viewer.fitToNodes([motorNode]);
+  window.setTimeout(() => {
+    outline.setStyle({ ...prevStyle });
+    outline.clear();
+  }, ALARM_PULSE_DURATION_MS);
+}
+
 /**
  * Bosch ctrlX DRIVE F8060 motor overtemperature error.
- * Replaces the Festo "Drive Info" tile when the Bosch demo GLB is loaded.
- *
- * Click the card → focus the motor in 3D and pulse a red alarm outline
- * for a few seconds (visual cue matching the error severity). The outline
- * style reverts to the default green selection style afterwards so it
- * doesn't bleed into the next regular selection.
+ * Replaces the Festo "Drive Info" tile when the Bosch supplier option is active.
  *
  * "see manual p.22" opens the MS2N Operating Instructions PDF embedded
  * inside the Bosch AASX (zero duplication — single source of truth).
  */
-const BOSCH_MOTOR_PATH = 'DemoCell/Conveyors/ConveyorEntry1/Motor';
-const ALARM_PULSE_DURATION_MS = 3500;
-
 function BoschMotorOvertempMessage({ viewer }: UISlotProps) {
   const openManual = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -215,32 +267,6 @@ function BoschMotorOvertempMessage({ viewer }: UISlotProps) {
       { type: 'blob', aasId: BOSCH_AAS_ID, zipPath: BOSCH_MS2N_PDF_ZIP_PATH },
       { initialPage: BOSCH_MS2N_F8060_MANUAL_PAGE },
     );
-  };
-
-  const handleAlarmClick = () => {
-    const motorNode = viewer.registry?.getNode(BOSCH_MOTOR_PATH);
-    if (!motorNode) return;
-    const outline = viewer.outlineManager;
-    const prevStyle = outline.getStyle();
-    outline.setStyle({
-      visibleEdgeColor: 0xff3030,
-      hiddenEdgeColor: 0x8a1a1a,
-      edgeStrength: 20,
-      edgeThickness: 10,
-      edgeGlow: 1.5,
-      pulsePeriod: 0.6,
-    });
-    // Outline the motor directly on the selection pass — bypasses the
-    // selectionManager so the AAS tooltip is not pinned and filterDrives
-    // does not open the search box. Pure visual alarm cue.
-    outline.setOutlined([motorNode]);
-    viewer.focusByPath(BOSCH_MOTOR_PATH);
-    // Revert outline + clear after the alarm window so subsequent regular
-    // selections render with the normal green selection style.
-    window.setTimeout(() => {
-      outline.setStyle({ ...prevStyle });
-      outline.clear();
-    }, ALARM_PULSE_DURATION_MS);
   };
 
   return (
@@ -261,8 +287,51 @@ function BoschMotorOvertempMessage({ viewer }: UISlotProps) {
       severity="error"
       icon="warning"
       timestamp="14:23"
-      componentPath={BOSCH_MOTOR_PATH}
-      onAction={handleAlarmClick}
+      componentPath={DRIVE1_MOTOR_PATH}
+      onAction={() => pulseMotorAlarm(viewer, DRIVE1_MOTOR_PATH)}
+    />
+  );
+}
+
+/**
+ * SEW DRN gearmotor slip fault — speed deviation between commanded and actual speed.
+ * Replaces the Festo "Drive Info" tile when the SEW supplier option is active.
+ *
+ * "see manual p.265" opens the "9.2 Motor malfunctions" fault table of the DRN motor
+ * operating instructions embedded inside the SEW AASX (single source of truth) — the
+ * page covers "Severe speed loss under load" (slip) and excessive motor temperature.
+ */
+function SewMotorSlipMessage({ viewer }: UISlotProps) {
+  const openManual = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openPdfViewer(
+      'DRN.. AC Motors — Operating Instructions',
+      { type: 'blob', aasId: SEW_AAS_ID, zipPath: SEW_MOTOR_BA_PDF_ZIP_PATH },
+      { initialPage: SEW_DRN_MALFUNCTIONS_PAGE },
+    );
+  };
+
+  return (
+    <TileCard
+      title="Slip fault — speed deviation"
+      subtitle={
+        <>
+          KA47-DRN90M4 gearmotor (Drive 1) —{' '}
+          <a
+            href="#"
+            onClick={openManual}
+            style={{ color: '#4fc3f7', textDecoration: 'underline', cursor: 'pointer' }}
+          >
+            see manual p.265
+          </a>
+        </>
+      }
+      severity="error"
+      icon="warning"
+      timestamp="14:23"
+      componentPath={DRIVE1_MOTOR_PATH}
+      onAction={() => pulseMotorAlarm(viewer, DRIVE1_MOTOR_PATH)}
     />
   );
 }

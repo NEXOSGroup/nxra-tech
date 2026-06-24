@@ -1,24 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect, Fragment } from 'react';
 import { Vector3 } from 'three';
-import { Button, ButtonGroup, IconButton, Tooltip } from '@mui/material';
-import { Visibility, VisibilityOff } from '@mui/icons-material';
+import { Visibility, VisibilityOff, DirectionsWalk, PhotoCamera, PhotoCameraOutlined } from '@mui/icons-material';
 import { useViewer } from '../../hooks/use-viewer';
+import type { FpvPluginAPI } from '../types/plugin-types';
 import { loadVisualSettings, saveVisualSettings, type CameraBookmark } from './visual-settings-store';
 import { toggleHmiVisible, useHmiVisible } from './hmi-visibility-store';
+import { ActionSegment, ActionDivider } from './action-group';
 
 const LONG_PRESS_MS = 500;
 const FLASH_MS = 800;
 
 /**
- * Camera bookmark bar: click to restore, long-press to save.
- * Shared with the Visual settings tab via localStorage.
+ * CameraBookmarks — the CAM 1/2/3 viewpoint bookmarks rendered as segments of a
+ * shared action group (camera icon label + three CAM segments). Click to
+ * restore, long-press to save. Shared with the Visual settings tab via
+ * localStorage. Render inside an ActionGroupPill.
  */
-export function CameraBar() {
+export function CameraBookmarks() {
   const viewer = useViewer();
-  const hmiVisible = useHmiVisible();
   const [cameras, setCameras] = useState<(CameraBookmark | null)[]>(() => loadVisualSettings().cameras);
   const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const didLongPress = useRef(false);
@@ -36,7 +38,6 @@ export function CameraBar() {
     const s = loadVisualSettings();
     s.cameras = next;
     saveVisualSettings(s);
-    // Flash feedback
     setSavedIdx(idx);
     setTimeout(() => setSavedIdx(null), FLASH_MS);
   }, [viewer, cameras]);
@@ -77,34 +78,68 @@ export function CameraBar() {
 
   return (
     <>
-      <ButtonGroup variant="outlined" size="small">
-        {[0, 1, 2].map((i) => {
-          const isSaved = savedIdx === i;
-          const hasBookmark = !!cameras[i];
-          return (
-            <Tooltip key={i} title={hasBookmark ? 'Click: restore | Hold: save' : 'Hold to save current view'} placement="top">
-              <Button
-                sx={{
-                  minWidth: 48,
-                  fontWeight: hasBookmark ? 700 : 400,
-                  color: isSaved ? '#66bb6a' : hasBookmark ? '#4fc3f7' : undefined,
-                  borderColor: isSaved ? '#66bb6a' : hasBookmark ? 'rgba(79,195,247,0.4)' : undefined,
-                  bgcolor: isSaved ? 'rgba(102,187,106,0.15)' : undefined,
-                  transition: 'all 0.2s',
-                }}
-                onPointerDown={() => handlePointerDown(i)}
-                onPointerUp={() => handlePointerUp(i)}
-                onPointerLeave={handlePointerLeave}
-              >
-                {isSaved ? 'Saved' : `CAM ${i + 1}`}
-              </Button>
-            </Tooltip>
-          );
-        })}
-      </ButtonGroup>
-      <IconButton size="small" color="inherit" title="Toggle HMI (H)" onClick={toggleHmiVisible}>
-        {hmiVisible ? <Visibility fontSize="small" /> : <VisibilityOff fontSize="small" sx={{ opacity: 0.5 }} />}
-      </IconButton>
+      {[0, 1, 2].map((i) => {
+        const isSaved = savedIdx === i;
+        const hasBookmark = !!cameras[i];
+        // Outlined camera = empty slot, filled camera = a view is saved here.
+        const Icon = hasBookmark ? PhotoCamera : PhotoCameraOutlined;
+        const color = isSaved ? '#66bb6a' : hasBookmark ? 'rgba(255,255,255,0.92)' : 'rgba(255,255,255,0.42)';
+        return (
+          <Fragment key={i}>
+            {i > 0 && <ActionDivider />}
+            <ActionSegment
+              title={hasBookmark ? `Camera ${i + 1} — Click: restore · Hold: save` : `Camera ${i + 1} — Hold to save current view`}
+              color={color}
+              icon={<Icon />}
+              label={i + 1}
+              buttonProps={{
+                onPointerDown: () => handlePointerDown(i),
+                onPointerUp: () => handlePointerUp(i),
+                onPointerLeave: handlePointerLeave,
+              }}
+            />
+          </Fragment>
+        );
+      })}
     </>
+  );
+}
+
+/** HMI-visibility toggle (the "eye") as a single action-group segment. */
+export function HmiToggleButton() {
+  const hmiVisible = useHmiVisible();
+  return (
+    <ActionSegment
+      title="Toggle HMI (H)"
+      onClick={toggleHmiVisible}
+      color={hmiVisible ? undefined : 'rgba(255,255,255,0.5)'}
+      icon={hmiVisible ? <Visibility /> : <VisibilityOff />}
+    />
+  );
+}
+
+/** First-Person View toggle as a single action-group segment. The host decides
+ *  whether to render it (hidden on touch devices). */
+export function FpvBarButton() {
+  const viewer = useViewer();
+  const [active, setActive] = useState(false);
+  useEffect(() => {
+    const onEnter = () => setActive(true);
+    const onExit = () => setActive(false);
+    viewer.on('fpv-enter', onEnter);
+    viewer.on('fpv-exit', onExit);
+    return () => { viewer.off('fpv-enter', onEnter); viewer.off('fpv-exit', onExit); };
+  }, [viewer]);
+  const handleClick = () => {
+    const plugin = viewer.getPlugin<FpvPluginAPI>('fpv');
+    plugin?.toggle();
+  };
+  return (
+    <ActionSegment
+      title="First-Person View (F)"
+      active={active}
+      onClick={handleClick}
+      icon={<DirectionsWalk />}
+    />
   );
 }

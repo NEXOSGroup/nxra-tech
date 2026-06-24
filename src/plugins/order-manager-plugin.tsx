@@ -712,8 +712,8 @@ export function OrderPanel() {
       <LeftPanel
         title={
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-            <ShoppingCart sx={{ fontSize: 14, color: accentColor ?? 'primary.main' }} />
-            <Typography sx={{ fontSize: 11, fontWeight: 600, color: 'text.primary' }}>
+            <ShoppingCart sx={{ fontSize: 16, color: accentColor ?? 'primary.main' }} />
+            <Typography variant="subtitle2" sx={{ fontSize: '0.8rem', fontWeight: 600, color: 'text.primary' }}>
               Order Cart
             </Typography>
           </Box>

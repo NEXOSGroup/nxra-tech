@@ -6,7 +6,7 @@ import { Typography, Box, Button, Switch, TextField } from '@mui/material';
 import { useViewer } from '../../../hooks/use-viewer';
 import { useMcpBridge } from '../../../hooks/use-mcp-bridge';
 import type { McpBridgePluginAPI } from '../../types/plugin-types';
-import { StatRow } from './settings-helpers';
+import { StatRow, SettingsSection, FieldRow } from './settings-helpers';
 
 export function McpTab() {
   const viewer = useViewer();
@@ -55,53 +55,50 @@ export function McpTab() {
   };
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-      {/* Enable toggle */}
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Typography variant="body2" sx={{ fontWeight: 500 }}>AI Bridge</Typography>
-        <Switch size="small" checked={mcp.enabled}
-          onChange={(_, v) => mcpPlugin?.setEnabled(v)} />
-      </Box>
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+      <SettingsSection id="mcp-bridge" title="AI Bridge">
+        {/* Enable toggle */}
+        <FieldRow label="AI Bridge">
+          <Switch size="small" checked={mcp.enabled}
+            onChange={(_, v) => mcpPlugin?.setEnabled(v)} />
+        </FieldRow>
 
-      {/* Status */}
-      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-        <StatRow label="State" value={stateLabel} color={stateColor} />
-        <StatRow label="Tools" value={String(mcp.toolCount)} />
-        <StatRow label="Port" value={mcp.port} />
-      </Box>
+        {/* Status */}
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+          <StatRow label="State" value={stateLabel} color={stateColor} />
+          <StatRow label="Tools" value={String(mcp.toolCount)} />
+          <StatRow label="Port" value={mcp.port} />
+        </Box>
 
-      {/* Port config */}
-      <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start' }}>
-        <TextField
-          label="Port"
-          size="small"
-          type="number"
-          value={portInput}
-          onChange={handlePortChange}
-          onBlur={handlePortBlur}
-          onKeyDown={handlePortKeyDown}
-          error={portError}
-          helperText={portError ? '1-65535' : undefined}
-          disabled={!mcp.enabled}
-          slotProps={{ htmlInput: { min: 1, max: 65535 } }}
-          sx={{ width: 110, '& input': { fontFamily: 'monospace', fontSize: 13 } }}
-        />
-      </Box>
+        {/* Port config */}
+        <FieldRow label="Port">
+          <TextField
+            size="small"
+            type="number"
+            value={portInput}
+            onChange={handlePortChange}
+            onBlur={handlePortBlur}
+            onKeyDown={handlePortKeyDown}
+            error={portError}
+            helperText={portError ? '1-65535' : undefined}
+            disabled={!mcp.enabled}
+            slotProps={{ htmlInput: { min: 1, max: 65535 } }}
+            sx={{ width: 110, '& input': { fontFamily: 'monospace', fontSize: 13 } }}
+          />
+        </FieldRow>
 
-      {/* Retry button */}
-      {mcp.enabled && !mcp.connected && (
-        <Button size="small" variant="outlined" onClick={() => mcpPlugin?.reconnect()}
-          sx={{ alignSelf: 'flex-start', textTransform: 'none' }}>
-          Retry Now
-        </Button>
-      )}
+        {/* Retry button */}
+        {mcp.enabled && !mcp.connected && (
+          <Button size="small" variant="outlined" onClick={() => mcpPlugin?.reconnect()}
+            sx={{ alignSelf: 'flex-start', textTransform: 'none' }}>
+            Retry Now
+          </Button>
+        )}
+      </SettingsSection>
 
       {/* Tool list */}
       {mcp.toolNames.length > 0 && (
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-          <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 600 }}>
-            Registered Tools ({mcp.toolNames.length})
-          </Typography>
+        <SettingsSection id="mcp-tools" title={`Registered Tools (${mcp.toolNames.length})`}>
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.25, pl: 1 }}>
             {mcp.toolNames.map(name => (
               <Typography key={name} variant="caption"
@@ -110,7 +107,7 @@ export function McpTab() {
               </Typography>
             ))}
           </Box>
-        </Box>
+        </SettingsSection>
       )}
     </Box>
   );

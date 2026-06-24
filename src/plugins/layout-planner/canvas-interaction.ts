@@ -9,27 +9,17 @@
  * that operate on the 3D canvas while the planner is active.
  */
 
-import { Raycaster, Vector2, Vector3 } from 'three';
+import { Raycaster, Vector2 } from 'three';
 import type { Object3D, Mesh } from 'three';
 
 import type { RVViewer } from '../../core/rv-viewer';
 import { DRAG_THRESHOLD_PX } from '../../core/engine/rv-constants';
 import { pointerToNDC } from '../../core/engine/rv-pointer-utils';
-import { getLayoutDragData } from './drag-types';
 import { type LibraryCatalogEntry, type LayoutStore } from './rv-layout-store';
-import type { GhostManager } from './ghost-manager';
 import type { FloorGizmo } from './floor-gizmo';
 import { findLayoutAncestor, isLockedLayoutInstance, isMuSelectable } from './layout-predicates';
 import type { BoxSelectController } from './box-select-controller';
 import type { BboxSnapController } from './bbox-snap';
-import type { SnapPointPlugin } from '../snap-point';
-import {
-  findBestGhostSnap,
-  applyGhostSnapAlignment,
-  type GhostSnapMatch,
-} from '../snap-point/ghost-snap-match';
-import { DEFAULT_MAGNET_RADIUS_M } from '../snap-point/snap-magnetic-controller';
-import type { SnapPoint } from '../../core/engine/rv-snap-point-registry';
 
 // ─── Dependency interface ────────────────────────────────────────────
 
@@ -39,15 +29,27 @@ export interface CanvasInteractionDeps {
   canvas: HTMLCanvasElement;
   objectMap: ReadonlyMap<string, Object3D>;
   idByObject: WeakMap<Object3D, string>;
-  ghost: GhostManager;
   floorPlane: Mesh;
   transformControls: FloorGizmo | null;
   modelRoot: Object3D | null;
   getPlacementEntry(): LibraryCatalogEntry | null;
   setDragEntry(entry: LibraryCatalogEntry | null): void;
   getDragEntry(): LibraryCatalogEntry | null;
-  placeComponent(entry: LibraryCatalogEntry, pos: [number, number, number]): Promise<string>;
-  placeAtSnap(entry: LibraryCatalogEntry, target: SnapPoint, ownSnapName: string): Promise<string | null>;
+  /** Instantiate + register the live draft for `entry` (idempotent, async). */
+  startDraft(entry: LibraryCatalogEntry): void;
+  /** Move the live draft to a raw floor XZ (bbox/grid snap + snap-point +
+   *  drop-to-surface). No-op until the async build produced the draft. */
+  moveDraft(rawX: number, rawZ: number): boolean;
+  /** Commit the live draft as a placement at the final floor `coords` (or the
+   *  draft's current position when null). Ensures the draft exists first. */
+  commitDraft(entry: LibraryCatalogEntry, coords: [number, number] | null): Promise<string | null>;
+  /** Tear down the uncommitted live draft (cancelled drag / Esc / mode off). */
+  cancelDraft(): void;
+  /** Hide the draft without tearing it down (drag left the window). */
+  hideDraft(): void;
+  /** Mark synchronously in `onDrop` that the drop committed the draft, so the
+   *  dragend-fired `setDragEntry(null)` keeps the node instead of cancelling. */
+  markDropCommitted(): void;
   removeSelected(): void;
   duplicateSelected(): Promise<string | null>;
   copySelected(): number;
@@ -84,83 +86,15 @@ export class CanvasInteractionManager {
 
   constructor(private deps: CanvasInteractionDeps) {}
 
-  /**
-   * Arm bbox magnetic snap for the current ghost the first time a valid
-   * drag-over / placement-mode move produces a floor hit. Idempotent — the
-   * controller's own `isArmed` guard skips repeat calls. The controller
-   * self-checks `store.bboxSnapEnabled`, so toggling the toolbar button
-   * mid-drag takes effect on the next pointer-move.
-   */
-  private _armBboxForGhost(): void {
-    const ghostNode = this.deps.ghost.ghost;
-    if (!ghostNode) return;
-    if (this.deps.bboxSnap.isArmed) return;
-    this.deps.bboxSnap.armForDrag(ghostNode);
-  }
-
-  /** Disarm bbox snap if armed. Idempotent. */
+  /** Disarm bbox snap if armed. Idempotent. Used on dispose; the planner's
+   *  draft commit/cancel disarm during normal flow. */
   private _disarmBbox(): void {
     if (this.deps.bboxSnap.isArmed) this.deps.bboxSnap.disarm();
   }
 
-  /**
-   * Snap-point magnetic alignment for the placement ghost.
-   *
-   * Resets the ghost to its baseline pose (Y=0, identity rotation) so the
-   * previous frame's snap doesn't carry over when the cursor moves out of
-   * range, then probes for the nearest compatible scene-snap. If a match
-   * is found, the ghost's transform is overwritten with the snap-aligned
-   * matrix and the match is returned for the drop handler to forward to
-   * `placeAtSnap`. Returns null when no snap is in range OR the
-   * snap-point plugin isn't installed.
-   */
-  private _tryGhostSnapAlignment(): GhostSnapMatch | null {
-    const ghostRoot = this.deps.ghost.ghost;
-    if (!ghostRoot) return null;
-    const snapPlugin = this.deps.viewer.getPlugin<SnapPointPlugin>('snap-point');
-    const registry = snapPlugin?.getRegistry();
-    if (!registry || registry.size === 0) return null;
-
-    // Reset to baseline: floor-Y, no rotation. setPosition has already set X/Z.
-    ghostRoot.position.y = 0;
-    ghostRoot.rotation.set(0, 0, 0);
-    ghostRoot.updateMatrixWorld(true);
-
-    const match = findBestGhostSnap(ghostRoot, registry, DEFAULT_MAGNET_RADIUS_M);
-    if (!match) return null;
-    applyGhostSnapAlignment(ghostRoot, match);
-    return match;
-  }
-
-  /**
-   * Apply bbox + grid snap to a raw floor-hit XZ point. Mirrors the
-   * FloorGizmo's per-axis priority: bbox magnetic snap claims an axis when
-   * it finds a target within tolerance; grid quantises any axis the bbox
-   * snap leaves alone. Returns the snapped (x, z) as a 2-tuple.
-   *
-   * Returns the input unchanged when both snaps are off / inactive.
-   */
-  private _snapXZ(rawX: number, rawZ: number): [number, number] {
-    let nx = rawX;
-    let nz = rawZ;
-    // applySnap returns null when not armed, bboxSnapEnabled is off, Alt is
-    // held, or no targets are in range.
-    const custom = this.deps.bboxSnap.applySnap(nx, nz, 'free');
-    if (custom?.snappedX) nx = custom.x;
-    if (custom?.snappedZ) nz = custom.z;
-    if (this.deps.store.gridEnabled) {
-      const step = this.deps.store.gridSizeMm / 1000;
-      if (step > 0) {
-        if (!custom?.snappedX) nx = Math.round(nx / step) * step;
-        if (!custom?.snappedZ) nz = Math.round(nz / step) * step;
-      }
-    }
-    return [nx, nz];
-  }
-
   /** Wire all canvas/document/window events. Call once after model loaded. */
   wire(): void {
-    const { viewer, canvas, store, ghost, floorPlane } = this.deps;
+    const { viewer, canvas, store, floorPlane } = this.deps;
 
     const DIRECT_DRAG_THRESHOLD_SQ = DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX;
 
@@ -276,61 +210,37 @@ export class CanvasInteractionManager {
       this._raycaster.setFromCamera(this._mouse, viewer.camera);
 
       const floorHits = this._raycaster.intersectObject(floorPlane);
-      if (floorHits.length > 0) {
-        const [nx, nz] = this._snapXZ(floorHits[0].point.x, floorHits[0].point.z);
-        // Position the ghost first so snap-point can probe from the final
-        // cursor location.
-        ghost.setPosition(nx, nz);
-        const snapMatch = this._tryGhostSnapAlignment();
-        const pos: [number, number, number] = [nx, 0, nz];
-        // Disarm BEFORE placing — placeComponent / placeAtSnap register the
-        // new object in _objectMap, which would otherwise contaminate the
-        // next snap arm.
-        this._disarmBbox();
-        if (snapMatch) {
-          this.deps.placeAtSnap(placementEntry, snapMatch.targetSnap, snapMatch.ghostSnap.name)
-            .catch(err => console.error('[LayoutPlanner] Failed to snap-place:', err));
-        } else {
-          this.deps.placeComponent(placementEntry, pos).catch(err =>
-            console.error('[LayoutPlanner] Failed to place:', err),
-          );
-        }
-      }
+      if (floorHits.length === 0) return;
+
+      // Commit the live draft at the click location — the planner ensures it
+      // exists, positions it (snap + drop-to-surface), and records the placement.
+      this.deps.commitDraft(placementEntry, [floorHits[0].point.x, floorHits[0].point.z])
+        .catch(err => console.error('[LayoutPlanner] Failed to place:', err));
     };
 
     canvas.addEventListener('pointerup', onPointerUp);
     this._unsubs.push(() => canvas.removeEventListener('pointerup', onPointerUp));
 
-    // ── Mouse move for ghost preview in placement mode ──
+    // ── Mouse move drives the live draft in click-to-place mode ──
     const onPointerMove = (e: PointerEvent) => {
       if (!this.deps.isActive()) return;
       const placementEntry = this.deps.getPlacementEntry();
       if (!placementEntry) {
-        if (ghost.visible) {
-          ghost.hide();
-          this._disarmBbox();
-          viewer.markRenderDirty();
-        }
+        // Not in click-to-place mode. Tear down a lingering click-draft (no-op
+        // if none). Guard against an in-flight HTML5 drag (native drag
+        // suppresses pointer events anyway — belt-and-braces).
+        if (!this.deps.getDragEntry()) this.deps.cancelDraft();
         return;
       }
 
-      ghost.ensureForEntry(placementEntry);
+      this.deps.startDraft(placementEntry);
 
       pointerToNDC(e.clientX, e.clientY, canvas, this._mouse);
       this._raycaster.setFromCamera(this._mouse, viewer.camera);
 
       const floorHits = this._raycaster.intersectObject(floorPlane);
       if (floorHits.length > 0) {
-        // Arm magnetic bbox snap on the first valid floor-hit — captures the
-        // ghost's AABB and freezes every other placed object's AABB so the
-        // ghost can magnetise to nearby placements just like a re-drag does.
-        this._armBboxForGhost();
-        const [nx, nz] = this._snapXZ(floorHits[0].point.x, floorHits[0].point.z);
-        ghost.setPosition(nx, nz);
-        // Snap-point overrides bbox/grid when a compatible scene snap is in
-        // range — same precedence as the FloorGizmo's re-drag path.
-        this._tryGhostSnapAlignment();
-        viewer.markRenderDirty();
+        this.deps.moveDraft(floorHits[0].point.x, floorHits[0].point.z);
       }
     };
 
@@ -361,7 +271,7 @@ export class CanvasInteractionManager {
         case 'Escape':
           this.deps.selectObjectById(null);
           store.setPlacementMode(null);
-          ghost.hide();
+          this.deps.cancelDraft();
           this._disarmBbox();
           viewer.markRenderDirty();
           break;
@@ -394,99 +304,60 @@ export class CanvasInteractionManager {
 
     // ── HTML5 Drag & Drop ──
     //
-    // Snap behaviour during drag-in matches the post-place re-drag exactly:
-    // bbox magnetic snap claims any axis where it finds a target within
-    // tolerance (tracked via the shared BboxSnapController, the same one the
-    // FloorGizmo's custom-snap callback invokes), and grid quantises the
-    // remaining axes. Without this, the ghost only grid-snapped during the
-    // initial drag-in and the user had to drop + re-drag to get magnetic
-    // alignment to existing placements.
+    // The dragged object is a FULLY registered live draft (instantiated on
+    // drag-enter): the planner's `moveDraft` runs the same per-frame pipeline as
+    // a post-placement re-drag — bbox + grid snap, snap-point port mating, and
+    // drop-to-surface — so the dragged object behaves exactly like a placed one.
     const onDragOver = (e: DragEvent) => {
-      if (!this.deps.isActive() || !this.deps.getDragEntry()) return;
+      const entry = this.deps.getDragEntry();
+      if (!this.deps.isActive() || !entry) return;
       e.preventDefault();
       if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
 
-      ghost.ensureForEntry(this.deps.getDragEntry()!);
+      this.deps.startDraft(entry);
 
       pointerToNDC(e.clientX, e.clientY, canvas, this._mouse);
       this._raycaster.setFromCamera(this._mouse, viewer.camera);
       const hits = this._raycaster.intersectObject(floorPlane);
-
       if (hits.length > 0) {
-        // Arm magnetic bbox snap on the first valid floor-hit (idempotent —
-        // the controller's `isArmed` guard skips repeat calls).
-        this._armBboxForGhost();
-        const [nx, nz] = this._snapXZ(hits[0].point.x, hits[0].point.z);
-        ghost.setPosition(nx, nz);
-        // Snap-point overrides bbox/grid when a compatible scene snap is in
-        // range — same precedence as the post-place re-drag path.
-        this._tryGhostSnapAlignment();
-        viewer.markRenderDirty();
+        this.deps.moveDraft(hits[0].point.x, hits[0].point.z);
       }
     };
 
     const onDragLeave = (e: DragEvent) => {
       if (e.relatedTarget === null) {
-        ghost.hide();
-        this._disarmBbox();
+        // Drag left the window — hide (not tear down) so re-entry reuses it.
+        this.deps.hideDraft();
         viewer.markRenderDirty();
       }
     };
 
-    const onDrop = async (e: DragEvent) => {
+    const onDrop = (e: DragEvent) => {
       if (!this.deps.isActive()) return;
       e.preventDefault();
 
-      const dragData = e.dataTransfer ? getLayoutDragData(e.dataTransfer) : null;
-      if (!dragData || !dragData.glbUrl) {
-        ghost.hide();
-        this._disarmBbox();
-        return;
-      }
-      const { catalogId, glbUrl, entryName, category: categoryStr } = dragData;
+      // The live draft was instantiated from the FULL cached entry at drag-enter,
+      // so commit it directly — no minimal-entry reconstruction, no re-clone.
+      const entry = this.deps.getDragEntry();
+      if (!entry) return;
 
       pointerToNDC(e.clientX, e.clientY, canvas, this._mouse);
       this._raycaster.setFromCamera(this._mouse, viewer.camera);
       const hits = this._raycaster.intersectObject(floorPlane);
+      const coords: [number, number] | null = hits.length > 0
+        ? [hits[0].point.x, hits[0].point.z]
+        : null;
 
-      let pos: [number, number, number] = [0, 0, 0];
-      let snapMatch: GhostSnapMatch | null = null;
-      if (hits.length > 0) {
-        const [nx, nz] = this._snapXZ(hits[0].point.x, hits[0].point.z);
-        pos = [nx, 0, nz];
-        // Re-evaluate snap-point at the drop frame so the placement uses the
-        // exact same alignment the user saw in the ghost. Position the ghost
-        // first so the matcher reads the final cursor location.
-        ghost.setPosition(nx, nz);
-        snapMatch = this._tryGhostSnapAlignment();
-      }
+      // Mark committed SYNCHRONOUSLY (before the async commit): the dragend that
+      // fires right after drop must see this so `setDragEntry(null)` keeps the
+      // node instead of tearing it down.
+      this.deps.markDropCommitted();
 
-      // Hide ghost AFTER reading its final pose. Disarm BEFORE placing —
-      // placeComponent / placeAtSnap register the new object in _objectMap,
-      // which would otherwise be picked up as a snap target by the next arm
-      // cycle.
-      ghost.hide();
-      this._disarmBbox();
-
-      const entry: LibraryCatalogEntry = {
-        id: catalogId,
-        name: entryName || catalogId,
-        category: (categoryStr as LibraryCatalogEntry['category']) || 'custom',
-        glbUrl,
-        thumbnailUrl: '',
-      };
-
-      try {
-        if (snapMatch) {
-          await this.deps.placeAtSnap(entry, snapMatch.targetSnap, snapMatch.ghostSnap.name);
-        } else {
-          await this.deps.placeComponent(entry, pos);
-        }
-      } catch (err) {
-        console.error('[LayoutPlanner] Failed to place component:', err);
-      }
-
-      this.deps.setDragEntry(null);
+      this.deps.commitDraft(entry, coords).catch(err =>
+        console.error('[LayoutPlanner] Failed to place component:', err),
+      );
+      // Do NOT setDragEntry(null) here — dragend (handleDragEnd) fires next and
+      // balances the edit-pause.
     };
 
     document.addEventListener('dragover', onDragOver);

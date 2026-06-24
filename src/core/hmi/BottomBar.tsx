@@ -7,12 +7,11 @@ import {
   Popover, Switch, FormControlLabel, Typography, Divider,
   List, ListItemButton, Tooltip,
 } from '@mui/material';
-import { Search, Clear, MoreHoriz, CenterFocusStrong, Layers, DirectionsWalk } from '@mui/icons-material';
-import { CameraBar } from './CameraBar';
+import { Search, Clear, MoreHoriz, CenterFocusStrong } from '@mui/icons-material';
 import { GroupsOverlay } from './GroupsOverlay';
 import { useNodeFilter } from '../../hooks/use-node-filter';
-import { useMobileLayout, isMobileDevice } from '../../hooks/use-mobile-layout';
-import type { FpvPluginAPI } from '../types/plugin-types';
+import { useMobileLayout } from '../../hooks/use-mobile-layout';
+import { useViewportInsets } from '../../hooks/use-viewport-insets';
 import { useViewer } from '../../hooks/use-viewer';
 import { componentColor } from './rv-inspector-helpers';
 import { getCapabilities } from '../engine/rv-component-registry';
@@ -39,6 +38,9 @@ export function BottomBar() {
   const [settings, setSettings] = useState<SearchSettings>(loadSearchSettings);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isMobile = useMobileLayout();
+  // Center the search bar over the actual 3D view (between the docked windows),
+  // not the whole window, so it tracks the viewport as panels open/resize.
+  const insets = useViewportInsets();
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
   const [selectedIdx, setSelectedIdx] = useState(-1);
   const [dropdownVisible, setDropdownVisible] = useState(true);
@@ -256,8 +258,8 @@ export function BottomBar() {
       sx={{
         position: 'fixed',
         bottom: isMobile ? 'calc(56px + env(safe-area-inset-bottom, 0px))' : 8,
-        left: 0,
-        right: 0,
+        left: insets.left,
+        right: insets.right,
         zIndex: 1200,
         pointerEvents: 'none',
         ...(isMobile && {
@@ -384,38 +386,9 @@ export function BottomBar() {
         </Paper>
       </Box>
 
-      {/* Camera presets + HMI toggle — bottom right */}
-      <Paper
-        elevation={4}
-        sx={{
-          position: 'absolute',
-          bottom: 0,
-          right: 8,
-          display: { xs: 'none', sm: 'flex' },
-          alignItems: 'center',
-          gap: 0.5,
-          px: 1,
-          py: 0.5,
-          borderRadius: 2,
-          pointerEvents: 'auto',
-        }}
-      >
-        <CameraBar />
-        {viewer.groups && viewer.groups.groupCount > 0 && (
-          <IconButton
-            size="small"
-            color="inherit"
-            title="Toggle Groups panel"
-            onClick={() => viewer.toggleGroupsOverlay()}
-            sx={{
-              color: viewer.groupsOverlayOpen ? '#4fc3f7' : 'inherit',
-            }}
-          >
-            <Layers fontSize="small" />
-          </IconButton>
-        )}
-        <FpvBarButton />
-      </Paper>
+      {/* Camera / view controls now live in the full-width top app bar
+          (TopBar.tsx right region). The Groups overlay panel itself still
+          renders here. */}
       <GroupsOverlay />
 
       {/* Search settings popover */}
@@ -471,34 +444,5 @@ export function BottomBar() {
       </Popover>
     </Box>
     </>
-  );
-}
-
-/** FPV walk button for the bottom-right camera bar. Hidden on mobile. */
-function FpvBarButton() {
-  const viewer = useViewer();
-  const [active, setActive] = useState(false);
-  useEffect(() => {
-    const onEnter = () => setActive(true);
-    const onExit = () => setActive(false);
-    viewer.on('fpv-enter', onEnter);
-    viewer.on('fpv-exit', onExit);
-    return () => { viewer.off('fpv-enter', onEnter); viewer.off('fpv-exit', onExit); };
-  }, [viewer]);
-  if (isMobileDevice()) return null;
-  const handleClick = () => {
-    const plugin = viewer.getPlugin<FpvPluginAPI>('fpv');
-    plugin?.toggle();
-  };
-  return (
-    <IconButton
-      size="small"
-      color="inherit"
-      title="First-Person View (F)"
-      onClick={handleClick}
-      sx={{ color: active ? '#4fc3f7' : 'inherit' }}
-    >
-      <DirectionsWalk fontSize="small" />
-    </IconButton>
   );
 }

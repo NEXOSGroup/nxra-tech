@@ -27,6 +27,7 @@ function makeHost(overrides: Partial<PostProcessingHost> = {}): PostProcessingHo
     isWebGPU: false,
     antialiasActive: false,
     outlineHasOutlines: false,
+    toonPassActive: false,
     markRenderDirty: () => { /* default noop */ },
   };
   return { ...base, ...overrides };

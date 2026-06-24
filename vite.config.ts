@@ -260,6 +260,60 @@ function thumbnailSavePlugin() {
   };
 }
 
+/**
+ * Vite plugin: Save visual presets to disk (DEV only).
+ * POST /api/preset with { name, preset }
+ * Writes public/presets/<safeName>.preset.json and regenerates index.json
+ * (an array of file stems) so the published manifest stays correct.
+ */
+function presetSavePlugin() {
+  function readBody(req: { on: Function }): Promise<string> {
+    return new Promise((resolve) => {
+      let body = '';
+      req.on('data', (chunk: string) => { body += chunk; });
+      req.on('end', () => resolve(body));
+    });
+  }
+
+  return {
+    name: 'rv-preset-save',
+    apply: 'serve' as const,
+    configureServer(server: { config: { root: string }; middlewares: { use: Function } }) {
+      server.middlewares.use(async (req: { url?: string; method?: string; on: Function }, res: any, next: Function) => {
+        if (req.url !== '/api/preset' || req.method !== 'POST') return next();
+
+        try {
+          const body = JSON.parse(await readBody(req));
+          const { name, preset } = body as { name: string; preset: unknown };
+          if (!name || !preset) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'Missing name or preset' }));
+            return;
+          }
+
+          const safe = String(name).replace(/[^a-zA-Z0-9_-]/g, '_');
+          const outDir = join(server.config.root, 'public/presets');
+          mkdirSync(outDir, { recursive: true });
+          writeFileSync(join(outDir, `${safe}.preset.json`), JSON.stringify(preset, null, 2));
+
+          // Regenerate the manifest from the directory (array of file stems).
+          const stems = readdirSync(outDir)
+            .filter((f) => f.endsWith('.preset.json'))
+            .map((f) => f.replace(/\.preset\.json$/, ''));
+          writeFileSync(join(outDir, 'index.json'), JSON.stringify(stems, null, 2));
+
+          console.log(`[rv-preset] Saved ${safe}.preset.json`);
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ ok: true, name, stem: safe }));
+        } catch (e) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: String(e) }));
+        }
+      });
+    },
+  };
+}
+
 // ─── Private project directory (contains project subfolders with models/) ────
 const PRIVATE_PROJECTS_DIR = resolve(__dirname, '../realvirtual-WebViewer-Private~/projects');
 
@@ -460,6 +514,7 @@ export default defineConfig({
     testRunnerPlugin(),
     debugApiPlugin(),
     thumbnailSavePlugin(),
+    presetSavePlugin(),
   ].filter(Boolean),
   resolve: {
     dedupe: ['three'],
@@ -483,6 +538,11 @@ export default defineConfig({
   define: {
     __RV_HAS_PRIVATE__: JSON.stringify(HAS_PRIVATE),
     __RV_COMMERCIAL__: JSON.stringify(!!process.env.RV_COMMERCIAL),
+  },
+  optimizeDeps: {
+    // Pre-bundle read-excel-file so the lazy `await import('read-excel-file')`
+    // in s7-tag-table.ts doesn't trigger a dev-mode pre-bundling stall.
+    include: ['read-excel-file'],
   },
   server: {
     host: true,

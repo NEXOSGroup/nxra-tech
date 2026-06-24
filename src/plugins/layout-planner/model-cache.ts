@@ -273,7 +273,12 @@ export function collectDropTargets(scene: Scene, selfObj: Object3D): Mesh[] {
  *                 for live drop during a drag (60 Hz).
  * @returns        The surface Y the object was placed on (0 if floor).
  */
-export function dropToSurface(obj: Object3D, scene: Scene, targets?: Mesh[]): number {
+export function dropToSurface(
+  obj: Object3D,
+  scene: Scene,
+  targets?: Mesh[],
+  centerOnBelt = false,
+): number {
   scene.updateMatrixWorld(true);
   _dropBox.setFromObject(obj);
   if (_dropBox.isEmpty()) return 0;
@@ -305,6 +310,15 @@ export function dropToSurface(obj: Object3D, scene: Scene, targets?: Mesh[]): nu
   if (hits.length > 0) {
     const surfaceY = hits[0].point.y;
     if (surfaceY > 0.01) {
+      // Lateral centering: when requested and we landed on a transport-surface
+      // drop plane, snap the object's XZ onto the belt's centre line (keeps the
+      // along-belt position; only the cross-belt offset is removed). The plane
+      // carries a back-reference to its RVTransportSurface in userData.
+      if (centerOnBelt) {
+        const surf = hits[0].object.userData._rvDropSurfaceInstance as
+          { snapToCenterLine?(p: Vector3): void } | undefined;
+        surf?.snapToCenterLine?.(obj.position);
+      }
       obj.position.y = surfaceY + pivotToBottom;
       return surfaceY;
     }

@@ -17,6 +17,7 @@ import type { LoadResult } from './engine/rv-scene-loader';
 import type { RVViewer } from './rv-viewer';
 import type { UISlotEntry } from './rv-ui-plugin';
 import type { PluginContext } from './rv-plugin-context';
+import type { ModeId } from './rv-mode-manager';
 
 export interface RVViewerPlugin {
   /** Unique plugin ID (e.g. 'drive-recorder', 'sensor-monitor'). */
@@ -37,6 +38,18 @@ export interface RVViewerPlugin {
 
   /** UI slot entries this plugin provides (KPI cards, buttons, messages, etc.). */
   readonly slots?: UISlotEntry[];
+
+  /**
+   * Workspace modes this plugin participates in (plan-198). `undefined` (the
+   * default) means the plugin is SHARED — active in every mode (backward
+   * compatible: existing plugins behave exactly as before). `core: true`
+   * plugins are always active regardless of this field.
+   *
+   * When set, the plugin is enabled only while one of the listed modes is
+   * active; its UI slot entries are auto-gated to those modes' contexts.
+   * Example: `modes: ['planner']`, `modes: ['des', 'hmi']`.
+   */
+  readonly modes?: ModeId[];
 
   /**
    * Called once when the plugin is registered via `viewer.use(plugin)`.
@@ -73,6 +86,28 @@ export interface RVViewerPlugin {
 
   /** Per render frame, after renderer.render(). */
   onRender?(frameDt: number): void;
+
+  // ── Workspace mode hooks (plan-198) ──
+
+  /**
+   * Called when entering a mode this plugin participates in (after the plugin
+   * has been (re-)enabled and any missed `onModelLoaded` replayed). Install
+   * scene overlays, interaction handlers, raycast filters, gizmos here.
+   *
+   * CONTRACT: anything created here (Three.js objects, event listeners, DOM,
+   * raycast filters, OutlinePass selections) MUST be fully released in
+   * {@link onModeDeactivate} — the plugin instance persists across mode
+   * switches, so undisposed resources leak.
+   */
+  onModeActivate?(mode: ModeId, viewer: RVViewer): void;
+
+  /**
+   * Called when leaving a mode this plugin participates in, BEFORE the plugin
+   * is disabled (scene/model references are still valid). Tear down everything
+   * created in {@link onModeActivate}. `from` is the mode being left (null only
+   * in unusual boot edge cases).
+   */
+  onModeDeactivate?(mode: ModeId | null, viewer: RVViewer): void;
 
   /** Viewer is being destroyed — clean up global listeners, DOM elements, etc. */
   dispose?(): void;

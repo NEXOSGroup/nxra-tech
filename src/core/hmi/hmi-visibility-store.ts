@@ -33,6 +33,12 @@ export function getHmiVisible(): boolean {
   return visible;
 }
 
+/** Subscribe to HMI visibility changes (non-React). Returns an unsubscribe fn. */
+export function subscribeHmiVisible(cb: () => void): () => void {
+  listeners.add(cb);
+  return () => { listeners.delete(cb); };
+}
+
 /** React hook — triggers re-render when visibility changes. */
 export function useHmiVisible(): boolean {
   return useSyncExternalStore(

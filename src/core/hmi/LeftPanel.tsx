@@ -16,14 +16,21 @@ import { useState, useCallback } from 'react';
 import { Paper, Box, Typography, IconButton } from '@mui/material';
 import { Close } from '@mui/icons-material';
 import { useMobileLayout } from '../../hooks/use-mobile-layout';
+import { useViewportInsets } from '../../hooks/use-viewport-insets';
 import {
   LEFT_PANEL_TOP,
-  LEFT_PANEL_LEFT,
-  LEFT_PANEL_BOTTOM,
+  ACTIVITY_BAR_WIDTH,
   LEFT_PANEL_ZINDEX,
   LEFT_PANEL_MOBILE_ZINDEX,
 } from './layout-constants';
 import type { SxProps } from '@mui/material/styles';
+
+/** Dark surface for docked windows — the MIDDLE of three darkness tiers:
+ *  outer toolbars (rgba(38,38,38,0.95)) are darkest, windows are a touch
+ *  brighter, and floating viewport glass (theme Paper) is the brightest.
+ *  Needs `!important` to override the theme's bright glass Paper background,
+ *  which is itself `!important`. */
+export const WINDOW_DARK_BG = 'rgba(48, 48, 48, 0.93)';
 
 // ─── Pure helper functions (exported for testing) ──────────────────────
 
@@ -40,8 +47,10 @@ export function buildPanelSx(opts: {
   leftOffset?: number;
   mobile?: 'full-screen' | 'hidden';
   anchor?: 'left' | 'right';
+  /** Extra top inset (css-px) so the docked window clears the optional title bar. */
+  topOffset?: number;
 }): Record<string, unknown> {
-  const { width, isMobile, leftOffset, mobile = 'full-screen', anchor = 'left' } = opts;
+  const { width, isMobile, leftOffset, mobile = 'full-screen', anchor = 'left', topOffset = 0 } = opts;
 
   if (isMobile && mobile === 'hidden') {
     return {
@@ -75,23 +84,27 @@ export function buildPanelSx(opts: {
     };
   }
 
-  const offset = leftOffset ?? LEFT_PANEL_LEFT;
+  // Edge-to-edge docking (VSCode-style): the window is flush, square, and runs
+  // full height from the very top to the viewport bottom. Left-anchored
+  // windows sit immediately right of the activity bar (default left =
+  // ACTIVITY_BAR_WIDTH); right-anchored windows sit flush to the right edge.
+  const offset = leftOffset ?? (anchor === 'right' ? 0 : ACTIVITY_BAR_WIDTH);
   const anchorSide = anchor === 'right'
-    ? { right: offset, left: 'auto' as const }
-    : { left: offset, right: 'auto' as const };
+    ? { right: offset, left: 'auto' as const, borderLeft: '1px solid rgba(255,255,255,0.08)' }
+    : { left: offset, right: 'auto' as const, borderRight: '1px solid rgba(255,255,255,0.08)' };
 
   return {
     position: 'fixed',
     ...anchorSide,
-    top: LEFT_PANEL_TOP,
-    bottom: LEFT_PANEL_BOTTOM,
+    top: LEFT_PANEL_TOP + topOffset,
+    bottom: 0,
     width,
     zIndex: LEFT_PANEL_ZINDEX,
     display: 'flex',
     flexDirection: 'column',
     overflow: 'hidden',
     pointerEvents: 'auto',
-    borderRadius: 2,
+    borderRadius: 0,
   };
 }
 
@@ -128,6 +141,12 @@ export interface LeftPanelProps {
    * resize handle and offset mirror automatically.
    */
   anchor?: 'left' | 'right';
+  /**
+   * Use an inner (inset) shadow instead of the default outer drop shadow.
+   * Drops the Paper elevation to 0 and overlays a non-interactive inset
+   * shadow so the panel reads as recessed rather than raised. Default: false.
+   */
+  innerShadow?: boolean;
   /** Additional sx props merged into root Paper. */
   sx?: SxProps;
   /** Header padding override sx. */
@@ -148,10 +167,12 @@ export function LeftPanel({
   footer,
   mobile = 'full-screen',
   anchor = 'left',
+  innerShadow = false,
   sx: sxOverride,
   headerSx,
 }: LeftPanelProps) {
   const isMobile = useMobileLayout();
+  const topOffset = useViewportInsets().top;
   const [dragging, setDragging] = useState(false);
 
   // ── Resize handle ──
@@ -179,21 +200,25 @@ export function LeftPanel({
     document.addEventListener('pointerup', onUp);
   }, [width, minWidth, maxWidth, onResize, anchor]);
 
-  const panelSx = buildPanelSx({ width, isMobile, leftOffset, mobile, anchor });
+  const panelSx = buildPanelSx({ width, isMobile, leftOffset, mobile, anchor, topOffset });
 
   return (
     <Paper
-      elevation={4}
+      elevation={innerShadow ? 0 : 4}
       data-ui-panel
-      sx={{ ...panelSx, ...((sxOverride ?? {}) as Record<string, unknown>) }}
+      sx={{ backgroundColor: `${WINDOW_DARK_BG} !important`, ...panelSx, ...((sxOverride ?? {}) as Record<string, unknown>) }}
     >
-      {/* Header */}
+      {/* Unified header — title (left), optional toolbar, close (X). Padding and
+          title style match the Models window guide so every docked window reads
+          the same. Callers can pass a plain string title for the standard look,
+          or a ReactNode for custom headers (icon + label, two-line, …). */}
       <Box
         sx={{
           display: 'flex',
           alignItems: 'center',
-          px: 1,
-          py: 0.25,
+          px: 1.5,
+          py: 1.25,
+          gap: 0.5,
           borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
           flexShrink: 0,
           ...(headerSx as Record<string, unknown> ?? {}),
@@ -202,7 +227,18 @@ export function LeftPanel({
         {/* Title area — flex:1 */}
         <Box sx={{ flex: 1, overflow: 'hidden', minWidth: 0 }}>
           {typeof title === 'string' ? (
-            <Typography sx={{ fontSize: 11, fontWeight: 600, color: 'text.primary' }}>
+            <Typography
+              variant="subtitle2"
+              sx={{
+                fontWeight: 600,
+                fontSize: '0.8rem',
+                color: 'text.primary',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+              title={title}
+            >
               {title}
             </Typography>
           ) : (
@@ -215,7 +251,7 @@ export function LeftPanel({
 
         {/* Close button */}
         <IconButton size="small" onClick={onClose} sx={{ color: 'text.secondary', p: 0.25, flexShrink: 0 }}>
-          <Close sx={{ fontSize: 14 }} />
+          <Close sx={{ fontSize: 16 }} />
         </IconButton>
       </Box>
 
@@ -229,6 +265,23 @@ export function LeftPanel({
         <Box sx={{ flexShrink: 0, borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>
           {footer}
         </Box>
+      )}
+
+      {/* Optional inner (inset) shadow — a non-interactive overlay that recesses
+          the panel. Rendered above content so it stays visible regardless of
+          child backgrounds; pointer-events:none keeps everything below clickable
+          (including the resize handle). */}
+      {innerShadow && (
+        <Box
+          aria-hidden
+          sx={{
+            position: 'absolute',
+            inset: 0,
+            pointerEvents: 'none',
+            boxShadow: 'inset 0 0 6px 0 rgba(0, 0, 0, 0.3)',
+            zIndex: 3,
+          }}
+        />
       )}
 
       {/* Optional resize handle — sits on the inward-facing edge

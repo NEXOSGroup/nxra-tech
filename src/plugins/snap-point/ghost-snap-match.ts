@@ -76,11 +76,18 @@ function getGhostSnaps(ghostRoot: Object3D): readonly ParsedGhostSnap[] {
  * Caller MUST have called `ghostRoot.updateMatrixWorld(true)` before invoking
  * — this hot path skips the sweep to avoid duplicating work the caller did.
  * Same for scene snaps: registered placements have current world matrices.
+ *
+ * `excludeOwner` skips registry snaps whose `ownerRoot === excludeOwner`. When
+ * the dragged object is itself a registered placement (the live-draft model),
+ * pass its root so it doesn't match its OWN ports — `getCompatible(typeId,
+ * undefined)` passes no `target`, so the registry's built-in same-owner skip
+ * never applies here.
  */
 export function findBestGhostSnap(
   ghostRoot: Object3D,
   registry: SnapPointRegistry,
   radius: number,
+  excludeOwner?: Object3D,
 ): GhostSnapMatch | null {
   if (radius <= 0) return null;
 
@@ -93,6 +100,7 @@ export function findBestGhostSnap(
     g.node.getWorldPosition(_ghostPos);
     for (const c of registry.getCompatible(g.typeId, undefined)) {
       if (c.occupied) continue;
+      if (excludeOwner && c.ownerRoot === excludeOwner) continue;
       if (!flowsCompatible(g.flow, c.flow)) continue;
       if (!c.object3D.parent) continue;
       c.object3D.getWorldPosition(_targetPos);

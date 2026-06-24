@@ -102,9 +102,10 @@ export class MultiSelectPivot {
       tc.attach(pivot);
     }
 
-    // Snap settings follow the planner grid
+    // Snap settings follow the planner grid. A 0 mm step turns translation
+    // snapping off (null) while rotation snap stays governed by gridEnabled.
     if (gridEnabled) {
-      tc.setTranslationSnap(gridSizeMm / 1000);
+      tc.setTranslationSnap(gridSizeMm > 0 ? gridSizeMm / 1000 : null);
       tc.setRotationSnap(MathUtils.degToRad(rotationSnapDeg));
     } else {
       tc.setTranslationSnap(null);

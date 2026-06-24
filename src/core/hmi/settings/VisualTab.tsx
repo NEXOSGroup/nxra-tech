@@ -2,24 +2,41 @@
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
 import { useState, useRef } from 'react';
-import { Typography, Box, Button, ToggleButton, ToggleButtonGroup, Select, MenuItem, Switch, Slider } from '@mui/material';
-import { RestartAlt } from '@mui/icons-material';
+import {
+  Typography, Box, Button, ToggleButton, ToggleButtonGroup, Select, MenuItem, Switch,
+  Dialog, DialogTitle, DialogContent, DialogActions, TextField, Tooltip,
+} from '@mui/material';
+import { RestartAlt, BookmarkAdd } from '@mui/icons-material';
 import { useViewer } from '../../../hooks/use-viewer';
 import { isSettingsLocked } from '../../rv-app-config';
 import {
   loadVisualSettings, saveVisualSettings, setUIZoom,
   useSourceMarkersVisible,
   useToolbarShowLabels, setToolbarShowLabels,
-  LIGHTING_MODES, TONE_MAPPING_OPTIONS, SHADOW_QUALITY_OPTIONS,
-  type VisualSettings, type LightingMode, type ToneMappingType, type ShadowQuality, type ProjectionType,
+  TONE_MAPPING_OPTIONS, SHADOW_QUALITY_OPTIONS,
+  type VisualSettings, type ToneMappingType, type ShadowQuality, type ProjectionType,
   type AOMode,
 } from '../visual-settings-store';
+import {
+  listPresets, applyVisualPreset, captureCurrentPreset, savePreset, matchPreset,
+} from '../visual-presets';
+import { markEnvironmentUserModified } from '../environment-presets';
+import { showInfoOverlay } from '../info-overlay-store';
+import { RENDER_MODES, getRenderMode, type RenderMode } from '../../rv-render-modes';
+import { SettingsSection, FieldRow, SliderRow } from './settings-helpers';
 
+/** Outer wrapper: remounts the body (via `key`) after a preset is applied so all
+ *  sliders/dropdowns re-read the freshly-applied visual settings. */
 export function VisualTab() {
+  const [version, setVersion] = useState(0);
+  return <VisualTabBody key={version} onPresetApplied={() => setVersion((v) => v + 1)} />;
+}
+
+function VisualTabBody({ onPresetApplied }: { onPresetApplied: () => void }) {
   const viewer = useViewer();
   const settingsRef = useRef(loadVisualSettings());
-  const initMs = settingsRef.current.modeSettings[settingsRef.current.lightingMode];
-  const [mode, setMode] = useState<LightingMode>(settingsRef.current.lightingMode);
+  const initMs = settingsRef.current.modeSettings[settingsRef.current.renderMode];
+  const [mode, setMode] = useState<RenderMode>(settingsRef.current.renderMode);
   const [lightInt, setLightInt] = useState(initMs.lightIntensity);
   const [toneMap, setToneMap] = useState<ToneMappingType>(initMs.toneMapping);
   const [exposure, setExposure] = useState(initMs.toneMappingExposure);
@@ -45,7 +62,39 @@ export function VisualTab() {
   const [bloomInt, setBloomInt] = useState<number>(settingsRef.current.bloomIntensity);
   const [bloomThresh, setBloomThresh] = useState<number>(settingsRef.current.bloomThreshold);
   const [bloomRad, setBloomRad] = useState<number>(settingsRef.current.bloomRadius);
+  const [toonBands, setToonBands] = useState<number>(settingsRef.current.toonBands);
+  const [toonCoolShadows, setToonCoolShadows] = useState<boolean>(settingsRef.current.toonCoolShadows);
+  const [toonMetallic, setToonMetallic] = useState<number>(settingsRef.current.toonMetallic);
+  const [toonMetallicCol, setToonMetallicCol] = useState<string>(settingsRef.current.toonMetallicColor);
+  const [toonAlbedoMin, setToonAlbedoMin] = useState<number>(settingsRef.current.toonAlbedoMinBrightness);
+  const [toonAlbedoMax, setToonAlbedoMax] = useState<number>(settingsRef.current.toonAlbedoMaxBrightness);
+  const [toonAlbedoSat, setToonAlbedoSat] = useState<number>(settingsRef.current.toonAlbedoSaturation);
+  const [toonOutlineAmount, setToonOutlineAmount] = useState<number>(settingsRef.current.toonOutlineAmount);
+  const [toonOutlineThick, setToonOutlineThick] = useState<number>(settingsRef.current.toonOutlineThickness);
+  const [toonOutlineThreshold, setToonOutlineThreshold] = useState<number>(settingsRef.current.toonOutlineThreshold);
+  const [toonOutlineDist, setToonOutlineDist] = useState<number>(settingsRef.current.toonOutlineDistance);
+  const [toonOutlineSS, setToonOutlineSS] = useState<boolean>(settingsRef.current.toonOutlineSupersample);
+  const [toonOutlineCol, setToonOutlineCol] = useState<string>(settingsRef.current.toonOutlineColor);
   const [uiZoom, setUiZoom] = useState<number>(settingsRef.current.uiZoom);
+  // Environment / Floor (moved from the former Environment tab — these fields
+  // already live in VisualSettings).
+  const [bgBright, setBgBright] = useState<number>(settingsRef.current.backgroundBrightness);
+  const [groundOn, setGroundOn] = useState<boolean>(settingsRef.current.groundEnabled);
+  const [groundBright, setGroundBright] = useState<number>(settingsRef.current.groundBrightness);
+  const [groundColor, setGroundColor] = useState<string>(settingsRef.current.groundColor);
+  const [contrast, setContrast] = useState<number>(settingsRef.current.checkerContrast);
+  const [reflectionOn, setReflectionOn] = useState<boolean>(settingsRef.current.reflectionEnabled);
+  const [reflectionStrength, setReflectionStrength] = useState<number>(settingsRef.current.reflectionStrength);
+  const [reflectionBlur, setReflectionBlur] = useState<number>(settingsRef.current.reflectionBlur);
+  // Unlit-only HDRI reflections
+  const [envReflOn, setEnvReflOn] = useState<boolean>(settingsRef.current.envReflectionsEnabled);
+  const [envReflInt, setEnvReflInt] = useState<number>(settingsRef.current.envReflectionsIntensity);
+
+  // Visual presets
+  const [presetDialogOpen, setPresetDialogOpen] = useState(false);
+  const [presetName, setPresetName] = useState('');
+  const [savingPreset, setSavingPreset] = useState(false);
+
   const sourceMarkersVisible = useSourceMarkersVisible();
   const toolbarShowLabels = useToolbarShowLabels();
   const settingsLocked = isSettingsLocked();
@@ -60,14 +109,17 @@ export function VisualTab() {
   };
   const persistMode = () => persist({ modeSettings: { ...settingsRef.current.modeSettings } });
 
-  const updateMode = (newMode: LightingMode) => {
+  const updateMode = (newMode: RenderMode) => {
     // Save current values into old mode
     const old = settingsRef.current.modeSettings[mode];
     old.lightIntensity = lightInt; old.toneMapping = toneMap; old.toneMappingExposure = exposure;
     old.ambientColor = ambColor; old.ambientIntensity = ambInt;
     old.dirLightEnabled = dirEnabled; old.dirLightColor = dirColor; old.dirLightIntensity = dirInt;
     old.shadowEnabled = shadowOn; old.shadowIntensity = shadowInt; old.shadowQuality = shadowQual;
-    // Switch mode — apply settings before lightingMode to avoid applyLightingMode resetting them
+    // Switch mode. Apply the per-mode lighting values BEFORE viewer.renderMode so
+    // the manager's applyLightingMode doesn't reset them. The renderMode setter
+    // itself gates AO / bloom / shadows by the mode's capabilities, so we don't
+    // toggle those manually here.
     setMode(newMode);
     const ms = settingsRef.current.modeSettings[newMode];
     viewer.toneMapping = ms.toneMapping;
@@ -80,13 +132,13 @@ export function VisualTab() {
     viewer.shadowQuality = ms.shadowQuality;
     viewer.dirLightEnabled = ms.dirLightEnabled;
     viewer.shadowEnabled = ms.shadowEnabled;
-    viewer.lightingMode = newMode;
+    viewer.renderMode = newMode;
     viewer.lightIntensity = ms.lightIntensity;
     setLightInt(ms.lightIntensity); setToneMap(ms.toneMapping); setExposure(ms.toneMappingExposure);
     setAmbColor(ms.ambientColor); setAmbInt(ms.ambientIntensity);
     setDirEnabled(ms.dirLightEnabled); setDirColor(ms.dirLightColor); setDirInt(ms.dirLightIntensity);
     setShadowOn(ms.shadowEnabled); setShadowInt(ms.shadowIntensity); setShadowQual(ms.shadowQuality);
-    persist({ lightingMode: newMode });
+    persist({ renderMode: newMode });
   };
 
   const updateLightInt = (_: unknown, v: number | number[]) => {
@@ -197,6 +249,45 @@ export function VisualTab() {
     const val = v as number; viewer.bloomRadius = val; setBloomRad(val);
     persist({ bloomRadius: val });
   };
+  const updateToonBands = (v: number) => {
+    viewer.toonBands = v; setToonBands(v); persist({ toonBands: v });
+  };
+  const updateToonCoolShadows = (_: unknown, v: boolean) => {
+    viewer.toonCoolShadows = v; setToonCoolShadows(v); persist({ toonCoolShadows: v });
+  };
+  const updateToonMetallic = (_: unknown, v: number | number[]) => {
+    const val = v as number; viewer.toonMetallic = val; setToonMetallic(val); persist({ toonMetallic: val });
+  };
+  const updateToonMetallicColor = (hex: string) => {
+    viewer.toonMetallicColor = hex; setToonMetallicCol(hex); persist({ toonMetallicColor: hex });
+  };
+  const updateToonAlbedoMin = (_: unknown, v: number | number[]) => {
+    const val = v as number; viewer.toonAlbedoMinBrightness = val; setToonAlbedoMin(val); persist({ toonAlbedoMinBrightness: val });
+  };
+  const updateToonAlbedoMax = (_: unknown, v: number | number[]) => {
+    const val = v as number; viewer.toonAlbedoMaxBrightness = val; setToonAlbedoMax(val); persist({ toonAlbedoMaxBrightness: val });
+  };
+  const updateToonAlbedoSat = (_: unknown, v: number | number[]) => {
+    const val = v as number; viewer.toonAlbedoSaturation = val; setToonAlbedoSat(val); persist({ toonAlbedoSaturation: val });
+  };
+  const updateToonOutlineAmount = (_: unknown, v: number | number[]) => {
+    const val = v as number; viewer.toonOutlineAmount = val; setToonOutlineAmount(val); persist({ toonOutlineAmount: val });
+  };
+  const updateToonOutlineThick = (_: unknown, v: number | number[]) => {
+    const val = v as number; viewer.toonOutlineThickness = val; setToonOutlineThick(val); persist({ toonOutlineThickness: val });
+  };
+  const updateToonOutlineThreshold = (_: unknown, v: number | number[]) => {
+    const val = v as number; viewer.toonOutlineThreshold = val; setToonOutlineThreshold(val); persist({ toonOutlineThreshold: val });
+  };
+  const updateToonOutlineDist = (_: unknown, v: number | number[]) => {
+    const val = v as number; viewer.toonOutlineDistance = val; setToonOutlineDist(val); persist({ toonOutlineDistance: val });
+  };
+  const updateToonOutlineSS = (_: unknown, v: boolean) => {
+    viewer.toonOutlineSupersample = v; setToonOutlineSS(v); persist({ toonOutlineSupersample: v });
+  };
+  const updateToonOutlineCol = (hex: string) => {
+    viewer.toonOutlineColor = hex; setToonOutlineCol(hex); persist({ toonOutlineColor: hex });
+  };
   const updateUiZoom = (val: number) => {
     setUiZoom(val); setUIZoom(val); persist({ uiZoom: val });
   };
@@ -208,427 +299,497 @@ export function VisualTab() {
     const val = v as number; viewer.fov = val; setFov(val); persist({ fov: val });
   };
 
+  // ─── Environment / Floor updaters (moved from EnvironmentTab) ───────────
+  const updateBgBright = (_: unknown, v: number | number[]) => {
+    const val = v as number; viewer.backgroundBrightness = val; setBgBright(val);
+    persist({ backgroundBrightness: val }); markEnvironmentUserModified();
+  };
+  const updateGroundOn = (_: unknown, v: boolean) => {
+    viewer.groundEnabled = v; setGroundOn(v); persist({ groundEnabled: v }); markEnvironmentUserModified();
+  };
+  const updateGroundBright = (_: unknown, v: number | number[]) => {
+    const val = v as number; viewer.groundBrightness = val; setGroundBright(val);
+    persist({ groundBrightness: val }); markEnvironmentUserModified();
+  };
+  const updateGroundColor = (hex: string) => {
+    viewer.groundColor = hex; setGroundColor(hex); persist({ groundColor: hex }); markEnvironmentUserModified();
+  };
+  const updateContrast = (_: unknown, v: number | number[]) => {
+    const val = v as number; viewer.checkerContrast = val; setContrast(val);
+    persist({ checkerContrast: val }); markEnvironmentUserModified();
+  };
+  const updateReflectionOn = (_: unknown, v: boolean) => {
+    viewer.reflectionEnabled = v; setReflectionOn(v); persist({ reflectionEnabled: v }); markEnvironmentUserModified();
+  };
+  const updateReflectionStrength = (_: unknown, v: number | number[]) => {
+    const val = v as number; viewer.reflectionStrength = val; setReflectionStrength(val);
+    persist({ reflectionStrength: val }); markEnvironmentUserModified();
+  };
+  const updateReflectionBlur = (_: unknown, v: number | number[]) => {
+    const val = v as number; viewer.reflectionBlur = val; setReflectionBlur(val);
+    persist({ reflectionBlur: val }); markEnvironmentUserModified();
+  };
+  const updateEnvReflOn = (_: unknown, v: boolean) => {
+    viewer.unlitReflectionsEnabled = v; setEnvReflOn(v); persist({ envReflectionsEnabled: v });
+  };
+  const updateEnvReflInt = (_: unknown, v: number | number[]) => {
+    const val = v as number; viewer.unlitReflectionsIntensity = val; setEnvReflInt(val);
+    persist({ envReflectionsIntensity: val });
+  };
+
+  // ─── Visual presets ────────────────────────────────────────────────────
+  const presets = listPresets();
+  const currentPresetName = matchPreset(presets) ?? '';
+
+  const applyPreset = (name: string) => {
+    const p = presets.find((x) => x.name === name);
+    if (!p) return;
+    applyVisualPreset(viewer, p);
+    onPresetApplied(); // remount body so every control reflects the applied preset
+  };
+
+  const handleSavePreset = async () => {
+    const name = presetName.trim();
+    if (!name) return;
+    setSavingPreset(true);
+    const where = await savePreset(captureCurrentPreset(name));
+    setSavingPreset(false);
+    setPresetDialogOpen(false);
+    setPresetName('');
+    showInfoOverlay(where === 'file'
+      ? `Preset "${name}" saved to public/presets (part of the published source).`
+      : `Preset "${name}" saved locally (this browser only).`);
+    onPresetApplied(); // remount so the new preset appears in the dropdown
+  };
+
 
   const antialiasMismatch = antialiasDesired !== viewer.antialiasActive;
+  // Capabilities of the active render mode drive which control blocks render.
+  const caps = getRenderMode(mode).capabilities;
+  const colorInputStyle = { width: 28, height: 22, border: 'none', borderRadius: 4, padding: 0, cursor: 'pointer', background: 'none' } as const;
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
-      {/* UI Zoom */}
-      <Box>
-        <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-          UI Zoom
-        </Typography>
-        <ToggleButtonGroup
-          exclusive
-          size="small"
-          value={uiZoom}
-          onChange={(_, v) => { if (v !== null) updateUiZoom(v); }}
-          sx={{ mt: 0.5, display: 'flex', '& .MuiToggleButton-root': { flex: 1, fontSize: 12, py: 0.5, textTransform: 'none' } }}
-        >
-          {[0.75, 1.0, 1.25, 1.5, 2.0].map((z) => (
-            <ToggleButton key={z} value={z}>{(z * 100).toFixed(0)}%</ToggleButton>
-          ))}
-        </ToggleButtonGroup>
-      </Box>
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
 
-      {/* Source markers (plan-181) — floor ring + label under each Source */}
-      <Box>
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Typography variant="body2" sx={{ color: 'text.primary' }}>Show source markers</Typography>
+      {/* Visual Presets — full-look snapshots (render mode + environment + post). */}
+      <SettingsSection id="visual-presets" title="Visual Presets">
+        <FieldRow label="Preset">
+          <Select
+            size="small"
+            fullWidth
+            value={currentPresetName}
+            displayEmpty
+            onChange={(e) => applyPreset(e.target.value as string)}
+            renderValue={(v) => (v ? (v as string) : 'Custom')}
+            disabled={settingsLocked}
+          >
+            {presets.map((p) => (
+              <MenuItem key={p.name} value={p.name}>{p.name}</MenuItem>
+            ))}
+          </Select>
+        </FieldRow>
+        <Tooltip title="Capture the current visual settings (render mode, environment, lighting, post-processing, antialias) as a reusable preset." placement="bottom">
+          <span>
+            <Button
+              size="small"
+              variant="outlined"
+              fullWidth
+              startIcon={<BookmarkAdd sx={{ fontSize: 16 }} />}
+              onClick={() => { setPresetName(''); setPresetDialogOpen(true); }}
+              disabled={settingsLocked}
+              sx={{ textTransform: 'none', fontSize: 12, mt: 0.5 }}
+            >
+              Save settings as preset
+            </Button>
+          </span>
+        </Tooltip>
+      </SettingsSection>
+
+      {/* Render Mode + appearance basics */}
+      <SettingsSection id="visual-rendermode" title="Render Mode">
+        <FieldRow label="Mode" hint={getRenderMode(mode).description}>
+          <Select
+            size="small"
+            fullWidth
+            value={mode}
+            onChange={(e) => updateMode(e.target.value as RenderMode)}
+            disabled={settingsLocked}
+          >
+            {RENDER_MODES.map((m) => (
+              <MenuItem key={m.id} value={m.id}>{m.label}</MenuItem>
+            ))}
+          </Select>
+        </FieldRow>
+
+        {/* Brightness — shown in every mode (labelled by the environment capability) */}
+        <SliderRow label={caps.environment ? 'Environment' : 'Brightness'} min={0} max={2} step={0.05} value={lightInt} onChange={updateLightInt} />
+
+        {/* Base color — flat-ambient ("unlit") modes only */}
+        {caps.ambientLight && (
+          <FieldRow label="Base Color" hint="Flat tint applied across all surfaces.">
+            <input type="color" value={ambColor} onChange={(e) => updateAmbColor(e.target.value)} style={colorInputStyle} />
+          </FieldRow>
+        )}
+      </SettingsSection>
+
+      {/* Environment / Floor — moved from the former Environment tab. */}
+      <SettingsSection id="visual-environment" title="Environment / Floor">
+        <SliderRow label="Background" min={0} max={2} step={0.05} value={bgBright} onChange={updateBgBright} />
+        <FieldRow label="Floor">
+          <Switch size="small" checked={groundOn} onChange={updateGroundOn} />
+        </FieldRow>
+        {groundOn && (
+          <>
+            <SliderRow label="Floor Brightness" min={0} max={2} step={0.05} value={groundBright} onChange={updateGroundBright} />
+            <FieldRow label="Floor Color">
+              <input type="color" value={groundColor} onChange={(e) => updateGroundColor(e.target.value)} style={colorInputStyle} />
+            </FieldRow>
+            <SliderRow label="Checker Contrast" min={0} max={2} step={0.05} value={contrast} onChange={updateContrast} />
+            {caps.reflection && (
+              <>
+                <FieldRow label="Reflection">
+                  <Switch size="small" checked={reflectionOn} onChange={updateReflectionOn} />
+                </FieldRow>
+                {reflectionOn && (
+                  <>
+                    <SliderRow label="Reflection Strength" min={0} max={1} step={0.05} value={reflectionStrength} onChange={updateReflectionStrength} />
+                    <SliderRow label="Reflection Blur" min={0} max={1} step={0.05} value={reflectionBlur} onChange={updateReflectionBlur} />
+                  </>
+                )}
+              </>
+            )}
+          </>
+        )}
+      </SettingsSection>
+
+      {/* Reflections — Unlit only. HDRI env reflections on metallic/glossy
+          surfaces, decoupled from the flat ambient look. */}
+      {mode === 'simple' && (
+        <SettingsSection id="visual-unlit-reflections" title="Reflections">
+          <FieldRow label="Environment" hint="Reflect the HDRI environment on metallic and glossy surfaces while keeping the flat unlit look.">
+            <Switch size="small" checked={envReflOn} onChange={updateEnvReflOn} />
+          </FieldRow>
+          {envReflOn && (
+            <SliderRow label="Intensity" min={0} max={2} step={0.05} value={envReflInt} onChange={updateEnvReflInt} />
+          )}
+        </SettingsSection>
+      )}
+
+      {/* Tone Mapping */}
+      {caps.toneMapping && (
+        <SettingsSection id="visual-tonemapping" title="Tone Mapping">
+          <FieldRow label="Mode">
+            <Select
+              size="small"
+              fullWidth
+              value={toneMap}
+              onChange={(e) => updateToneMap(e.target.value as ToneMappingType)}
+            >
+              {TONE_MAPPING_OPTIONS.map((t) => (
+                <MenuItem key={t} value={t}>{t === 'aces' ? 'ACES Filmic' : t === 'agx' ? 'AgX' : t.charAt(0).toUpperCase() + t.slice(1)}</MenuItem>
+              ))}
+            </Select>
+          </FieldRow>
+
+          {toneMap !== 'none' && (
+            <SliderRow label="Exposure" min={0} max={3} step={0.05} value={exposure} onChange={updateExposure} />
+          )}
+        </SettingsSection>
+      )}
+
+      {/* Lighting & Shadows */}
+      {caps.directionalLight && (
+        <SettingsSection id="visual-lighting" title="Lighting & Shadows">
+          <FieldRow label="Directional Light">
+            <Switch size="small" checked={dirEnabled} onChange={updateDirEnabled} />
+          </FieldRow>
+
+          {dirEnabled && (
+            <>
+              <SliderRow label="Light Intensity" min={0} max={3} step={0.05} value={dirInt} onChange={updateDirInt} />
+              <FieldRow label="Light Color">
+                <input type="color" value={dirColor} onChange={(e) => updateDirColor(e.target.value)} style={colorInputStyle} />
+              </FieldRow>
+
+              {/* Shadows — only for modes that support the shadow pass */}
+              {caps.shadows && (
+                <>
+                  <FieldRow label="Shadows">
+                    <Switch size="small" checked={shadowOn} onChange={updateShadowOn} />
+                  </FieldRow>
+
+                  {shadowOn && (
+                    <>
+                      <SliderRow label="Shadow Intensity" min={0} max={3} step={0.05} value={shadowInt} onChange={updateShadowInt} />
+                      <FieldRow label="Shadow Quality">
+                        <Select
+                          size="small"
+                          fullWidth
+                          value={shadowQual}
+                          onChange={(e) => updateShadowQual(e.target.value as ShadowQuality)}
+                        >
+                          {SHADOW_QUALITY_OPTIONS.map((q) => (
+                            <MenuItem key={q} value={q}>{q.charAt(0).toUpperCase() + q.slice(1)}</MenuItem>
+                          ))}
+                        </Select>
+                      </FieldRow>
+                      <FieldRow label="Shadow Map">
+                        <Select
+                          size="small"
+                          fullWidth
+                          value={shadowMapSize}
+                          onChange={(e) => updateShadowMapSize(Number(e.target.value))}
+                        >
+                          {[512, 1024, 2048].map((s) => (
+                            <MenuItem key={s} value={s}>{s}</MenuItem>
+                          ))}
+                        </Select>
+                      </FieldRow>
+                      <SliderRow label="Shadow Radius" min={1} max={5} step={1} value={shadowRadiusVal} onChange={updateShadowRadius} format={(v) => String(v)} />
+                    </>
+                  )}
+                </>
+              )}
+            </>
+          )}
+        </SettingsSection>
+      )}
+
+      {/* Post-Processing (ambient occlusion + bloom) — WebGL only */}
+      {(caps.ambientOcclusion || caps.bloom) && !viewer.isWebGPU && (
+        <SettingsSection id="visual-postfx" title="Post-Processing">
+          {/* Ambient Occlusion (Off / GTAO / N8AO) */}
+          {caps.ambientOcclusion && (
+            <>
+              <FieldRow label="Ambient Occl.">
+                <Select
+                  size="small"
+                  fullWidth
+                  value={aoMode}
+                  onChange={(e) => updateAoMode(e.target.value as AOMode)}
+                >
+                  <MenuItem value="off">Off</MenuItem>
+                  <MenuItem value="gtao">GTAO · Built-in</MenuItem>
+                  <MenuItem value="n8ao">N8AO · High quality</MenuItem>
+                </Select>
+              </FieldRow>
+              {aoMode !== 'off' && (
+                <>
+                  <SliderRow label="AO Intensity" min={0} max={2} step={0.05} value={ssaoInt} onChange={updateSsaoInt} />
+                  <SliderRow label="AO Radius" min={0.01} max={0.5} step={0.01} value={ssaoRad} onChange={updateSsaoRad} />
+                </>
+              )}
+            </>
+          )}
+
+          {/* Bloom */}
+          {caps.bloom && (
+            <>
+              <FieldRow label="Bloom">
+                <Switch size="small" checked={bloomOn} onChange={updateBloom} />
+              </FieldRow>
+              {bloomOn && (
+                <>
+                  <SliderRow label="Intensity" min={0} max={2} step={0.05} value={bloomInt} onChange={updateBloomInt} />
+                  <SliderRow label="Threshold" min={0} max={1} step={0.05} value={bloomThresh} onChange={updateBloomThresh} />
+                  <SliderRow label="Radius" min={0} max={1} step={0.05} value={bloomRad} onChange={updateBloomRad} />
+                </>
+              )}
+            </>
+          )}
+        </SettingsSection>
+      )}
+
+      {/* Toon — direction-based shading (caps.toon only) */}
+      {caps.toon && (
+        <SettingsSection id="visual-toon-shading" title="Toon">
+          <FieldRow label="Bands" hint="Number of discrete shading steps (banded by light direction).">
+            <ToggleButtonGroup
+              exclusive
+              size="small"
+              value={toonBands}
+              onChange={(_, v) => { if (v !== null) updateToonBands(v as number); }}
+              sx={{ flex: 1, display: 'flex', '& .MuiToggleButton-root': { flex: 1, fontSize: 11, py: 0.25, textTransform: 'none' } }}
+            >
+              {[2, 3, 4, 5, 6].map((b) => (
+                <ToggleButton key={b} value={b}>{b}</ToggleButton>
+              ))}
+            </ToggleButtonGroup>
+          </FieldRow>
+
+          <FieldRow label="Cool shadows" hint="Tint the dark bands slightly blue for a more illustrated look.">
+            <Switch size="small" checked={toonCoolShadows} onChange={updateToonCoolShadows} />
+          </FieldRow>
+
+          <SliderRow label="Min Brightness" min={0} max={1} step={0.05} value={toonAlbedoMin} onChange={updateToonAlbedoMin} />
+          <SliderRow label="Max Brightness" min={0} max={1} step={0.05} value={toonAlbedoMax} onChange={updateToonAlbedoMax} />
+          <SliderRow label="Saturation" min={0} max={2} step={0.05} value={toonAlbedoSat} onChange={updateToonAlbedoSat} />
+
+          <SliderRow label="Metallic" min={0} max={1} step={0.05} value={toonMetallic} onChange={updateToonMetallic} />
+          <FieldRow label="Metallic Color" hint="Flat tint applied to metallic surfaces (kept cel-banded).">
+            <input type="color" value={toonMetallicCol} onChange={(e) => updateToonMetallicColor(e.target.value)} style={colorInputStyle} />
+          </FieldRow>
+        </SettingsSection>
+      )}
+
+      {/* Toon — edge / outline (caps.toon only; WebGL only) */}
+      {caps.toon && (
+        <SettingsSection id="visual-toon-edge" title="Edge">
+          {!viewer.isWebGPU ? (
+            <>
+              <SliderRow label="Amount" min={0} max={1} step={0.05} value={toonOutlineAmount} onChange={updateToonOutlineAmount} />
+              <SliderRow label="Thickness" min={0} max={5} step={0.5} value={toonOutlineThick} onChange={updateToonOutlineThick} />
+              <SliderRow label="Threshold" min={0} max={1} step={0.02} value={toonOutlineThreshold} onChange={updateToonOutlineThreshold} />
+              <SliderRow label="Distance (m)" min={0} max={100} step={1} value={toonOutlineDist} onChange={updateToonOutlineDist} />
+              <FieldRow label="Color" hint="Color of the silhouette + crease lines.">
+                <input type="color" value={toonOutlineCol} onChange={(e) => updateToonOutlineCol(e.target.value)} style={colorInputStyle} />
+              </FieldRow>
+              <FieldRow label="Supersample x2" hint="Render the edge depth buffer at 2× for higher-quality, smoother edges (heavier on the GPU).">
+                <Switch size="small" checked={toonOutlineSS} onChange={updateToonOutlineSS} />
+              </FieldRow>
+            </>
+          ) : (
+            <Typography variant="caption" sx={{ color: '#999', fontSize: 11 }}>
+              Edge outlines require WebGL (not available on WebGPU).
+            </Typography>
+          )}
+        </SettingsSection>
+      )}
+
+      {/* Display (mode-independent) */}
+      <SettingsSection id="visual-display" title="Display">
+        {/* UI Zoom */}
+        <FieldRow label="UI Zoom">
+          <ToggleButtonGroup
+            exclusive
+            size="small"
+            value={uiZoom}
+            onChange={(_, v) => { if (v !== null) updateUiZoom(v); }}
+            sx={{ flex: 1, display: 'flex', '& .MuiToggleButton-root': { flex: 1, fontSize: 11, py: 0.25, textTransform: 'none' } }}
+          >
+            {[0.75, 1.0, 1.25, 1.5, 2.0].map((z) => (
+              <ToggleButton key={z} value={z}>{(z * 100).toFixed(0)}%</ToggleButton>
+            ))}
+          </ToggleButtonGroup>
+        </FieldRow>
+
+        {/* Source markers (plan-181) — floor ring + label under each Source */}
+        <FieldRow label="Source markers" hint="Floor ring + label under each source to identify spawn locations.">
           <Switch
             size="small"
             checked={sourceMarkersVisible}
             onChange={updateSourceMarkersVisible}
             disabled={settingsLocked}
           />
-        </Box>
-        <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mt: 0.25, fontSize: 11 }}>
-          Floor ring + label under each source to identify spawn locations.
-        </Typography>
-      </Box>
+        </FieldRow>
 
-      {/* Toolbar button labels — show text next to icons in top-left toolbar */}
-      <Box>
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Typography variant="body2" sx={{ color: 'text.primary' }}>Toolbar button labels</Typography>
+        {/* Toolbar button labels — show text next to icons in top-left toolbar */}
+        <FieldRow label="Toolbar labels" hint="Show text labels next to icons in the top-left toolbar. Always collapsed on mobile.">
           <Switch
             size="small"
             checked={toolbarShowLabels}
             onChange={(_, v) => setToolbarShowLabels(v)}
           />
-        </Box>
-        <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mt: 0.25, fontSize: 11 }}>
-          Show text labels next to icons for window-opening buttons in the top-left toolbar. Always collapsed on mobile.
-        </Typography>
-      </Box>
+        </FieldRow>
 
-      {/* Antialiasing */}
-      <Box>
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Typography variant="body2" sx={{ color: 'text.primary' }}>Antialiasing (MSAA)</Typography>
+        {/* Antialiasing */}
+        <FieldRow label="Antialiasing">
           <Switch size="small" checked={antialiasDesired} onChange={updateAntialiasDesired} />
-        </Box>
+        </FieldRow>
         {antialiasMismatch && (
-          <Box sx={{ mt: 0.5 }}>
-            <Typography variant="caption" sx={{ color: '#ffb74d', display: 'block', mb: 0.5, fontSize: 11 }}>
-              Antialiasing change requires page reload
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
+            <Typography variant="caption" sx={{ color: '#ffb74d', fontSize: 11 }}>
+              Reload required
             </Typography>
             <Button
               size="small"
               variant="outlined"
               onClick={() => window.location.reload()}
               startIcon={<RestartAlt />}
-              sx={{ fontSize: 11, textTransform: 'none', borderColor: '#ffb74d', color: '#ffb74d' }}
+              sx={{ fontSize: 11, textTransform: 'none', py: 0, borderColor: '#ffb74d', color: '#ffb74d' }}
             >
               Reload now
             </Button>
           </Box>
         )}
-      </Box>
 
-      {/* Ambient Occlusion (Off / GTAO / N8AO) */}
-      {!viewer.isWebGPU && (
-        <Box>
-          <Typography variant="body2" sx={{ color: 'text.primary' }}>Ambient Occlusion</Typography>
-          <Box sx={{ mt: 0.75 }}>
-            <Select
-              size="small"
-              fullWidth
-              value={aoMode}
-              onChange={(e) => updateAoMode(e.target.value as AOMode)}
-            >
-              <MenuItem value="off">Off</MenuItem>
-              <MenuItem value="gtao">GTAO · Built-in (faster)</MenuItem>
-              <MenuItem value="n8ao">N8AO · High quality</MenuItem>
-            </Select>
-          </Box>
-          {aoMode !== 'off' && (
-            <>
-              <Box sx={{ mt: 1 }}>
-                <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-                  AO Intensity
-                </Typography>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 0.5 }}>
-                  <Slider size="small" min={0} max={2} step={0.05} value={ssaoInt} onChange={updateSsaoInt} sx={{ flex: 1 }} />
-                  <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace', minWidth: 32, textAlign: 'right' }}>
-                    {ssaoInt.toFixed(2)}
-                  </Typography>
-                </Box>
-              </Box>
-              <Box>
-                <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-                  AO Radius
-                </Typography>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 0.5 }}>
-                  <Slider size="small" min={0.01} max={0.5} step={0.01} value={ssaoRad} onChange={updateSsaoRad} sx={{ flex: 1 }} />
-                  <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace', minWidth: 32, textAlign: 'right' }}>
-                    {ssaoRad.toFixed(2)}
-                  </Typography>
-                </Box>
-              </Box>
-            </>
-          )}
-        </Box>
-      )}
-
-      {/* Bloom */}
-      {!viewer.isWebGPU && (
-        <Box>
-          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Typography variant="body2" sx={{ color: 'text.primary' }}>Bloom</Typography>
-            <Switch size="small" checked={bloomOn} onChange={updateBloom} />
-          </Box>
-          {bloomOn && (
-            <>
-              <Box sx={{ mt: 1 }}>
-                <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-                  Intensity
-                </Typography>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 0.5 }}>
-                  <Slider size="small" min={0} max={2} step={0.05} value={bloomInt} onChange={updateBloomInt} sx={{ flex: 1 }} />
-                  <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace', minWidth: 32, textAlign: 'right' }}>
-                    {bloomInt.toFixed(2)}
-                  </Typography>
-                </Box>
-              </Box>
-              <Box>
-                <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-                  Threshold
-                </Typography>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 0.5 }}>
-                  <Slider size="small" min={0} max={1} step={0.05} value={bloomThresh} onChange={updateBloomThresh} sx={{ flex: 1 }} />
-                  <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace', minWidth: 32, textAlign: 'right' }}>
-                    {bloomThresh.toFixed(2)}
-                  </Typography>
-                </Box>
-              </Box>
-              <Box>
-                <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-                  Radius
-                </Typography>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 0.5 }}>
-                  <Slider size="small" min={0} max={1} step={0.05} value={bloomRad} onChange={updateBloomRad} sx={{ flex: 1 }} />
-                  <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace', minWidth: 32, textAlign: 'right' }}>
-                    {bloomRad.toFixed(2)}
-                  </Typography>
-                </Box>
-              </Box>
-            </>
-          )}
-        </Box>
-      )}
-
-      {/* Shadow Map Size */}
-      <Box>
-        <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-          Shadow Map Size
-        </Typography>
-        <Select
-          size="small"
-          fullWidth
-          value={shadowMapSize}
-          onChange={(e) => updateShadowMapSize(Number(e.target.value))}
-          sx={{ mt: 0.5 }}
-        >
-          {[512, 1024, 2048].map((s) => (
-            <MenuItem key={s} value={s}>{s}</MenuItem>
-          ))}
-        </Select>
-      </Box>
-
-      {/* Shadow Radius */}
-      <Box>
-        <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-          Shadow Radius
-        </Typography>
-        <Slider size="small" min={1} max={5} step={1} value={shadowRadiusVal} onChange={updateShadowRadius} valueLabelDisplay="auto" sx={{ mt: 1 }} />
-      </Box>
-
-      {/* Render Resolution (DPR) */}
-      <Box>
-        <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-          Render Resolution
-        </Typography>
-        <Slider size="small" min={0.5} max={2} step={0.25} value={maxDpr} onChange={updateMaxDpr}
-          valueLabelDisplay="auto" valueLabelFormat={(v) => v >= 2 ? 'Native' : `${v}x`}
-          marks={[{ value: 0.5, label: '0.5x' }, { value: 1, label: '1x' }, { value: 1.5, label: '1.5x' }, { value: 2, label: 'Native' }]}
-          sx={{ mt: 1 }} />
-      </Box>
-
-      {/* Lighting Mode */}
-      <Box>
-        <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-          Lighting Mode
-        </Typography>
-        <Select
-          size="small"
-          fullWidth
-          value={mode}
-          onChange={(e) => updateMode(e.target.value as LightingMode)}
-          sx={{ mt: 0.5 }}
-        >
-          {LIGHTING_MODES.map((m) => (
-            <MenuItem key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1)}</MenuItem>
-          ))}
-        </Select>
-      </Box>
-
-      {/* Ambient Light — simple mode only; default mode relies on the HDRI environment */}
-      {mode !== 'default' && (
-        <Box>
-          <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-            Ambient Light
-          </Typography>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mt: 0.5 }}>
-            <Slider size="small" min={0} max={2} step={0.05} value={ambInt} onChange={updateAmbInt} sx={{ flex: 1 }} />
-            <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace', minWidth: 32, textAlign: 'right' }}>
-              {ambInt.toFixed(2)}
-            </Typography>
-            <input
-              type="color"
-              value={ambColor}
-              onChange={(e) => updateAmbColor(e.target.value)}
-              style={{ width: 28, height: 28, border: 'none', borderRadius: 4, padding: 0, cursor: 'pointer', background: 'none' }}
-            />
-          </Box>
-        </Box>
-      )}
-
-      {/* Global Lighting */}
-      <Box>
-        <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-          {mode === 'default' ? 'Environment Intensity' : 'Global Lighting'}
-        </Typography>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 0.5 }}>
-          <Slider size="small" min={0} max={2} step={0.05} value={lightInt} onChange={updateLightInt} sx={{ flex: 1 }} />
-          <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace', minWidth: 32, textAlign: 'right' }}>
-            {lightInt.toFixed(2)}
-          </Typography>
-        </Box>
-      </Box>
-
-      {/* Tone Mapping (default mode only) */}
-      {mode === 'default' && (
-        <>
-          <Box>
-            <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-              Tone Mapping
-            </Typography>
-            <Select
-              size="small"
-              fullWidth
-              value={toneMap}
-              onChange={(e) => updateToneMap(e.target.value as ToneMappingType)}
-              sx={{ mt: 0.5 }}
-            >
-              {TONE_MAPPING_OPTIONS.map((t) => (
-                <MenuItem key={t} value={t}>{t === 'aces' ? 'ACES Filmic' : t === 'agx' ? 'AgX' : t.charAt(0).toUpperCase() + t.slice(1)}</MenuItem>
-              ))}
-            </Select>
-          </Box>
-
-          {toneMap !== 'none' && (
-            <Box>
-              <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-                Exposure
-              </Typography>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 0.5 }}>
-                <Slider size="small" min={0} max={3} step={0.05} value={exposure} onChange={updateExposure} sx={{ flex: 1 }} />
-                <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace', minWidth: 32, textAlign: 'right' }}>
-                  {exposure.toFixed(2)}
-                </Typography>
-              </Box>
-            </Box>
-          )}
-        </>
-      )}
-
-      {/* Directional Light (default mode only) */}
-      {mode === 'default' && (
-        <>
-          <Box sx={{ borderTop: '1px solid rgba(255,255,255,0.08)', pt: 2 }}>
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <Typography variant="body2" sx={{ color: 'text.primary' }}>Directional Light</Typography>
-              <Switch size="small" checked={dirEnabled} onChange={updateDirEnabled} />
-            </Box>
-          </Box>
-
-          {dirEnabled && (
-            <>
-              <Box>
-                <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-                  Light Intensity
-                </Typography>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mt: 0.5 }}>
-                  <Slider size="small" min={0} max={3} step={0.05} value={dirInt} onChange={updateDirInt} sx={{ flex: 1 }} />
-                  <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace', minWidth: 32, textAlign: 'right' }}>
-                    {dirInt.toFixed(2)}
-                  </Typography>
-                  <input
-                    type="color"
-                    value={dirColor}
-                    onChange={(e) => updateDirColor(e.target.value)}
-                    style={{ width: 28, height: 28, border: 'none', borderRadius: 4, padding: 0, cursor: 'pointer', background: 'none' }}
-                  />
-                </Box>
-              </Box>
-
-              {/* Shadows */}
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <Typography variant="body2" sx={{ color: 'text.primary' }}>Shadows</Typography>
-                <Switch size="small" checked={shadowOn} onChange={updateShadowOn} />
-              </Box>
-
-              {shadowOn && (
-                <>
-                  <Box>
-                    <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-                      Shadow Intensity
-                    </Typography>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 0.5 }}>
-                      <Slider size="small" min={0} max={3} step={0.05} value={shadowInt} onChange={updateShadowInt} sx={{ flex: 1 }} />
-                      <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace', minWidth: 32, textAlign: 'right' }}>
-                        {shadowInt.toFixed(2)}
-                      </Typography>
-                    </Box>
-                  </Box>
-                  <Box>
-                    <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-                      Shadow Quality
-                    </Typography>
-                    <Select
-                      size="small"
-                      fullWidth
-                      value={shadowQual}
-                      onChange={(e) => updateShadowQual(e.target.value as ShadowQuality)}
-                      sx={{ mt: 0.5 }}
-                    >
-                      {SHADOW_QUALITY_OPTIONS.map((q) => (
-                        <MenuItem key={q} value={q}>{q.charAt(0).toUpperCase() + q.slice(1)}</MenuItem>
-                      ))}
-                    </Select>
-                  </Box>
-                </>
-              )}
-            </>
-          )}
-        </>
-      )}
+        {/* Render Resolution (DPR) */}
+        <SliderRow label="Resolution" min={0.5} max={2} step={0.25} value={maxDpr} onChange={updateMaxDpr}
+          valueText={maxDpr >= 2 ? 'Native' : `${maxDpr}x`} />
+      </SettingsSection>
 
       {/* Renderer */}
-      <Box sx={{ borderTop: '1px solid rgba(255,255,255,0.08)', pt: 2 }}>
-        <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-          Renderer
-        </Typography>
-        <Select
-          size="small"
-          fullWidth
-          value={viewer.isWebGPU ? 'webgpu' : 'webgl'}
-          onChange={(e) => { localStorage.setItem('rv-webviewer-renderer', e.target.value); window.location.reload(); }}
-          sx={{ mt: 0.5, fontSize: 13, '& .MuiSelect-select': { py: 0.75 } }}
-        >
-          <MenuItem value="webgl" sx={{ fontSize: 13 }}>WebGL</MenuItem>
-          <MenuItem value="webgpu" disabled={!navigator.gpu} sx={{ fontSize: 13 }}>
-            WebGPU (experimental)
-            {!navigator.gpu && (
-              <Typography component="span" sx={{ ml: 1, fontSize: 10, color: 'text.disabled' }}>not available</Typography>
-            )}
-          </MenuItem>
-        </Select>
-      </Box>
+      <SettingsSection id="visual-renderer" title="Renderer">
+        <FieldRow label="Backend">
+          <Select
+            size="small"
+            fullWidth
+            value={viewer.isWebGPU ? 'webgpu' : 'webgl'}
+            onChange={(e) => { localStorage.setItem('rv-webviewer-renderer', e.target.value); window.location.reload(); }}
+          >
+            <MenuItem value="webgl" sx={{ fontSize: 13 }}>WebGL</MenuItem>
+            <MenuItem value="webgpu" disabled={!navigator.gpu} sx={{ fontSize: 13 }}>
+              WebGPU (experimental)
+              {!navigator.gpu && (
+                <Typography component="span" sx={{ ml: 1, fontSize: 10, color: 'text.disabled' }}>not available</Typography>
+              )}
+            </MenuItem>
+          </Select>
+        </FieldRow>
+      </SettingsSection>
 
-      {/* Camera Projection & FOV */}
-      <Box sx={{ borderTop: '1px solid rgba(255,255,255,0.08)', pt: 2 }}>
-        <Box>
-          <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-            Projection
-          </Typography>
+      {/* Camera */}
+      <SettingsSection id="visual-camera" title="Camera">
+        <FieldRow label="Projection">
           <Select
             size="small"
             fullWidth
             value={proj}
             onChange={(e) => updateProj(e.target.value as ProjectionType)}
-            sx={{ mt: 0.5 }}
           >
             <MenuItem value="perspective">Perspective</MenuItem>
             <MenuItem value="orthographic">Orthographic</MenuItem>
           </Select>
-        </Box>
+        </FieldRow>
 
         {proj === 'perspective' && (
-          <Box sx={{ mt: 2 }}>
-            <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-              Field of View
-            </Typography>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 0.5 }}>
-              <Slider size="small" min={10} max={120} step={1} value={fov} onChange={updateFov} sx={{ flex: 1 }} />
-              <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace', minWidth: 32, textAlign: 'right' }}>
-                {fov}°
-              </Typography>
-            </Box>
-          </Box>
+          <SliderRow label="Field of View" min={10} max={120} step={1} value={fov} onChange={updateFov} valueText={`${fov}°`} />
         )}
-      </Box>
+      </SettingsSection>
+
+      {/* Save-as-preset dialog */}
+      <Dialog open={presetDialogOpen} onClose={() => setPresetDialogOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle sx={{ fontSize: 14 }}>Save settings as preset</DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            fullWidth
+            size="small"
+            label="Preset name"
+            placeholder="e.g. Showroom"
+            value={presetName}
+            onChange={(e) => setPresetName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') void handleSavePreset(); }}
+            sx={{ mt: 1 }}
+          />
+          <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mt: 1 }}>
+            {import.meta.env.DEV
+              ? 'Saved into public/presets/ — commit it to ship the preset with the build.'
+              : 'Saved in this browser only (production cannot write to the published source).'}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPresetDialogOpen(false)} sx={{ textTransform: 'none' }}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={() => void handleSavePreset()}
+            disabled={!presetName.trim() || savingPreset}
+            sx={{ textTransform: 'none' }}
+          >
+            {savingPreset ? 'Saving…' : 'Save'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
     </Box>
   );

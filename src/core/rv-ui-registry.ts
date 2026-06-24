@@ -10,6 +10,7 @@
  */
 
 import type { UISlot, UISlotEntry } from './rv-ui-plugin';
+import { modeContext } from './rv-mode-manager';
 
 export class UIPluginRegistry {
   private entries: UISlotEntry[] = [];
@@ -31,12 +32,31 @@ export class UIPluginRegistry {
   /** Snapshot version (for useSyncExternalStore). */
   getSnapshot = (): number => this._version;
 
-  /** Register slot entries from a plugin (slots may be undefined). */
-  register(plugin: { id?: string; slots?: UISlotEntry[] }): void {
+  /**
+   * Register slot entries from a plugin (slots may be undefined).
+   *
+   * If the plugin declares `modes` (plan-198), each of its slot entries is
+   * auto-gated to those modes' UI contexts: a `shownOnlyInAny: ['mode:<id>', …]`
+   * rule is merged into the entry's `visibilityRule` (AND-combined with any
+   * existing `shownOnlyIn`/`hiddenIn`), and a `visibilityId` is assigned if
+   * absent (HMIShell only applies a rule when `visibilityId` is set). Plugins
+   * with no `modes` (shared) are untouched — backward compatible.
+   */
+  register(plugin: { id?: string; slots?: UISlotEntry[]; modes?: string[] }): void {
     if (!plugin.slots || plugin.slots.length === 0) return;
-    for (const entry of plugin.slots) {
-      entry.pluginId = (plugin as Record<string, unknown>).id as string ?? entry.pluginId;
-    }
+    const pluginId = (plugin as Record<string, unknown>).id as string | undefined;
+    const modeAny = plugin.modes && plugin.modes.length > 0
+      ? plugin.modes.map((m) => modeContext(m))
+      : null;
+    plugin.slots.forEach((entry, i) => {
+      entry.pluginId = pluginId ?? entry.pluginId;
+      if (modeAny) {
+        entry.visibilityRule = { ...entry.visibilityRule, shownOnlyInAny: modeAny };
+        if (!entry.visibilityId) {
+          entry.visibilityId = `mode-slot:${pluginId ?? 'unknown'}:${entry.slot}:${i}`;
+        }
+      }
+    });
     this.entries.push(...plugin.slots);
     this.entries.sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
     this._notify();

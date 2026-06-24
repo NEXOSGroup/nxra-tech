@@ -55,7 +55,7 @@ import { USER_PAUSE_REASON } from '../engine/rv-constants';
 import { LeftPanel } from './LeftPanel';
 import { AasDetailHeaderAction } from '../../plugins/aas-link-plugin';
 import { ChartPanel } from './ChartPanel';
-import { INSPECTOR_PANEL_WIDTH } from './layout-constants';
+import { INSPECTOR_MIN_WIDTH, INSPECTOR_MAX_WIDTH, ACTIVITY_BAR_WIDTH } from './layout-constants';
 import {
   isHiddenComponentType,
   componentColor,
@@ -740,8 +740,9 @@ export function PropertyInspector({ viewer }: PropertyInspectorProps) {
           </Box>
         </Box>
       )}
-      {/* Override count + Reset */}
-      <Box sx={{ px: 1, py: 0.5, display: 'flex', alignItems: 'center', gap: 1 }}>
+      {/* Override count + Reset — same compact grey-text footer row as the
+          hierarchy window for a unified footer design across all windows. */}
+      <Box sx={{ px: 1, py: 0.25, display: 'flex', alignItems: 'center', gap: 1 }}>
         <Typography sx={{ fontSize: 10, color: 'text.disabled', flex: 1 }}>
           {totalOverrides > 0
             ? `${totalOverrides} override${totalOverrides !== 1 ? 's' : ''}`
@@ -910,18 +911,31 @@ export function PropertyInspector({ viewer }: PropertyInspectorProps) {
   return (
     <LeftPanel
       title={
-        <Box sx={{ overflow: 'hidden' }}>
-          <Typography sx={{ fontSize: 11, fontWeight: 600, color: 'text.primary', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {nodeName}
-          </Typography>
-          <Typography sx={{ fontSize: 9, color: 'text.disabled', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {selectedPath}
-          </Typography>
-        </Box>
+        // Single-line title — same style as the hierarchy window header for a
+        // unified look across all docked windows. Full path stays available as
+        // the native hover tooltip (no grey subtitle line).
+        <Typography
+          variant="subtitle2"
+          sx={{
+            fontWeight: 600,
+            fontSize: '0.8rem',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+          title={selectedPath}
+        >
+          {nodeName}
+        </Typography>
       }
       onClose={handleClose}
-      width={INSPECTOR_PANEL_WIDTH}
-      leftOffset={state.panelWidth + 16}
+      width={state.inspectorWidth}
+      leftOffset={ACTIVITY_BAR_WIDTH + state.panelWidth}
+      resizable
+      minWidth={INSPECTOR_MIN_WIDTH}
+      maxWidth={INSPECTOR_MAX_WIDTH}
+      onResize={(w) => plugin.setInspectorWidth(w)}
+      innerShadow
       toolbar={toolbarButtons}
       footer={footerContent}
     >

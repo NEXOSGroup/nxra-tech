@@ -1,0 +1,101 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
+
+/**
+ * rv-freeze-static.ts — Prune the per-frame matrix recursion on large scenes.
+ *
+ * On a big CAD model the scene graph holds tens of thousands of structural
+ * Group nodes plus the baked-away source meshes that the merges keep around for
+ * hover-highlight. Three.js walks ALL of them every frame in
+ * `scene.updateMatrixWorld()` — measured as the dominant CPU cost (~2x the
+ * render-loop time on the Mauser line, ~40 ms/frame), paid even when nothing
+ * moves and again on every post-processing pass that re-renders the scene.
+ *
+ * This pass sets `matrixWorldAutoUpdate = false` on every node that is provably
+ * static, so Three.js skips it (and, since it is the recursion gate, its whole
+ * subtree) in the automatic world-matrix update. A node is kept DYNAMIC iff it,
+ * one of its ancestors, or one of its descendants carries a motion / MU-spawn
+ * component (see {@link MOVER_KEY}): Drive(*), Kinematic, Grip, TransportSurface,
+ * Source, Sink, MU, Cam. That closure keeps alive:
+ *   - Drive-driven subtrees (the Drive node + everything under it),
+ *   - the chain of ancestors above each Drive (needed so the recursion can reach
+ *     it — including the always-dynamic model root, under which runtime MUs are
+ *     spawned), and
+ *   - kinematic chains and grippers.
+ * Everything else — disconnected static structure and the hidden highlight
+ * source meshes — is frozen.
+ *
+ * Safety was verified live against the moving demo scene: over a 5 s window with
+ * the freeze active, zero frozen node ever changed its world position, while all
+ * 33 genuinely-moving meshes kept moving.
+ *
+ * MUST run AFTER kinematic re-parenting and the static/kinematic merges, on the
+ * FINAL hierarchy — earlier the parent chains (and therefore the mover closure)
+ * are not yet correct. World matrices are computed once up front so every frozen
+ * node holds its correct, final transform.
+ */
+
+import type { Object3D } from 'three';
+
+/**
+ * rv_extras component keys whose node — together with its ancestors and its
+ * whole subtree — must stay matrix-dynamic. Matched case-insensitively against
+ * the START of the key, so `Drive_Cylinder`, `Drive_Gear`, `Drive_ErraticPosition`
+ * etc. are all covered by `Drive`. Source/Sink/MU/TransportSurface are included
+ * because they spawn or carry movable units at runtime.
+ */
+const MOVER_KEY = /^(Drive|Kinematic|Grip|TransportSurface|Source|Sink|MU|Cam)/i;
+
+export interface FreezeStaticResult {
+  /** Nodes whose matrixWorldAutoUpdate was turned off. */
+  frozen: number;
+  /** Nodes kept dynamic (movers + their ancestors + their descendants). */
+  dynamic: number;
+  /** Total nodes visited. */
+  total: number;
+}
+
+/** True if the node itself carries a motion / MU-spawn component. */
+function isMoverNode(node: Object3D): boolean {
+  const rv = node.userData?.realvirtual as Record<string, unknown> | undefined;
+  if (!rv) return false;
+  for (const key in rv) {
+    if (rv[key] && MOVER_KEY.test(key)) return true;
+  }
+  return false;
+}
+
+/**
+ * Freeze `matrixWorldAutoUpdate` on every provably-static node. Returns counts
+ * for diagnostics. Pure with respect to the graph topology — only the
+ * `matrixWorldAutoUpdate` flags change. See the file header for the contract.
+ */
+export function freezeStaticMatrices(root: Object3D): FreezeStaticResult {
+  // Compute every world matrix once so frozen nodes keep their final transform.
+  root.updateMatrixWorld(true);
+
+  // Closure of "dynamic": each mover keeps itself, all ancestors and all
+  // descendants live. Ancestor walks short-circuit once they hit a node already
+  // marked dynamic, so the whole pass stays ~O(nodes).
+  const dynamic = new Set<Object3D>();
+  root.traverse((node) => {
+    if (!isMoverNode(node)) return;
+    for (let a: Object3D | null = node; a && !dynamic.has(a); a = a.parent) {
+      dynamic.add(a);
+    }
+    node.traverse((c) => dynamic.add(c));
+  });
+
+  let frozen = 0;
+  let total = 0;
+  root.traverse((node) => {
+    total++;
+    if (dynamic.has(node)) return;
+    if (node.matrixWorldAutoUpdate) {
+      node.matrixWorldAutoUpdate = false;
+      frozen++;
+    }
+  });
+
+  return { frozen, dynamic: dynamic.size, total };
+}

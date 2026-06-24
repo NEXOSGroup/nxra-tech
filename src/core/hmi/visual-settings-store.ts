@@ -6,6 +6,7 @@
 import { useSyncExternalStore } from 'react';
 import { getAppConfig } from '../rv-app-config';
 import { lsSave } from './ls-store-utils';
+import { RENDER_MODES, RENDER_MODE_IDS, DEFAULT_RENDER_MODE, isRenderMode, type RenderMode } from '../rv-render-modes';
 
 const STORAGE_KEY = 'rv-visual-settings';
 /** Standalone scalar key for the "show source markers" toggle (plan-181).
@@ -14,8 +15,11 @@ const STORAGE_KEY = 'rv-visual-settings';
  *  churn). Listed in `ALL_RV_STORAGE_KEYS` for cleanup-sweep coverage. */
 const SOURCE_MARKERS_KEY = 'rv-source-markers-visible';
 
-export type LightingMode = 'simple' | 'default';
-export const LIGHTING_MODES: readonly LightingMode[] = ['simple', 'default'] as const;
+/** @deprecated Render modes are now defined in `rv-render-modes.ts`. Use `RenderMode`. */
+export type LightingMode = RenderMode;
+/** @deprecated Use `RENDER_MODES` / `RENDER_MODE_IDS` from `rv-render-modes.ts`. */
+export const LIGHTING_MODES: readonly RenderMode[] = RENDER_MODE_IDS;
+export { type RenderMode, RENDER_MODES } from '../rv-render-modes';
 
 export type ToneMappingType = 'none' | 'linear' | 'reinhard' | 'cineon' | 'aces' | 'agx' | 'neutral';
 export const TONE_MAPPING_OPTIONS: readonly ToneMappingType[] = ['none', 'linear', 'reinhard', 'cineon', 'aces', 'agx', 'neutral'] as const;
@@ -52,8 +56,9 @@ export interface CameraBookmark {
 }
 
 export interface VisualSettings {
-  lightingMode: LightingMode;
-  modeSettings: Record<LightingMode, LightingModeSettings>;
+  /** Active render mode. Drives the capability-gated pipeline + Visual settings UI. */
+  renderMode: RenderMode;
+  modeSettings: Record<RenderMode, LightingModeSettings>;
   projection: ProjectionType;
   fov: number;
   cameras: (CameraBookmark | null)[];
@@ -81,6 +86,33 @@ export interface VisualSettings {
   ssaoIntensity: number;
   /** AO sampling radius in world units. Shared between backends. */
   ssaoRadius: number;
+  /** Toon (cel) shading: number of discrete diffuse bands (2–6). */
+  toonBands: number;
+  /** Toon metallic look strength (0 = off, 1 = fully recoloured metal surfaces). */
+  toonMetallic: number;
+  /** Toon metallic tint colour as #rrggbb hex (applied to metal surfaces, cel-banded). */
+  toonMetallicColor: string;
+  /** Toon albedo grade: minimum brightness of the remapped albedo (0–1). */
+  toonAlbedoMinBrightness: number;
+  /** Toon albedo grade: maximum brightness of the remapped albedo (0–1). */
+  toonAlbedoMaxBrightness: number;
+  /** Toon albedo saturation (0 = greyscale, 1 = unchanged, 2 = boosted). */
+  toonAlbedoSaturation: number;
+  /** Toon outline (edge) strength / opacity (0 = off, 1 = full). */
+  toonOutlineAmount: number;
+  /** Toon outline thickness in pixels. */
+  toonOutlineThickness: number;
+  /** Toon outline edge threshold (0 = very sensitive, 1 = only strong edges). */
+  toonOutlineThreshold: number;
+  /** Toon outline max view distance in meters (0–100); edges fade out beyond it. */
+  toonOutlineDistance: number;
+  /** Toon outline: 2× supersample the depth/normal gbuffer for higher-quality
+   *  edges (heavier). WebGL only. */
+  toonOutlineSupersample: boolean;
+  /** Toon outline color as #rrggbb hex. */
+  toonOutlineColor: string;
+  /** Toon: tint the dark bands slightly cool (blue) instead of just darker. */
+  toonCoolShadows: boolean;
   /** Whether bloom (glow on bright areas) is enabled. WebGL only. */
   bloomEnabled: boolean;
   /** Bloom glow intensity (0–2). */
@@ -106,6 +138,12 @@ export interface VisualSettings {
   reflectionStrength: number;
   /** Floor reflection blur / gloss (0 = sharp mirror, 1 = soft frosted gloss). */
   reflectionBlur: number;
+  /** Unlit mode only: assign the HDRI env map so metallic/glossy surfaces get
+   *  reflections while the flat ambient look is kept. Independent of the Shaded
+   *  mode's full environment lighting. */
+  envReflectionsEnabled: boolean;
+  /** Unlit env-reflection strength → scene.environmentIntensity (0–2). */
+  envReflectionsIntensity: number;
   /** Zoom factor for the React HMI overlay (0.5–2.0, default 1.0). */
   uiZoom: number;
   /** OrbitControls rotate speed multiplier (0.1–3.0, default 1.0). */
@@ -114,7 +152,8 @@ export interface VisualSettings {
   orbitPanSpeed: number;
   /** OrbitControls zoom speed for mouse wheel, trackpad, and touch pinch (0.1–3.0, default 1.0). */
   orbitZoomSpeed: number;
-  /** OrbitControls damping factor — inertia feel (0.01–0.5, default 0.08). */
+  /** OrbitControls damping factor — inertia feel (0.01–0.5, default 0.2).
+   *  Higher = more direct (shorter glide after the mouse stops). */
   orbitDampingFactor: number;
   /** Distance-adaptive navigation: scales zoom/pan speed proportionally to camera–target distance (opt-in). */
   distanceAdaptiveNav?: boolean;
@@ -134,7 +173,7 @@ function clampNavNumber(raw: unknown, range: { min: number; max: number }, fallb
   return raw;
 }
 
-const MODE_DEFAULTS: Record<LightingMode, LightingModeSettings> = {
+const MODE_DEFAULTS: Record<RenderMode, LightingModeSettings> = {
   simple: {
     lightIntensity: 1.0, toneMapping: 'none', toneMappingExposure: 1.0,
     ambientColor: '#ffffff', ambientIntensity: 1.0,
@@ -147,13 +186,24 @@ const MODE_DEFAULTS: Record<LightingMode, LightingModeSettings> = {
     dirLightEnabled: true, dirLightColor: '#ffffff', dirLightIntensity: 1.5,
     shadowEnabled: true, shadowIntensity: 0.95, shadowQuality: 'medium',
   },
+  toon: {
+    // Lightweight cel look: a flat ambient fill (lightIntensity = ambient
+    // brightness, since no environment) + a directional key light that the toon
+    // material bands by direction and gives a hard specular highlight. No tone
+    // mapping (flat crisp colours), no shadows.
+    lightIntensity: 0.4, toneMapping: 'none', toneMappingExposure: 1.0,
+    ambientColor: '#ffffff', ambientIntensity: 0.45,
+    dirLightEnabled: true, dirLightColor: '#ffffff', dirLightIntensity: 2.0,
+    shadowEnabled: false, shadowIntensity: 0.5, shadowQuality: 'medium',
+  },
 };
 
 const DEFAULTS: VisualSettings = {
-  lightingMode: 'default',
+  renderMode: DEFAULT_RENDER_MODE,
   modeSettings: {
     simple:  { ...MODE_DEFAULTS.simple },
     default: { ...MODE_DEFAULTS.default },
+    toon:    { ...MODE_DEFAULTS.toon },
   },
   projection: 'perspective' as ProjectionType,
   fov: 45,
@@ -169,6 +219,19 @@ const DEFAULTS: VisualSettings = {
   aoMode: 'gtao',
   ssaoIntensity: 0.35,
   ssaoRadius: 0.03,
+  toonBands: 3,
+  toonMetallic: 0.85,
+  toonMetallicColor: '#b0b4bc',
+  toonAlbedoMinBrightness: 0,
+  toonAlbedoMaxBrightness: 1,
+  toonAlbedoSaturation: 1,
+  toonOutlineAmount: 1.0,
+  toonOutlineThickness: 1.5,
+  toonOutlineThreshold: 0.3,
+  toonOutlineDistance: 100,
+  toonOutlineSupersample: false,
+  toonOutlineColor: '#1a1a1a',
+  toonCoolShadows: true,
   bloomEnabled: true,
   bloomIntensity: 0.2,
   bloomThreshold: 0.85,
@@ -181,29 +244,32 @@ const DEFAULTS: VisualSettings = {
   reflectionEnabled: false,
   reflectionStrength: 0.8,
   reflectionBlur: 1.0,
+  envReflectionsEnabled: false,
+  envReflectionsIntensity: 0.3,
   uiZoom: 1.0,
   orbitRotateSpeed: 1.0,
   orbitPanSpeed: 1.0,
   orbitZoomSpeed: 1.0,
-  orbitDampingFactor: 0.08,
+  orbitDampingFactor: 0.2,
   distanceAdaptiveNav: false,
 };
 
-function migrateToneMapping(raw: unknown, mode: LightingMode): ToneMappingType {
+function migrateToneMapping(raw: unknown, mode: RenderMode): ToneMappingType {
   if (typeof raw === 'string' && (TONE_MAPPING_OPTIONS as readonly string[]).includes(raw)) return raw as ToneMappingType;
   if (raw === true) return 'neutral';
   if (raw === false) return 'none';
   return MODE_DEFAULTS[mode].toneMapping;
 }
 
-function parseModeSettings(raw: unknown): Record<LightingMode, LightingModeSettings> {
-  const result: Record<LightingMode, LightingModeSettings> = {
+function parseModeSettings(raw: unknown): Record<RenderMode, LightingModeSettings> {
+  const result: Record<RenderMode, LightingModeSettings> = {
     simple:  { ...MODE_DEFAULTS.simple },
     default: { ...MODE_DEFAULTS.default },
+    toon:    { ...MODE_DEFAULTS.toon },
   };
   if (typeof raw !== 'object' || raw === null) return result;
   const obj = raw as Record<string, Partial<LightingModeSettings> & { toneMapping?: unknown }>;
-  for (const mode of LIGHTING_MODES) {
+  for (const mode of RENDER_MODE_IDS) {
     if (obj[mode]) {
       const d = MODE_DEFAULTS[mode];
       const s = obj[mode];
@@ -227,8 +293,10 @@ export function loadVisualSettings(): VisualSettings {
   const fromStorage = loadFromLocalStorage();
   const override = getAppConfig().visual;
   if (!override) return fromStorage;
+  // Back-compat: accept the legacy `lightingMode` override key.
+  const overrideMode = override.renderMode ?? override.lightingMode;
   return {
-    lightingMode: override.lightingMode ?? fromStorage.lightingMode,
+    renderMode: (overrideMode && isRenderMode(overrideMode)) ? overrideMode : fromStorage.renderMode,
     modeSettings: fromStorage.modeSettings,
     projection: override.projection ?? fromStorage.projection,
     fov: override.fov ?? fromStorage.fov,
@@ -244,6 +312,19 @@ export function loadVisualSettings(): VisualSettings {
     aoMode: fromStorage.aoMode,
     ssaoIntensity: fromStorage.ssaoIntensity,
     ssaoRadius: fromStorage.ssaoRadius,
+    toonBands: fromStorage.toonBands,
+    toonMetallic: fromStorage.toonMetallic,
+    toonMetallicColor: fromStorage.toonMetallicColor,
+    toonAlbedoMinBrightness: fromStorage.toonAlbedoMinBrightness,
+    toonAlbedoMaxBrightness: fromStorage.toonAlbedoMaxBrightness,
+    toonAlbedoSaturation: fromStorage.toonAlbedoSaturation,
+    toonOutlineAmount: fromStorage.toonOutlineAmount,
+    toonOutlineThickness: fromStorage.toonOutlineThickness,
+    toonOutlineThreshold: fromStorage.toonOutlineThreshold,
+    toonOutlineDistance: fromStorage.toonOutlineDistance,
+    toonOutlineSupersample: fromStorage.toonOutlineSupersample,
+    toonOutlineColor: fromStorage.toonOutlineColor,
+    toonCoolShadows: fromStorage.toonCoolShadows,
     bloomEnabled: fromStorage.bloomEnabled,
     bloomIntensity: fromStorage.bloomIntensity,
     bloomThreshold: fromStorage.bloomThreshold,
@@ -256,6 +337,8 @@ export function loadVisualSettings(): VisualSettings {
     reflectionEnabled: fromStorage.reflectionEnabled,
     reflectionStrength: fromStorage.reflectionStrength,
     reflectionBlur: fromStorage.reflectionBlur,
+    envReflectionsEnabled: fromStorage.envReflectionsEnabled,
+    envReflectionsIntensity: fromStorage.envReflectionsIntensity,
     uiZoom: fromStorage.uiZoom,
     orbitRotateSpeed: clampNavNumber(
       override.orbitRotateSpeed,
@@ -284,9 +367,11 @@ export function loadVisualSettings(): VisualSettings {
 function loadFromLocalStorage(): VisualSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { ...DEFAULTS, modeSettings: { simple: { ...MODE_DEFAULTS.simple }, default: { ...MODE_DEFAULTS.default } }, cameras: [...DEFAULTS.cameras] };
-    const parsed = JSON.parse(raw) as Partial<VisualSettings> & { lightIntensity?: number; qualityPreset?: string };
-    const mode = (parsed.lightingMode && LIGHTING_MODES.includes(parsed.lightingMode)) ? parsed.lightingMode : DEFAULTS.lightingMode;
+    if (!raw) return { ...DEFAULTS, modeSettings: { simple: { ...MODE_DEFAULTS.simple }, default: { ...MODE_DEFAULTS.default }, toon: { ...MODE_DEFAULTS.toon } }, cameras: [...DEFAULTS.cameras] };
+    const parsed = JSON.parse(raw) as Partial<VisualSettings> & { lightIntensity?: number; qualityPreset?: string; lightingMode?: string };
+    // Back-compat: the field was renamed `lightingMode` → `renderMode`.
+    const rawMode = parsed.renderMode ?? parsed.lightingMode;
+    const mode: RenderMode = isRenderMode(rawMode) ? rawMode : DEFAULTS.renderMode;
     const modeSettings = parseModeSettings(parsed.modeSettings);
     if (typeof parsed.lightIntensity === 'number' && !parsed.modeSettings) {
       modeSettings[mode].lightIntensity = parsed.lightIntensity;
@@ -333,6 +418,44 @@ function loadFromLocalStorage(): VisualSettings {
     const ssaoRadiusRaw = (parsed as Record<string, unknown>).ssaoRadius;
     const ssaoRadius = (typeof ssaoRadiusRaw === 'number' && ssaoRadiusRaw >= 0.01 && ssaoRadiusRaw <= 1)
       ? ssaoRadiusRaw : DEFAULTS.ssaoRadius;
+    const toonBandsRaw = (parsed as Record<string, unknown>).toonBands;
+    const toonBands = (typeof toonBandsRaw === 'number' && toonBandsRaw >= 2 && toonBandsRaw <= 6)
+      ? Math.round(toonBandsRaw) : DEFAULTS.toonBands;
+    const toonMetallicRaw = (parsed as Record<string, unknown>).toonMetallic;
+    const toonMetallic = (typeof toonMetallicRaw === 'number' && toonMetallicRaw >= 0 && toonMetallicRaw <= 1)
+      ? toonMetallicRaw : DEFAULTS.toonMetallic;
+    const toonMetallicColorRaw = (parsed as Record<string, unknown>).toonMetallicColor;
+    const toonMetallicColor = (typeof toonMetallicColorRaw === 'string' && /^#[0-9a-fA-F]{6}$/.test(toonMetallicColorRaw))
+      ? toonMetallicColorRaw : DEFAULTS.toonMetallicColor;
+    const toonAlbedoMinBrightnessRaw = (parsed as Record<string, unknown>).toonAlbedoMinBrightness;
+    const toonAlbedoMinBrightness = (typeof toonAlbedoMinBrightnessRaw === 'number' && toonAlbedoMinBrightnessRaw >= 0 && toonAlbedoMinBrightnessRaw <= 1)
+      ? toonAlbedoMinBrightnessRaw : DEFAULTS.toonAlbedoMinBrightness;
+    const toonAlbedoMaxBrightnessRaw = (parsed as Record<string, unknown>).toonAlbedoMaxBrightness;
+    const toonAlbedoMaxBrightness = (typeof toonAlbedoMaxBrightnessRaw === 'number' && toonAlbedoMaxBrightnessRaw >= 0 && toonAlbedoMaxBrightnessRaw <= 1)
+      ? toonAlbedoMaxBrightnessRaw : DEFAULTS.toonAlbedoMaxBrightness;
+    const toonAlbedoSaturationRaw = (parsed as Record<string, unknown>).toonAlbedoSaturation;
+    const toonAlbedoSaturation = (typeof toonAlbedoSaturationRaw === 'number' && toonAlbedoSaturationRaw >= 0 && toonAlbedoSaturationRaw <= 2)
+      ? toonAlbedoSaturationRaw : DEFAULTS.toonAlbedoSaturation;
+    const toonOutlineAmountRaw = (parsed as Record<string, unknown>).toonOutlineAmount;
+    const toonOutlineAmount = (typeof toonOutlineAmountRaw === 'number' && toonOutlineAmountRaw >= 0 && toonOutlineAmountRaw <= 1)
+      ? toonOutlineAmountRaw : DEFAULTS.toonOutlineAmount;
+    const toonOutlineThicknessRaw = (parsed as Record<string, unknown>).toonOutlineThickness;
+    const toonOutlineThickness = (typeof toonOutlineThicknessRaw === 'number' && toonOutlineThicknessRaw >= 0 && toonOutlineThicknessRaw <= 5)
+      ? toonOutlineThicknessRaw : DEFAULTS.toonOutlineThickness;
+    const toonOutlineThresholdRaw = (parsed as Record<string, unknown>).toonOutlineThreshold;
+    const toonOutlineThreshold = (typeof toonOutlineThresholdRaw === 'number' && toonOutlineThresholdRaw >= 0 && toonOutlineThresholdRaw <= 1)
+      ? toonOutlineThresholdRaw : DEFAULTS.toonOutlineThreshold;
+    const toonOutlineDistanceRaw = (parsed as Record<string, unknown>).toonOutlineDistance;
+    const toonOutlineDistance = (typeof toonOutlineDistanceRaw === 'number' && toonOutlineDistanceRaw >= 0 && toonOutlineDistanceRaw <= 100)
+      ? toonOutlineDistanceRaw : DEFAULTS.toonOutlineDistance;
+    const toonOutlineSupersampleRaw = (parsed as Record<string, unknown>).toonOutlineSupersample;
+    const toonOutlineSupersample = typeof toonOutlineSupersampleRaw === 'boolean'
+      ? toonOutlineSupersampleRaw : DEFAULTS.toonOutlineSupersample;
+    const toonOutlineColorRaw = (parsed as Record<string, unknown>).toonOutlineColor;
+    const toonOutlineColor = (typeof toonOutlineColorRaw === 'string' && /^#[0-9a-fA-F]{6}$/.test(toonOutlineColorRaw))
+      ? toonOutlineColorRaw : DEFAULTS.toonOutlineColor;
+    const toonCoolShadowsRaw = (parsed as Record<string, unknown>).toonCoolShadows;
+    const toonCoolShadows = typeof toonCoolShadowsRaw === 'boolean' ? toonCoolShadowsRaw : DEFAULTS.toonCoolShadows;
     const bloomEnabledRaw = (parsed as Record<string, unknown>).bloomEnabled;
     const bloomEnabled = typeof bloomEnabledRaw === 'boolean' ? bloomEnabledRaw : DEFAULTS.bloomEnabled;
     const bloomIntensityRaw = (parsed as Record<string, unknown>).bloomIntensity;
@@ -366,6 +489,11 @@ function loadFromLocalStorage(): VisualSettings {
     const reflectionBlurRaw = (parsed as Record<string, unknown>).reflectionBlur;
     const reflectionBlur = (typeof reflectionBlurRaw === 'number' && reflectionBlurRaw >= 0 && reflectionBlurRaw <= 1)
       ? reflectionBlurRaw : DEFAULTS.reflectionBlur;
+    const envReflectionsEnabledRaw = (parsed as Record<string, unknown>).envReflectionsEnabled;
+    const envReflectionsEnabled = typeof envReflectionsEnabledRaw === 'boolean' ? envReflectionsEnabledRaw : DEFAULTS.envReflectionsEnabled;
+    const envReflectionsIntensityRaw = (parsed as Record<string, unknown>).envReflectionsIntensity;
+    const envReflectionsIntensity = (typeof envReflectionsIntensityRaw === 'number' && envReflectionsIntensityRaw >= 0 && envReflectionsIntensityRaw <= 2)
+      ? envReflectionsIntensityRaw : DEFAULTS.envReflectionsIntensity;
     const uiZoomRaw = (parsed as Record<string, unknown>).uiZoom;
     const uiZoom = (typeof uiZoomRaw === 'number' && uiZoomRaw >= 0.5 && uiZoomRaw <= 2)
       ? uiZoomRaw : DEFAULTS.uiZoom;
@@ -390,7 +518,7 @@ function loadFromLocalStorage(): VisualSettings {
       DEFAULTS.orbitDampingFactor,
     );
     return {
-      lightingMode: mode,
+      renderMode: mode,
       modeSettings,
       projection,
       fov: typeof parsed.fov === 'number' ? parsed.fov : DEFAULTS.fov,
@@ -406,6 +534,19 @@ function loadFromLocalStorage(): VisualSettings {
       aoMode,
       ssaoIntensity,
       ssaoRadius,
+      toonBands,
+      toonMetallic,
+      toonMetallicColor,
+      toonAlbedoMinBrightness,
+      toonAlbedoMaxBrightness,
+      toonAlbedoSaturation,
+      toonOutlineAmount,
+      toonOutlineThickness,
+      toonOutlineThreshold,
+      toonOutlineDistance,
+      toonOutlineSupersample,
+      toonOutlineColor,
+      toonCoolShadows,
       bloomEnabled,
       bloomIntensity,
       bloomThreshold,
@@ -418,6 +559,8 @@ function loadFromLocalStorage(): VisualSettings {
       reflectionEnabled,
       reflectionStrength,
       reflectionBlur,
+      envReflectionsEnabled,
+      envReflectionsIntensity,
       uiZoom,
       orbitRotateSpeed,
       orbitPanSpeed,
@@ -428,12 +571,36 @@ function loadFromLocalStorage(): VisualSettings {
         : DEFAULTS.distanceAdaptiveNav,
     };
   } catch {
-    return { ...DEFAULTS, modeSettings: { simple: { ...MODE_DEFAULTS.simple }, default: { ...MODE_DEFAULTS.default } }, cameras: [...DEFAULTS.cameras] };
+    return { ...DEFAULTS, modeSettings: { simple: { ...MODE_DEFAULTS.simple }, default: { ...MODE_DEFAULTS.default }, toon: { ...MODE_DEFAULTS.toon } }, cameras: [...DEFAULTS.cameras] };
   }
 }
 
 export function saveVisualSettings(settings: VisualSettings): void {
   lsSave(STORAGE_KEY, settings);
+}
+
+/** True when the user already has persisted visual settings (i.e. NOT a fresh
+ *  install). Used to decide whether to seed an initial visual preset at boot. */
+export function hasStoredVisualSettings(): boolean {
+  try {
+    return localStorage.getItem(STORAGE_KEY) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/** Fresh deep clone of the built-in default visual settings (no localStorage /
+ *  appConfig overlay). Used as the baseline for building visual presets. */
+export function getDefaultVisualSettings(): VisualSettings {
+  return {
+    ...DEFAULTS,
+    modeSettings: {
+      simple:  { ...MODE_DEFAULTS.simple },
+      default: { ...MODE_DEFAULTS.default },
+      toon:    { ...MODE_DEFAULTS.toon },
+    },
+    cameras: [...DEFAULTS.cameras],
+  };
 }
 
 // ─── Reactive UI Zoom Store ────────────────────────────────────────────
@@ -519,6 +686,64 @@ export function useSourceMarkersVisible(): boolean {
   return useSyncExternalStore(
     (cb) => { _sourceMarkersListeners.add(cb); return () => { _sourceMarkersListeners.delete(cb); }; },
     () => _sourceMarkersVisible,
+  );
+}
+
+// ─── Reactive Vanish-MUs Store ────────────────────────────────────────
+// When ON, an MU that runs off the end of a transport line (no successor belt)
+// is auto-deleted after a short delay. Toggled from the Layout-Planner toolbar
+// and applied to the live RVTransportManager by `RVViewer.setVanishMUs`.
+// Pure scalar boolean persisted to its own localStorage slot. Default: true
+// (an MU that runs off the end of a line should disappear, not pile up).
+
+const VANISH_MUS_KEY = 'rv-vanish-mus';
+const DEFAULT_VANISH_MUS = true;
+
+function loadVanishMUs(): boolean {
+  try {
+    const raw = localStorage.getItem(VANISH_MUS_KEY);
+    if (raw === null) return DEFAULT_VANISH_MUS;
+    return raw === 'true';
+  } catch {
+    return DEFAULT_VANISH_MUS;
+  }
+}
+
+let _vanishMUs: boolean = loadVanishMUs();
+const _vanishMUsListeners = new Set<() => void>();
+
+function notifyVanishMUs(): void { for (const l of _vanishMUsListeners) l(); }
+
+/** Read the current vanish-MUs toggle (non-reactive). */
+export function getVanishMUs(): boolean { return _vanishMUs; }
+
+/**
+ * Update the vanish-MUs flag, persist to localStorage, and notify subscribers.
+ * `RVViewer.setVanishMUs` subscribes via {@link subscribeVanishMUs} to push the
+ * value onto the live transport manager.
+ */
+export function setVanishMUs(enabled: boolean): void {
+  if (_vanishMUs === enabled) return;
+  _vanishMUs = enabled;
+  try {
+    localStorage.setItem(VANISH_MUS_KEY, enabled ? 'true' : 'false');
+  } catch {
+    /* quota exceeded or storage disabled — ignore */
+  }
+  notifyVanishMUs();
+}
+
+/** Subscribe to vanish-MUs changes. Returns unsubscribe handle. */
+export function subscribeVanishMUs(cb: () => void): () => void {
+  _vanishMUsListeners.add(cb);
+  return () => { _vanishMUsListeners.delete(cb); };
+}
+
+/** React hook: returns the current vanish-MUs flag (reactive). */
+export function useVanishMUs(): boolean {
+  return useSyncExternalStore(
+    (cb) => { _vanishMUsListeners.add(cb); return () => { _vanishMUsListeners.delete(cb); }; },
+    () => _vanishMUs,
   );
 }
 

@@ -115,8 +115,6 @@ const COLLAPSE_RADIUS_PX = GIZMO_SCREEN_RADIUS_PX * 1.1;
 const EXPANSION_LERP = 0.22;
 /** Below this expansion the gizmo is non-interactive (indicator only). */
 const INTERACT_EXPANSION_MIN = 0.6;
-/** Disc fill opacity when fully collapsed — reads as a solid green dot. */
-const COLLAPSED_FILL_OPACITY = 0.85;
 /** Snap epsilon — within this of 0/1 the expansion lock to the endpoint. */
 const EXPANSION_SNAP_EPS = 0.01;
 
@@ -152,8 +150,7 @@ const _v3b = new Vector3();
 const _projHelper = new Vector3();
 /** Last known cursor position in NDC — drives proximity-based expansion. */
 const _lastPointerNdc = new Vector2();
-/** Collapsed/expanded disc-fill colors (green dot ↔ smoked-glass black). */
-const _colGreen = new Color(COLOR_OUTLINE);
+/** Disc-fill color (smoked-glass black; the green look comes from the outline). */
 const _colBlack = new Color(COLOR_FILL);
 
 /** Floor plane (Y up, offset set per drag from target.y). */
@@ -624,15 +621,18 @@ export class FloorGizmo {
     this._lastExpansionApplied = this._expansion;
 
     const discFill = this._disc.material as MeshBasicMaterial;
+    // Fill is always the smoked-glass black; the green border comes from the
+    // always-on disc outline. (The collapsed disc used to be a solid green dot,
+    // which was indistinguishable from the green snap-point markers — now it
+    // reads as a transparent-grey disc with a green border, like the expanded gizmo.)
+    discFill.color.copy(_colBlack);
     if (this._expansion >= 1) {
-      // Fully expanded → restore the true fill color and hand opacity control
-      // back to the hover/drag machine.
-      discFill.color.copy(_colBlack);
+      // Fully expanded → hand opacity control back to the hover/drag machine.
       this._refreshOpacity();
     } else {
-      // Collapsed / animating → green dot fading toward the smoked-glass black.
-      discFill.color.lerpColors(_colGreen, _colBlack, this._expansion);
-      discFill.opacity = MathUtils.lerp(COLLAPSED_FILL_OPACITY, FILL_OPACITY_IDLE, this._expansion);
+      // Collapsed / animating → semi-transparent smoked-glass fill (same as the
+      // expanded idle look).
+      discFill.opacity = FILL_OPACITY_IDLE;
     }
   }
 

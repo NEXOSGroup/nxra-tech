@@ -18,13 +18,21 @@ import type { UIVisibilityRule } from './hmi/ui-context-store';
 /** Available slots in the HMI layout. */
 export type UISlot =
   | 'kpi-bar'          // Top: KPI cards horizontal
-  | 'button-group'     // Left: Navigation buttons vertical
+  | 'activity-bar'     // Left ACTIVITY BAR: a button that opens a left-docked window.
+                       //   Convention: if a plugin opens a left window, register here and
+                       //   dock via leftPanelManager.toggle(id, width); the window renders
+                       //   edge-to-edge via LeftPanel. For top-bar ACTIONS use toolbar-button*.
+  | 'button-group'     // Floating left TOOL toolbar: contextual mode tools (planner
+                       //   grid/snap/delete, measurement, …). Floats over the 3D view,
+                       //   shifts to clear the activity bar + open window. NOT window-openers.
   | 'search-bar'       // Bottom center: Search field
   | 'messages'         // Right: Notification/status tiles vertical
   | 'views'            // Bottom right: Expandable panels (charts, tables)
   | 'settings-tab'     // Settings dialog: Tab registration
   | 'toolbar-button-leading' // TopBar: Buttons rendered before Hierarchy (primary sim controls)
-  | 'toolbar-button'   // TopBar: Additional toolbar buttons (next to hierarchy/settings)
+  | 'toolbar-button'   // TopBar: Additional top-bar action buttons (toggles/modals, not left windows)
+  | 'toolbar-button-center'  // TopBar: Center region toolbars (reserved for future tools)
+  | 'toolbar-button-trailing' // TopBar: Right region toolbars (before the camera/view group)
   | 'overlay';         // Full-screen overlay panels (left panels, modals, etc.)
 
 /** Props passed to every UI slot component. */

@@ -396,6 +396,286 @@ describe('RVMovingUnit — rotation-aware AABB footprint', () => {
   });
 });
 
+// ─── Vanish MUs at end of line ───────────────────────────────────
+
+describe('RVTransportManager — vanish MUs at end of line', () => {
+  let manager: RVTransportManager;
+
+  beforeEach(() => {
+    manager = new RVTransportManager();
+    manager.scene = new Scene();
+    manager.vanishMUsAtEndOfLine = true;
+    // End-of-line vanish is SCOPED to planner-placed layout objects. These tests
+    // exercise the vanish mechanism, so auto-tag every surface registered here as
+    // a layout object. (The NON-layout case is covered by its own test, which
+    // un-tags its surface explicitly.)
+    const arr = manager.surfaces;
+    const origPush = arr.push;
+    arr.push = function (...items: RVTransportSurface[]): number {
+      for (const s of items) s.node.userData._layoutObject = true;
+      return origPush.apply(this, items);
+    };
+  });
+
+  const dt = 1 / 60;
+
+  /** Run the sim until the MU list drains or `cap` ticks elapse. Returns the
+   *  tick count actually run. */
+  function run(cap = 400): number {
+    let i = 0;
+    for (; i < cap; i++) {
+      manager.update(dt);
+      if (manager.mus.length === 0) break;
+    }
+    return i;
+  }
+
+  it('deletes an MU that runs off the end of the line after the delay', () => {
+    // A short belt in +X; the MU starts on it then runs off the +X end.
+    const surface = createSurface(0, 0, 0, new Vector3(0.5, 0.1, 0.5), new Vector3(1, 0, 0), 2000);
+    manager.surfaces.push(surface);
+
+    const mu = createMU('part1', -0.4, 0, 0); // on the belt
+    manager.mus.push(mu);
+
+    // First tick: still on belt → everOnSurface set, timer at 0.
+    manager.update(dt);
+    expect(mu.everOnSurface).toBe(true);
+
+    run();
+    expect(manager.mus.length).toBe(0);
+    expect(manager.totalConsumed).toBe(1);
+  });
+
+  it('does NOT vanish an MU at a dead end on a NON-layout (authored GLB) surface', () => {
+    // Same dead-end geometry as the discharge-belt vanish test, but the surface
+    // is NOT a planner-placed layout object — so the MU must be left alone.
+    const surface = createSurface(0, 0, 0, new Vector3(1, 0.1, 0.5), new Vector3(1, 0, 0), 0);
+    manager.surfaces.push(surface);
+    surface.node.userData._layoutObject = false; // authored scene geometry, not placed
+
+    const mu = createMU('part1', 0.9, 0, 0); // parked at the +X discharge end (dead end)
+    manager.mus.push(mu);
+
+    manager.update(dt);
+    expect(mu.currentSurface).toBe(surface);
+    expect(mu.everOnSurface).toBe(true);
+
+    run();
+    expect(manager.mus.length).toBe(1);     // dead end, but not on a layout object → survives
+    expect(mu.onLayoutObject).toBeFalsy();
+  });
+
+  it('does NOT delete when the toggle is off', () => {
+    manager.vanishMUsAtEndOfLine = false;
+    const surface = createSurface(0, 0, 0, new Vector3(0.5, 0.1, 0.5), new Vector3(1, 0, 0), 2000);
+    manager.surfaces.push(surface);
+
+    const mu = createMU('part1', -0.4, 0, 0);
+    manager.mus.push(mu);
+
+    run();
+    expect(manager.mus.length).toBe(1); // ran off the end but survives
+  });
+
+  it('does NOT delete an MU resting MID-belt on a stopped belt (not at the end)', () => {
+    const surface = createSurface(0, 0, 0, new Vector3(1, 0.1, 1), new Vector3(1, 0, 0), 0); // stopped
+    manager.surfaces.push(surface);
+
+    const mu = createMU('part1', 0, 0, 0); // centre of the belt — room ahead
+    manager.mus.push(mu);
+
+    run();
+    expect(manager.mus.length).toBe(1);
+    expect(mu.currentSurface).toBe(surface); // belt ahead → not a dead end
+  });
+
+  it('deletes an MU parked at the end of a STOPPED discharge belt (no successor)', () => {
+    // Belt spans X[-1,1] and is STOPPED (end-stop sensor); the MU sits at the
+    // +X discharge end and never moves — the case the original off-surface
+    // check missed.
+    const surface = createSurface(0, 0, 0, new Vector3(1, 0.1, 0.5), new Vector3(1, 0, 0), 0);
+    manager.surfaces.push(surface);
+
+    const mu = createMU('part1', 0.9, 0, 0); // leading edge ~0.95, near the belt end 1.0
+    manager.mus.push(mu);
+
+    manager.update(dt);
+    expect(mu.currentSurface).toBe(surface);
+    expect(mu.everOnSurface).toBe(true);
+
+    run();
+    expect(manager.mus.length).toBe(0); // nothing ahead → vanished
+    expect(manager.totalConsumed).toBe(1);
+  });
+
+  it('does NOT vanish a parked dead-end MU when its outgoing snap IS connected', () => {
+    // Same dead-end geometry as the stopped-discharge test (a rotated turntable's
+    // footprint no longer overlaps the edge), but the conveyor's outgoing snap is
+    // connected → the MU must wait, never vanish.
+    const surface = createSurface(0, 0, 0, new Vector3(1, 0.1, 0.5), new Vector3(1, 0, 0), 0);
+    manager.surfaces.push(surface);
+    manager.isOutputConnected = () => true; // connected successor (e.g. rotated turntable)
+
+    const mu = createMU('part1', 0.9, 0, 0); // parked at the +X discharge end
+    manager.mus.push(mu);
+
+    run();
+    expect(manager.mus.length).toBe(1);       // connected → survives
+    expect(mu.offSurfaceTime ?? 0).toBe(0);   // dwell timer held at 0
+  });
+
+  it('does NOT vanish a run-off MU when its last surface had a connected output', () => {
+    // The MU runs off the +X end (currentSurface → null); connectivity is checked
+    // against the LATCHED lastSurface, so a connected line still never vanishes.
+    const surface = createSurface(0, 0, 0, new Vector3(0.5, 0.1, 0.5), new Vector3(1, 0, 0), 2000);
+    manager.surfaces.push(surface);
+    manager.isOutputConnected = () => true;
+
+    const mu = createMU('part1', -0.4, 0, 0);
+    manager.mus.push(mu);
+
+    manager.update(dt);
+    expect(mu.lastSurface).toBe(surface); // latched while on the belt
+
+    run();
+    expect(manager.mus.length).toBe(1);   // ran off but connected → survives
+  });
+
+  it('still vanishes a parked dead-end MU when the outgoing snap is UNCONNECTED', () => {
+    // The gate must not suppress legitimate end-of-line vanishing.
+    const surface = createSurface(0, 0, 0, new Vector3(1, 0.1, 0.5), new Vector3(1, 0, 0), 0);
+    manager.surfaces.push(surface);
+    manager.isOutputConnected = () => false; // free discharge end
+
+    const mu = createMU('part1', 0.9, 0, 0);
+    manager.mus.push(mu);
+
+    run();
+    expect(manager.mus.length).toBe(0);     // unconnected dead end → vanishes
+    expect(manager.totalConsumed).toBe(1);
+  });
+
+  it('does NOT delete an MU stopped at a seam that HAS a successor belt', () => {
+    // A (stopped) discharges into B (stopped); their AABBs overlap at the seam.
+    // The MU sits at A's discharge end — but B succeeds it, so not a dead end.
+    const A = createSurface(0, 0, 0, new Vector3(1, 0.1, 0.5), new Vector3(1, 0, 0), 0);
+    const B = createSurface(1.7, 0, 0, new Vector3(1, 0.1, 0.5), new Vector3(1, 0, 0), 0); // spans X[0.7,2.7]
+    manager.surfaces.push(A, B);
+
+    const mu = createMU('part1', 0.9, 0, 0); // in the A∩B overlap
+    manager.mus.push(mu);
+
+    run();
+    expect(manager.mus.length).toBe(1); // successor ahead → survives
+  });
+
+  it('does NOT delete a free MU that was never on any surface', () => {
+    // No surfaces at all — the MU floats free but was never transported.
+    const mu = createMU('part1', 5, 0, 0);
+    manager.mus.push(mu);
+
+    run();
+    expect(manager.mus.length).toBe(1);
+    expect(mu.everOnSurface).toBeFalsy();
+  });
+
+  it('does NOT vanish an MU on a turntable that has an arm conveyor', () => {
+    // Turntable = a single Radial surface. It can rotate to discharge to any
+    // conveyor it touches, so an MU on it must never be flagged as stuck.
+    const turntable = createSurface(0, 0, 0, new Vector3(0.6, 0.1, 0.6), new Vector3(1, 0, 0), 0);
+    turntable.Radial = true;
+    const arm = createSurface(1.0, 0, 0, new Vector3(0.5, 0.1, 0.3), new Vector3(1, 0, 0), 0); // overlaps turntable
+    manager.surfaces.push(turntable, arm);
+
+    const mu = createMU('part1', 0, 0, 0); // centred on the turntable
+    manager.mus.push(mu);
+
+    run();
+    expect(manager.mus.length).toBe(1);            // turntable can still route it out
+    expect(mu.currentSurface).toBe(turntable);
+  });
+
+  it('vanishes an MU on a lone turntable with no conveyor attached', () => {
+    const turntable = createSurface(0, 0, 0, new Vector3(0.6, 0.1, 0.6), new Vector3(1, 0, 0), 0);
+    turntable.Radial = true;
+    manager.surfaces.push(turntable);
+
+    const mu = createMU('part1', 0, 0, 0);
+    manager.mus.push(mu);
+
+    manager.update(dt);
+    expect(mu.everOnSurface).toBe(true);
+    run();
+    expect(manager.mus.length).toBe(0);            // no output at all → vanish
+  });
+
+  it('does NOT vanish an MU on a chain-transfer junction (stacked perpendicular surfaces)', () => {
+    // A chain-transfer is two surfaces stacked on one footprint: rollers along
+    // one axis and cross-chains perpendicular. An MU on it can exit sideways, so
+    // the single-axis probe must not flag it as stuck. The perpendicular surface
+    // is modelled by rotating its node 90° about Y (its world transport
+    // direction comes from localDirection × node world-quaternion).
+    const rollers = createSurface(0, 0, 0, new Vector3(0.6, 0.1, 0.6), new Vector3(1, 0, 0), 0); // world +X
+    const chains = createSurface(0, 0.02, 0, new Vector3(0.6, 0.1, 0.6), new Vector3(1, 0, 0), 0); // on top
+    chains.node.rotation.y = Math.PI / 2;        // → world transport direction becomes ±Z
+    chains.node.updateMatrixWorld(true);
+    manager.surfaces.push(rollers, chains);
+
+    const mu = createMU('part1', 0.55, 0, 0); // parked near the rollers' +X discharge edge
+    manager.mus.push(mu);
+
+    run();
+    expect(manager.mus.length).toBe(1);            // perpendicular output exists → not a dead end
+  });
+
+  it('plays a dissolve before removal (not an instant delete at the dwell threshold)', () => {
+    const surface = createSurface(0, 0, 0, new Vector3(1, 0.1, 0.5), new Vector3(1, 0, 0), 0); // stopped
+    manager.surfaces.push(surface);
+    const mu = createMU('part1', 0.9, 0, 0); // parked at the discharge end
+    manager.mus.push(mu);
+
+    // Advance just past the dwell delay → the burn dissolve begins; MU still here.
+    const delayTicks = Math.ceil(manager.vanishDelaySec / dt) + 1;
+    for (let i = 0; i < delayTicks; i++) manager.update(dt);
+    expect(manager.mus.length).toBe(1);
+    expect(mu.dissolve).toBeTruthy();           // dissolve effect active
+    expect(manager.hasVanishingMU).toBe(true);  // renderer kept awake
+
+    // Let the dissolve play out → MU finally removed, signal clears.
+    const durTicks = Math.ceil(manager.vanishDurationSec / dt) + 3;
+    for (let i = 0; i < durTicks; i++) manager.update(dt);
+    expect(manager.mus.length).toBe(0);
+    expect(manager.hasVanishingMU).toBe(false);
+  });
+
+  it('keeps the dwell timer at zero across an overlapping belt hand-off', () => {
+    // Two OVERLAPPING belts form one continuous line (A∩B at X≈[0.5,1.0]); the
+    // MU is always on a surface during hand-off, so it never starts vanishing
+    // until it finally runs off B's far end.
+    const A = createSurface(0, 0, 0, new Vector3(0.75, 0.1, 0.5), new Vector3(1, 0, 0), 2000);
+    const B = createSurface(1.25, 0, 0, new Vector3(0.75, 0.1, 0.5), new Vector3(1, 0, 0), 2000);
+    manager.surfaces.push(A, B);
+
+    const mu = createMU('part1', -0.6, 0, 0); // starts on A
+    manager.mus.push(mu);
+
+    // Step until ownership hands to B; the timer must never have started.
+    let pickedUpByB = false;
+    for (let i = 0; i < 120; i++) {
+      manager.update(dt);
+      expect(mu.offSurfaceTime ?? 0).toBe(0); // on a surface the whole way
+      if (mu.currentSurface === B) { pickedUpByB = true; break; }
+    }
+    expect(pickedUpByB).toBe(true);
+    expect(manager.mus.length).toBe(1);
+
+    // Finally it runs off B's end and vanishes.
+    run();
+    expect(manager.mus.length).toBe(0);
+  });
+});
+
 // ─── End-to-End: Surface -> Sensor -> Sink ───────────────────────
 
 describe('End-to-end transport', () => {

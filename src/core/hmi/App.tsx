@@ -3,6 +3,8 @@
 
 import { useEffect, useMemo } from 'react';
 import { ThemeProvider } from '@mui/material/styles';
+import { IconButton, Tooltip } from '@mui/material';
+import { VisibilityOff } from '@mui/icons-material';
 import { useViewer } from '../../hooks/use-viewer';
 
 // Core HMI components
@@ -10,17 +12,22 @@ import { rvDarkTheme, createBrandedTheme } from './theme';
 import { useCustomBranding } from './branding-store';
 import { HMIShell, SlotRenderer } from './HMIShell';
 import { TopBar } from './TopBar';
+import { TitleBar } from './TitleBar';
 import { KpiBar } from './KpiBar';
+import { ActivityBar } from './ActivityBar';
+import { ViewportFrame } from './ViewportFrame';
 import { ButtonPanel } from './ButtonPanel';
 import { MessagePanel } from './MessagePanel';
 import { BottomBar } from './BottomBar';
 
 import { loadVisualSettings } from './visual-settings-store';
-import { useHmiVisible } from './hmi-visibility-store';
+import { useHmiVisible, toggleHmiVisible } from './hmi-visibility-store';
 import { useUIVisible } from './ui-context-store';
 
 // Generic tooltip system (replaces former DriveTooltip)
 import { TooltipLayer } from './tooltip/TooltipLayer';
+import { AnchoredPopover } from './AnchoredPopover';
+import './IKTargetQuickEdit'; // self-registers the 'ik-target' popover content
 import { tooltipRegistry } from './tooltip/tooltip-registry';
 // Import tooltip content providers (triggers self-registration of content + data resolvers).
 // Drive tooltip is NOT imported here — it's optional and lives in per-model plugin packs
@@ -40,8 +47,9 @@ import './info-overlay-store';
 // Generic controller replaces DriveTooltipController, PipelineTooltipController, MetadataTooltipController
 import './tooltip/GenericTooltipController';
 import { tooltipStore } from './tooltip/tooltip-store';
-// Import metadata field renderer to trigger self-registration
+// Import custom field renderers to trigger self-registration
 import './rv-metadata-field-renderer';
+import './rv-ik-path-field-renderer';
 
 // Context menu (plugin-extensible right-click / long-press menu)
 import { ContextMenuLayer } from './ContextMenuLayer';
@@ -108,6 +116,7 @@ export function App() {
   // ButtonPanel stays visible in planner mode — the planner now contributes
   // its own grid/snap/drop toolbar buttons there (PlannerToolbarButtons.tsx).
   // FPV / XR remain in the hidden list because they own the entire viewport.
+  const showActivityBar = useUIVisible('activity-bar', { hiddenIn: ['fpv', 'xr'] });
   const showButtonPanel = useUIVisible('button-panel', { hiddenIn: ['fpv', 'xr'] });
   const showMessagePanel = useUIVisible('message-panel', { hiddenIn: ['fpv', 'planner', 'xr'] });
   const showViewsSlot = useUIVisible('views-slot', { hiddenIn: ['fpv', 'planner', 'xr'] });
@@ -115,13 +124,19 @@ export function App() {
   return (
     <ThemeProvider theme={theme}>
       <HMIShell>
+        {/* Confines the WebGL canvas to the central region (must run even when
+            the HMI is hidden, to restore full-bleed). */}
+        <ViewportFrame />
         <TooltipLayer />
+        <AnchoredPopover />
         <SensorHistoryPanel />
         <ContextMenuLayer />
         <InstructionLayer />
         <SetPositionDialog />
+        {hmiVisible && branding?.titleBar && <TitleBar />}
         {hmiVisible && showKpiBar && <KpiBar />}
         {hmiVisible && showTopBar && <TopBar />}
+        {hmiVisible && showActivityBar && <ActivityBar />}
         {hmiVisible && showButtonPanel && <ButtonPanel />}
         {hmiVisible && showMessagePanel && <MessagePanel />}
         <BottomBar />
@@ -133,11 +148,35 @@ export function App() {
         {hmiVisible && <OrderPanel />}
         {hmiVisible && <ConnectPanel />}
         <AnnotationEditModal />
+        {/* When the HMI is hidden, the eye toggle in the top bar's right
+            region is gone too — keep a minimal always-present restore control
+            so touch users (no 'H' key) can bring the HMI back. */}
+        {!hmiVisible && <HmiRestoreButton />}
       </HMIShell>
       {tooltipRegistry.getControllers().map((ctrl, i) => {
         const C = ctrl.component;
         return <C key={i} />;
       })}
     </ThemeProvider>
+  );
+}
+
+/** Minimal restore affordance shown only while the HMI is hidden — a single
+ *  eye button in the top-right corner that toggles the full HMI back on. */
+function HmiRestoreButton() {
+  return (
+    <Tooltip title="Show HMI (H)" placement="left">
+      <IconButton
+        onClick={toggleHmiVisible}
+        sx={{
+          position: 'fixed', top: 8, right: 8, zIndex: 9001,
+          bgcolor: 'rgba(20,20,20,0.85)', backdropFilter: 'blur(8px)',
+          color: 'rgba(255,255,255,0.85)',
+          '&:hover': { bgcolor: 'rgba(40,40,40,0.95)' },
+        }}
+      >
+        <VisibilityOff fontSize="small" />
+      </IconButton>
+    </Tooltip>
   );
 }

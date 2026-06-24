@@ -6,14 +6,28 @@
 /** Height of the bottom bar area (search + padding) for layout calculations. */
 export const BOTTOM_BAR_HEIGHT = 52;
 
-/** Top position of left-side panels (below TopBar). */
-export const LEFT_PANEL_TOP = 56;
+/** Width of the left activity bar (VSCode-style vertical icon strip).
+ *  Sized to match the floating overlay ButtonPanel (medium IconButtons, 38px,
+ *  inside a 4px-padded Paper → 46px) so the outer and overlay toolbars align. */
+export const ACTIVITY_BAR_WIDTH = 46;
 
-/** Left margin of left-side panels on desktop. */
-export const LEFT_PANEL_LEFT = 8;
+/** Height of the optional top title bar (shown only when branding.titleBar is set).
+ *  Top-anchored chrome and the 3D canvas are pushed down by this amount when active. */
+export const TITLE_BAR_HEIGHT = 40;
 
-/** Bottom margin of left-side panels on desktop. Matches LEFT_PANEL_TOP for visual symmetry and clears the BottomBar (52 px). */
-export const LEFT_PANEL_BOTTOM = 56;
+/** Small top gap for floating viewport clusters (mode/sim switcher, camera/view
+ *  controls, KPI bar). There is no top app bar anymore — they float at the top. */
+export const FLOATING_TOP_MARGIN = 8;
+
+/** Top of left-docked windows — flush to the very top (the activity bar and
+ *  docked windows run full height now that the top app bar is gone). */
+export const LEFT_PANEL_TOP = 0;
+
+/** Left of left-docked windows — flush against the activity bar (edge-to-edge). */
+export const LEFT_PANEL_LEFT = ACTIVITY_BAR_WIDTH;
+
+/** Bottom of left-docked windows — flush to the viewport bottom (edge-to-edge). */
+export const LEFT_PANEL_BOTTOM = 0;
 
 /** Z-index for left-side panels (desktop). */
 export const LEFT_PANEL_ZINDEX = 1200;
@@ -29,8 +43,14 @@ export const LEFT_PANEL_MOBILE_ZINDEX = 10000;
 /** Width of the Settings panel. */
 export const SETTINGS_PANEL_WIDTH = 540;
 
-/** Width of the PropertyInspector panel. */
+/** Default width of the PropertyInspector panel (also the initial resizable width). */
 export const INSPECTOR_PANEL_WIDTH = 320;
+
+/** Min width the PropertyInspector can be resized to. */
+export const INSPECTOR_MIN_WIDTH = 240;
+
+/** Max width the PropertyInspector can be resized to. */
+export const INSPECTOR_MAX_WIDTH = 640;
 
 /** Width of the Machine Control panel. */
 export const MACHINE_PANEL_WIDTH = 370;

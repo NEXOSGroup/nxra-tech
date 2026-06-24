@@ -54,6 +54,18 @@ function notify(): void {
   for (const l of _listeners) l();
 }
 
+/**
+ * True while the full-screen branded loading splash (`#loading-overlay`,
+ * owned by main.ts / index.html) is on screen — including its fade-out.
+ * During a full model load that splash is the loading UI, so the modal info
+ * overlay must stay suppressed to avoid two stacked "Loading…" indicators.
+ */
+function isBrandedLoadingVisible(): boolean {
+  if (typeof document === 'undefined') return false;
+  const el = document.getElementById('loading-overlay');
+  return !!el && !el.classList.contains('hidden');
+}
+
 function clearAutoHide(): void {
   if (_autoHideTimer !== null) {
     clearTimeout(_autoHideTimer);
@@ -63,6 +75,10 @@ function clearAutoHide(): void {
 
 /** Show (or update) the info overlay. */
 export function showInfoOverlay(message: string, options?: ShowInfoOverlayOptions): void {
+  // Suppress while the full-screen branded loading splash is up — otherwise a
+  // full model load shows both the splash and this modal box at once. Once the
+  // splash hides, in-session calls (scene swaps, mode transitions) work normally.
+  if (!_state.visible && isBrandedLoadingVisible()) return;
   clearAutoHide();
   _state = {
     visible: true,

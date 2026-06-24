@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
-import { ArrowHelper, Box3, Object3D, Vector3, Quaternion, MathUtils, Matrix4, Mesh, MeshBasicMaterial, PlaneGeometry, DoubleSide, RepeatWrapping } from 'three';
+import { Box3, Object3D, Vector2, Vector3, Quaternion, MathUtils, Matrix4, Mesh, MeshBasicMaterial, PlaneGeometry, Shape, ShapeGeometry, DoubleSide, RepeatWrapping, EdgesGeometry, LineSegments, LineBasicMaterial } from 'three';
 import { debug } from './rv-debug';
 import { MM_TO_METERS } from './rv-constants';
 import type { MeshStandardMaterial, Texture } from 'three';
@@ -26,6 +26,14 @@ const _scratchQuatB = new Quaternion();
 // Scratch for the rotation-aware AABB-extent recompute in updateAABB().
 const _aabbQuat = new Quaternion();
 const _aabbRotMat = new Matrix4();
+// Lateral belt-centering: world up + scratch cross axis, and the per-tick lerp
+// fraction pulling MUs toward the belt's center line (see transportMU).
+const WORLD_UP = new Vector3(0, 1, 0);
+const _crossAxis = new Vector3();
+/** Per-tick lerp fraction pulling MUs toward the belt center line. */
+const CENTER_MU_LERP = 0.1;
+// Scratch for snapToCenterLine()'s world-direction read.
+const _centerLineDir = new Vector3();
 
 /** Identity-matrix element pattern (column-major), used by `matrixIsIdentity`. */
 const _identityElements = new Matrix4().elements;
@@ -137,17 +145,22 @@ export class RVTransportSurface implements RVComponent {
   private _radialOffsetX = 0;
 
   // ── Selection-gizmo state (managed by our own selection subscription) ──
-  /** Blue transparent fill over the top face of the surface while selected.
+  /** Blue edge outline around the top face of the surface while selected.
    *  Lives under `this.node` so it follows the asset's transform. */
-  private _selTopSurface: Mesh | null = null;
-  /** Direction arrow shown alongside the top surface. Lives under `this.node`. */
-  private _selArrow: ArrowHelper | null = null;
+  private _selTopSurface: LineSegments | null = null;
+  /** Flat direction arrow lying on the top surface. Lives under `this.node`. */
+  private _selArrow: Mesh | null = null;
   /** Captured at init() so we can build the gizmo without the full context. */
   private _selGizmoMgr: GizmoOverlayManager | null = null;
   /** Unsubscribe handle for the direct 'selection-changed' subscription. */
   private _selUnsub: (() => void) | null = null;
-  /** Captured registry — used to map selection paths back to nodes. */
-  private _selRegistry: { getNode(path: string): Object3D | null | undefined } | null = null;
+  /** Captured registry — maps selection paths back to nodes and lets the gizmo
+   *  detect nested transport-surface nodes (to prune them from its bounds). */
+  private _selRegistry: {
+    getNode(path: string): Object3D | null | undefined;
+    getByPath?<T = unknown>(type: string, path: string): T | null;
+    getPathForNode?(node: Object3D): string | null;
+  } | null = null;
 
   constructor(node: Object3D, aabb: AABB) {
     this.node = node;
@@ -309,28 +322,36 @@ export class RVTransportSurface implements RVComponent {
     this._hideSelectionGizmo();
     if (!this._selGizmoMgr) return;
 
-    // Blue transparent fill over the TOP face of the surface's bounding box.
+    // Blue edge outline around the TOP face of the surface's bounding box.
     // Built in the node's LOCAL frame and parented to `this.node`, so it
     // follows (and rotates with) the asset.
     this.node.updateMatrixWorld(true);
-    const localBox = this._computeLocalAABB();
-    if (localBox && !localBox.isEmpty()) {
-      const lmin = localBox.min;
-      const lmax = localBox.max;
+    // Gizmo bounds EXCLUDE nested transport surfaces, so a parent surface's
+    // gizmo reflects only its own belt (collision AABB is untouched).
+    const localBox = this._computeGizmoAABB();
+    if (!localBox || localBox.isEmpty()) return;
+    const lmin = localBox.min;
+    const lmax = localBox.max;
+    const cx = (lmin.x + lmax.x) / 2;
+    const cz = (lmin.z + lmax.z) / 2;
+    {
       const sx = Math.max(lmax.x - lmin.x, 1e-4);
       const sz = Math.max(lmax.z - lmin.z, 1e-4);
-      const geo = new PlaneGeometry(sx, sz);
-      geo.rotateX(-Math.PI / 2); // lie flat in the local XZ plane (normal = +Y)
-      const mat = new MeshBasicMaterial({
+      const planeGeo = new PlaneGeometry(sx, sz);
+      planeGeo.rotateX(-Math.PI / 2); // lie flat in the local XZ plane (normal = +Y)
+      // Edges only (no filled overlay) — EdgesGeometry of a quad yields just the
+      // 4 border segments (the shared diagonal is coplanar and dropped).
+      const geo = new EdgesGeometry(planeGeo);
+      planeGeo.dispose(); // EdgesGeometry copied the positions; source no longer needed
+      const mat = new LineBasicMaterial({
         color: 0x8ec5ff,         // light blue
         transparent: true,
-        opacity: 0.2,
-        side: DoubleSide,
+        opacity: 0.6,
         depthTest: false,
         depthWrite: false,
       });
-      const surf = new Mesh(geo, mat);
-      surf.position.set((lmin.x + lmax.x) / 2, lmax.y, (lmin.z + lmax.z) / 2);
+      const surf = new LineSegments(geo, mat);
+      surf.position.set(cx, lmax.y, cz);
       surf.renderOrder = 2001;
       surf.userData._highlightOverlay = true;
       surf.raycast = () => { /* never a click target */ };
@@ -338,15 +359,7 @@ export class RVTransportSurface implements RVComponent {
       this._selTopSurface = surf;
     }
 
-    // Subtree AABB → local centre for the arrow origin.
-    const box = new Box3().setFromObject(this.node);
-    const center = new Vector3();
-    const size = new Vector3();
-    box.getCenter(center);
-    box.getSize(size);
-    if (!Number.isFinite(size.x) || size.lengthSq() === 0) return;
-    const localOrigin = this.node.worldToLocal(center.clone());
-
+    // ── Flat block arrow lying on the top face, pointing along the belt. ──
     // Use the surface's LOCAL transport axis directly — the arrow sits under
     // `this.node` and inherits its world transform, so the local axis is
     // exactly the right input. This is what keeps the gizmo glued to the
@@ -356,62 +369,165 @@ export class RVTransportSurface implements RVComponent {
     if (localDir.lengthSq() === 0) return;
     localDir.normalize();
 
+    // Project onto the local XZ plane (the arrow lies flat). Skip when the
+    // transport is (near-)vertical — a flat arrow would be meaningless.
+    const dx = localDir.x;
+    const dz = localDir.z;
+    const dlen = Math.hypot(dx, dz);
+    if (dlen < 1e-4) return;
+    const ndx = dx / dlen;
+    const ndz = dz / dlen;
+
     // Fixed 0.5 m arrow in WORLD space. The arrow is parented to `this.node`,
-    // so its length is interpreted in node-local units — divide by the node's
+    // so its size is interpreted in node-local units — divide by the node's
     // world scale along the arrow direction so it renders at a true 0.5 m
     // regardless of any scale baked into the surface (e.g. library placements).
     const ARROW_WORLD_LENGTH = 0.5; // metres
     const ws = new Vector3();
     this.node.getWorldScale(ws);
-    const scaleAlongDir = Math.hypot(ws.x * localDir.x, ws.y * localDir.y, ws.z * localDir.z) || 1;
-    const length = ARROW_WORLD_LENGTH / scaleAlongDir;
-    const arrow = new ArrowHelper(
-      localDir,
-      localOrigin,
-      length,
-      0x00ddff,         // cyan — high contrast on most scene backgrounds
-      length * 0.18,    // head length
-      length * 0.10,    // head width
-    );
-    arrow.line.renderOrder = 2002;
-    arrow.cone.renderOrder = 2002;
-    type LineMat = { depthTest: boolean };
-    type MeshMat = { depthTest: boolean; depthWrite: boolean; transparent: boolean };
-    (arrow.line.material as unknown as LineMat).depthTest = false;
-    const coneMat = arrow.cone.material as unknown as MeshMat;
-    coneMat.depthTest = false;
-    coneMat.depthWrite = false;
-    coneMat.transparent = true;
+    const scaleAlongDir = Math.hypot(ws.x * ndx, ws.z * ndz) || 1;
+    const L = ARROW_WORLD_LENGTH / scaleAlongDir;
+
+    const arrow = new Mesh(this._buildArrowGeometry(L), new MeshBasicMaterial({
+      color: 0x33b5ff,           // bright blue
+      transparent: true,
+      opacity: 0.6,
+      side: DoubleSide,
+      depthTest: false,
+      depthWrite: false,
+    }));
+    // Aim local +X along the (XZ-projected) transport direction. A +Y rotation
+    // by φ maps +X → (cosφ, 0, -sinφ), so φ = atan2(-dz, dx).
+    arrow.rotation.y = Math.atan2(-ndz, ndx);
+    // Sit just above the belt top so it never z-fights with the surface.
+    const eps = Math.max(lmax.y - lmin.y, 1e-3) * 0.02 + 1e-4;
+    arrow.position.set(cx, lmax.y + eps, cz);
+    arrow.renderOrder = 2002;
     arrow.userData._highlightOverlay = true;
     arrow.raycast = () => { /* never a click target */ };
     this.node.add(arrow);
     this._selArrow = arrow;
   }
 
+  /**
+   * Flat block-arrow geometry of total length `L`, pointing +X and lying in the
+   * local XZ plane (normal +Y). Classic wide silhouette — rectangular shaft
+   * tipped by a triangular head — with softly ROUNDED corners for a modern look.
+   * Centred on the origin along its length.
+   */
+  private _buildArrowGeometry(L: number): ShapeGeometry {
+    const headLen = L * 0.42;
+    const shaftLen = L - headLen;
+    const halfShaft = L * 0.18 * 0.5; // shaft width ≈ 0.18·L (slimmer)
+    const halfHead = L * 0.46 * 0.5;  // head  width ≈ 0.46·L (slimmer)
+    const x0 = -L / 2;                // tail
+    const xShaft = x0 + shaftLen;     // shaft → head transition
+    const xTip = L / 2;               // tip
+
+    // CCW outline (7 corners): tail-bottom → shaft → barb → tip → barb → shaft → tail-top.
+    const pts = [
+      new Vector2(x0, -halfShaft),
+      new Vector2(xShaft, -halfShaft),
+      new Vector2(xShaft, -halfHead),
+      new Vector2(xTip, 0),
+      new Vector2(xShaft, halfHead),
+      new Vector2(xShaft, halfShaft),
+      new Vector2(x0, halfShaft),
+    ];
+
+    const shape = this._roundedShape(pts, L * 0.07); // fillet radius ≈ 7% of length
+    const geo = new ShapeGeometry(shape, 16);        // 16 segments per fillet → smooth arcs
+    geo.rotateX(-Math.PI / 2);                       // XY shape → flat in XZ (still points +X)
+    return geo;
+  }
+
+  /**
+   * Build a closed `Shape` from an ordered polygon with each corner rounded by a
+   * quadratic fillet of radius `r` (clamped per-corner so it never overruns a
+   * short edge). The corner vertex is the curve's control point.
+   */
+  private _roundedShape(points: Vector2[], r: number): Shape {
+    const s = new Shape();
+    const n = points.length;
+    const vPrev = new Vector2();
+    const vNext = new Vector2();
+    const before = new Vector2();
+    const after = new Vector2();
+    for (let i = 0; i < n; i++) {
+      const prev = points[(i - 1 + n) % n];
+      const curr = points[i];
+      const next = points[(i + 1) % n];
+      vPrev.subVectors(prev, curr);
+      vNext.subVectors(next, curr);
+      const rEff = Math.min(r, vPrev.length() * 0.5, vNext.length() * 0.5);
+      before.copy(curr).addScaledVector(vPrev.normalize(), rEff);
+      after.copy(curr).addScaledVector(vNext.normalize(), rEff);
+      if (i === 0) s.moveTo(before.x, before.y);
+      else s.lineTo(before.x, before.y);
+      s.quadraticCurveTo(curr.x, curr.y, after.x, after.y);
+    }
+    s.closePath();
+    return s;
+  }
+
   private _hideSelectionGizmo(): void {
     if (this._selTopSurface) {
       this._selTopSurface.parent?.remove(this._selTopSurface);
       this._selTopSurface.geometry.dispose();
-      (this._selTopSurface.material as MeshBasicMaterial).dispose();
+      (this._selTopSurface.material as LineBasicMaterial).dispose();
       this._selTopSurface = null;
     }
     if (this._selArrow) {
       this._selArrow.parent?.remove(this._selArrow);
-      this._selArrow.dispose();
+      this._selArrow.geometry.dispose();
+      (this._selArrow.material as MeshBasicMaterial).dispose();
       this._selArrow = null;
     }
   }
 
-  /** AABB of all mesh descendants expressed in `this.node`'s LOCAL frame.
-   *  Returns null if the subtree has no mesh geometry. */
-  private _computeLocalAABB(): Box3 | null {
+  /** True if `node` (a descendant of `this.node`) carries its own
+   *  TransportSurface component — i.e. it's a NESTED surface to prune. */
+  private _isNestedSurfaceNode(node: Object3D): boolean {
+    const reg = this._selRegistry;
+    if (!reg?.getPathForNode || !reg.getByPath) return false;
+    const path = reg.getPathForNode(node);
+    return path ? reg.getByPath('TransportSurface', path) != null : false;
+  }
+
+  /** True if `node` carries a Sensor component. A sensor parented under the
+   *  surface BELONGS to it, so its (and its children's) geometry must not bloat
+   *  the belt footprint. The marker is written by the naming-convention scan
+   *  (`applyKinematicsSpec`) before any component `init`, so it is already
+   *  present when the collision AABB is built — no registry lookup needed. */
+  private _isSensorNode(node: Object3D): boolean {
+    return node.userData?.realvirtual?.Sensor != null;
+  }
+
+  /** Baked geometry duplicates created by the raycast-BVH / merge passes
+   *  (`__raycastBVH_*`, `__kinGroupMerge_*`, static-uber merges). They bundle the
+   *  WHOLE drive subtree — including the sensor — into one child of the surface,
+   *  so counting them would re-add the sensor geometry the sensor-prune already
+   *  removed. The original source meshes (hidden by the merge, but with geometry
+   *  intact) are still traversed, so the real belt bounds are unaffected. These
+   *  helpers are built AFTER init, so excluding them also makes the bounds
+   *  order-independent (correct whether computed before or after those passes). */
+  private _isBakedHelper(node: Object3D): boolean {
+    const ud = node.userData;
+    return !!(ud && (ud._rvRaycastBVH || ud._rvKinGroupMerged || ud._rvStaticUberMerged));
+  }
+
+  /** Accumulate the local-frame AABB of all mesh descendants, PRUNING any
+   *  subtree whose root satisfies `prune` or is a baked grouping helper (the
+   *  surface node itself is never pruned). Returns null if no mesh geometry found. */
+  private _accumulateLocalAABB(prune: (obj: Object3D) => boolean): Box3 | null {
     const box = new Box3();
     const invNode = new Matrix4().copy(this.node.matrixWorld).invert();
     const m = new Matrix4();
     const tmp = new Box3();
     let found = false;
-    this.node.traverse((child) => {
-      const mesh = child as Mesh;
+    const visit = (obj: Object3D) => {
+      if (obj !== this.node && (this._isBakedHelper(obj) || prune(obj))) return; // skip this subtree
+      const mesh = obj as Mesh;
       if (mesh.isMesh && mesh.geometry) {
         if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
         const gb = mesh.geometry.boundingBox;
@@ -422,8 +538,28 @@ export class RVTransportSurface implements RVComponent {
           found = true;
         }
       }
-    });
+      for (const c of obj.children) visit(c);
+    };
+    visit(this.node);
     return found ? box : null;
+  }
+
+  /** Like `_computeLocalAABB` but ALSO prunes nested transport-surface subtrees,
+   *  so the selection gizmo of a parent surface reflects only its own belt
+   *  (child sensors are excluded by both, keeping gizmo and collision in sync). */
+  private _computeGizmoAABB(): Box3 | null {
+    return this._accumulateLocalAABB(
+      (o) => this._isSensorNode(o) || this._isNestedSurfaceNode(o),
+    );
+  }
+
+  /** AABB of all mesh descendants expressed in `this.node`'s LOCAL frame, with
+   *  child-sensor subtrees excluded (a sensor under the surface belongs to it
+   *  and must not inflate the belt footprint). Returns null if no mesh geometry
+   *  was found. Nested transport surfaces are intentionally still included here
+   *  (the collision footprint, unlike the gizmo, keeps them). */
+  private _computeLocalAABB(): Box3 | null {
+    return this._accumulateLocalAABB((o) => this._isSensorNode(o));
   }
 
   /**
@@ -445,6 +581,9 @@ export class RVTransportSurface implements RVComponent {
     plane.position.set((min.x + max.x) / 2, max.y, (min.z + max.z) / 2);
     plane.scale.set(sx, 1, sz);
     plane.userData._rvDropSurface = true;
+    // Back-reference so a drop raycast hit can recover this surface (e.g. the
+    // planner's lateral snap-to-centre when an object lands on the belt).
+    plane.userData._rvDropSurfaceInstance = this;
     plane.updateMatrixWorld(true);
     return plane;
   }
@@ -565,6 +704,21 @@ export class RVTransportSurface implements RVComponent {
       // be lost on return, freezing instanced MUs on the belt. `setPosition()` writes
       // back into the pool's Float32Array, so both backends advance correctly.
       _scratchVecA.copy(mu.getPosition()).add(_movement);
+
+      // Drag the MU toward the belt's center line (lateral only — keep height &
+      // forward progress). cross = horizontal axis ⟂ transport direction; the MU
+      // is eased back along it by CENTER_MU_LERP each tick so off-centre parts
+      // settle to the middle of the belt while moving. `this.aabb.center` is the
+      // world-space belt centre, refreshed by updateAABB() earlier this tick.
+      _crossAxis.copy(this.direction).cross(WORLD_UP);
+      const crossLen = _crossAxis.length();
+      if (crossLen > 1e-4) {
+        _crossAxis.multiplyScalar(1 / crossLen);
+        // Signed lateral offset of the MU from the centre line, then ease back.
+        const lateral = _scratchVecA.dot(_crossAxis) - this.aabb.center.dot(_crossAxis);
+        _scratchVecA.addScaledVector(_crossAxis, -lateral * CENTER_MU_LERP);
+      }
+
       mu.setPosition(_scratchVecA);
     }
   }
@@ -583,6 +737,31 @@ export class RVTransportSurface implements RVComponent {
   getWorldDirection(out: Vector3 = new Vector3()): Vector3 {
     this._refreshWorldDirection();
     return out.copy(this.direction);
+  }
+
+  /**
+   * Snap a world-space point onto the belt's lateral centre line — the line
+   * through the surface centre running along the transport direction. Only the
+   * cross-belt (lateral) offset is removed; the point keeps its along-belt
+   * position and its Y. Mutates and returns `point`. Used by the planner to
+   * centre objects dropped onto the belt. No-op for a (near-)vertical transport
+   * direction (no horizontal centre line exists).
+   */
+  snapToCenterLine(point: Vector3): Vector3 {
+    const dir = this.getWorldDirection(_centerLineDir);
+    let dx = dir.x;
+    let dz = dir.z;
+    const len = Math.hypot(dx, dz);
+    if (len < 1e-4) return point;
+    dx /= len;
+    dz /= len;
+    const cx = this.aabb.center.x;
+    const cz = this.aabb.center.z;
+    // Project the point onto the centre line and drop the perpendicular offset.
+    const along = (point.x - cx) * dx + (point.z - cz) * dz;
+    point.x = cx + along * dx;
+    point.z = cz + along * dz;
+    return point;
   }
 
   /**

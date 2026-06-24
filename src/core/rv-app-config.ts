@@ -9,6 +9,7 @@
  */
 
 import type { VisualSettings } from './hmi/visual-settings-store';
+import type { RenderMode } from './rv-render-modes';
 import type { InterfaceSettings } from '../interfaces/interface-settings-store';
 import type { SearchSettings } from './hmi/search-settings-store';
 import type { UIVisibilityRule } from './hmi/ui-context-store';
@@ -51,8 +52,9 @@ export interface RVAppConfig {
    */
   externalPlugins?: boolean;
 
-  /** Partial overrides merged on top of localStorage values. */
-  visual?: Partial<VisualSettings>;
+  /** Partial overrides merged on top of localStorage values.
+   *  Accepts the legacy `lightingMode` key (renamed to `renderMode`) for back-compat. */
+  visual?: Partial<VisualSettings> & { lightingMode?: RenderMode };
   interface?: Partial<InterfaceSettings>;
   search?: Partial<SearchSettings>;
 
@@ -69,6 +71,8 @@ export interface RVAppConfig {
   analytics?: {
     /** Google Analytics 4 Measurement ID (e.g. "G-XXXXXXXXXX"). Omit to disable tracking. */
     googleAnalyticsId?: string;
+    /** Privacy-policy URL linked from the consent gate. Omit to hide the link. */
+    privacyPolicyUrl?: string;
   };
 }
 
@@ -145,13 +149,21 @@ export async function fetchAppConfig(): Promise<RVAppConfig> {
 
 // ─── Analytics ────────────────────────────────────────────────
 
+let _analyticsInjected = false;
+
 /**
  * Inject Google Analytics 4 if configured in settings.json.
  * No-op when `analytics.googleAnalyticsId` is absent — AGPL source ships clean.
+ *
+ * Idempotent: only injects once. GA is a non-essential tracker, so callers
+ * MUST gate this behind consent (see consent-gate / consent-store) — main.ts
+ * only calls it after the consent gate resolves.
  */
 export function initAnalytics(): void {
+  if (_analyticsInjected) return;
   const gaId = _config.analytics?.googleAnalyticsId;
   if (!gaId) return;
+  _analyticsInjected = true;
 
   // Inject gtag.js script
   const script = document.createElement('script');
@@ -163,8 +175,22 @@ export function initAnalytics(): void {
   const w = window as unknown as Record<string, unknown>;
   w.dataLayer = w.dataLayer || [];
   function gtag(...args: unknown[]) { (w.dataLayer as unknown[]).push(args); }
+  // Expose gtag globally so trackAnalyticsEvent() can fire GA4 custom events.
+  w.gtag = gtag;
   gtag('js', new Date());
   gtag('config', gaId);
 
   debug('config', `Google Analytics initialized: ${gaId}`);
+}
+
+/**
+ * Fire a GA4 custom event. No-op when analytics was never injected (no id
+ * configured, or consent not granted) — gtag is only present after initAnalytics.
+ * Used to distinguish what the visitor is looking at (e.g. standard demo model
+ * vs. planner workspace) without any extra tracking infrastructure.
+ */
+export function trackAnalyticsEvent(name: string, params?: Record<string, unknown>): void {
+  const gtag = (window as unknown as { gtag?: (...args: unknown[]) => void }).gtag;
+  if (!gtag) return;
+  gtag('event', name, params ?? {});
 }

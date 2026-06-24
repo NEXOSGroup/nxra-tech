@@ -452,7 +452,7 @@ export class LayoutStore {
       const gs = localStorage.getItem(LS_KEY_GRID_SIZE);
       if (gs !== null) {
         const n = Number(gs);
-        if (!Number.isNaN(n) && n > 0) this._gridSizeMm = n;
+        if (!Number.isNaN(n) && n >= 0) this._gridSizeMm = n; // 0 = translation snap off
       }
       const rs = localStorage.getItem(LS_KEY_ROTATION_SNAP);
       if (rs !== null) {
@@ -1030,8 +1030,8 @@ export class LayoutStore {
   }
 
   setGridSize(mm: number): void {
-    this._gridSizeMm = mm;
-    try { localStorage.setItem(LS_KEY_GRID_SIZE, String(mm)); } catch { /* ignore */ }
+    this._gridSizeMm = Math.max(0, mm); // 0 = translation snap off (grid not drawn)
+    try { localStorage.setItem(LS_KEY_GRID_SIZE, String(this._gridSizeMm)); } catch { /* ignore */ }
     this._notify();
   }
 
@@ -1098,6 +1098,10 @@ export class LayoutStore {
   get selectedId(): string | null { return this._selectedId; }
   get gridEnabled(): boolean { return this._gridEnabled; }
   get gridSizeMm(): number { return this._gridSizeMm; }
+  /** Translation grid is "on" only when enabled AND a non-zero step is set.
+   *  A 0 mm step means translation snapping is off and the grid is not drawn
+   *  (rotation snap stays governed by `gridEnabled` alone). */
+  get gridActive(): boolean { return this._gridEnabled && this._gridSizeMm > 0; }
   get rotationSnapDeg(): number { return this._rotationSnapDeg; }
   get dropToSurface(): boolean { return this._dropToSurface; }
   get bboxSnapEnabled(): boolean { return this._bboxSnapEnabled; }

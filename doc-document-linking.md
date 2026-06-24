@@ -246,6 +246,7 @@ export function registerModelPlugins(viewer: RVViewer): void {
 The built-in PDF viewer overlay (`DocViewerOverlay`) automatically renders when a PDF link is clicked. It supports:
 - Page navigation
 - Zoom controls
+- In-document search — the toolbar search box highlights all matches on the page and jumps between matches across pages (`Enter` / `Shift+Enter` for next / previous). The per-page text index is built lazily on first search and cached for the open document.
 - Open in new tab
 - Loading from URLs or blob extraction from AASX ZIPs
 

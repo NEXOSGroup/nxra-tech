@@ -11,6 +11,7 @@ import { AABB } from './rv-aabb';
 import { classifyShadows } from './rv-mesh-classifier';
 import { registerCapabilities } from './rv-component-registry';
 import type { RVTransportSurface } from './rv-transport-surface';
+import type { MUDissolve, MUGrow } from './rv-mu-dissolve';
 
 // Pre-allocated temp vector for getWorldPosition (no GC in hot path)
 const _tmpWorldPos = new Vector3();
@@ -49,6 +50,11 @@ export class RVMovingUnit implements IMUAccessor {
   /** Which transport surface is currently moving this MU (null = free) */
   currentSurface: RVTransportSurface | null = null;
 
+  /** Most recent surface that drove this MU; survives the MU running off the end
+   *  (when `currentSurface` becomes null) so the end-of-line vanish can still
+   *  check THAT surface's outgoing-snap connectivity. */
+  lastSurface?: RVTransportSurface | null;
+
   /** Marked for removal by Sink */
   markedForRemoval = false;
 
@@ -68,6 +74,36 @@ export class RVMovingUnit implements IMUAccessor {
    *  previous tick (`lastSurfaceTickId === currentTickId - 1`), so a freshly
    *  entered MU is not snapped by a phantom one-tick rotation. */
   lastSurfaceTickId?: number;
+
+  /** True once this MU has been carried by any transport surface. Gates the
+   *  end-of-line vanish so freshly-spawned MUs (not yet on a belt) aren't
+   *  deleted. See `RVTransportManager.vanishMUsAtEndOfLine`. */
+  everOnSurface?: boolean;
+
+  /** True while the MU's current (or most recent) transport surface belongs to a
+   *  planner-placed layout object. End-of-line vanish is scoped to layout
+   *  objects, and this remembers membership across the moment the MU runs off the
+   *  surface (when `currentSurface` becomes null). See
+   *  `RVTransportManager.vanishMUsAtEndOfLine`. */
+  onLayoutObject?: boolean;
+
+  /** Seconds spent off ALL transport surfaces (the vanish dwell timer). Reset
+   *  to 0 whenever a surface picks the MU up again. */
+  offSurfaceTime?: number;
+
+  /** Seconds elapsed in the end-of-line dissolve animation (set once the dwell
+   *  timer expires; counts up to `RVTransportManager.vanishDurationSec`). */
+  vanishElapsed?: number;
+
+  /** Active dissolve effect (cloned burn materials) while this MU is vanishing.
+   *  Disposed on removal or if the MU is picked up again before it finishes. */
+  dissolve?: MUDissolve | null;
+
+  /** Active spawn grow-out effect (cloned clip materials) while this MU is
+   *  growing out of its source. Distance/vector based: a fixed world clip plane
+   *  the MU slides through as it travels. Disposed once fully emerged or on
+   *  removal. */
+  grow?: MUGrow | null;
 
   /** MU half-extents in its OWN local frame (spawn orientation), captured at
    *  construction. `updateAABB()` re-derives the world axis-aligned footprint
@@ -145,6 +181,12 @@ export class RVMovingUnit implements IMUAccessor {
    * and all other MU clones. Template geometries are disposed in clearModel().
    */
   dispose(): void {
+    // Restore + free any end-of-line dissolve materials we cloned (the originals
+    // are shared with the template and must stay alive).
+    this.dissolve?.dispose();
+    this.dissolve = null;
+    this.grow?.dispose();
+    this.grow = null;
     this.node.parent?.remove(this.node);
     // Do NOT dispose geometry here — it is shared by reference with the
     // template via Object3D.clone(). Disposing would corrupt all clones.
@@ -209,11 +251,23 @@ export class InstancedMovingUnit implements IMUAccessor {
   /** Which transport surface is currently moving this MU (null = free) */
   currentSurface: RVTransportSurface | null = null;
 
+  /** See `RVMovingUnit.lastSurface`. */
+  lastSurface?: RVTransportSurface | null;
+
   /** Marked for removal by Sink */
   markedForRemoval = false;
 
   /** See `RVMovingUnit.lastSurfaceTickId`. */
   lastSurfaceTickId?: number;
+
+  /** See `RVMovingUnit.everOnSurface`. */
+  everOnSurface?: boolean;
+
+  /** See `RVMovingUnit.onLayoutObject`. */
+  onLayoutObject?: boolean;
+
+  /** See `RVMovingUnit.offSurfaceTime`. */
+  offSurfaceTime?: number;
 
   /** Pool that owns this instance */
   private pool: MUInstancePool;

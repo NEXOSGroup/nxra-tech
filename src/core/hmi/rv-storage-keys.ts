@@ -5,6 +5,7 @@
 
 export const ALL_RV_STORAGE_KEYS = [
   'rv-visual-settings',
+  'rv-visual-presets',
   'rv-search-settings',
   'rv-interface-settings',
   'rv-webviewer-last-model',
@@ -44,6 +45,8 @@ export const ALL_RV_STORAGE_KEYS = [
   'rv-models-window-open',
   'rv-local-folders',
   'rv-splat-transform',  // legacy — transforms now managed via PlacedComponent
+  'rv-analytics-consent',  // GDPR analytics opt-in (consent-store)
+  'rv-welcome-dismissed',  // WelcomeModal "Got it" flag (ButtonPanel) — reset re-shows the welcome box
 ] as const;
 
 /**

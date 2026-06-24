@@ -3,7 +3,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { Object3D, Mesh, BoxGeometry, MeshBasicMaterial } from 'three';
-import { computeBeamFromBounds, RVSensor } from '../src/core/engine/rv-sensor';
+import { computeBeamFromBounds, findRayChild, RVSensor } from '../src/core/engine/rv-sensor';
 import { AABB } from '../src/core/engine/rv-aabb';
 import type { ComponentContext } from '../src/core/engine/rv-component-registry';
 
@@ -46,6 +46,67 @@ describe('computeBeamFromBounds — sensor auto-ray', () => {
   });
 });
 
+describe('computeBeamFromBounds — Ray child override', () => {
+  function makeSensorWithRay(): { root: Object3D; ray: Mesh } {
+    // Housing geometry is longest on X (would beam along X if used).
+    const root = new Object3D(); root.name = 'Sensor';
+    const housing = new Mesh(new BoxGeometry(0.8, 0.1, 0.2), new MeshBasicMaterial());
+    root.add(housing);
+    // Ray marker is longest on Z and offset off-centre.
+    const ray = new Mesh(new BoxGeometry(0.05, 0.05, 0.4), new MeshBasicMaterial());
+    ray.name = 'Ray';
+    ray.position.set(0, 0, 0.1);
+    root.add(ray);
+    return { root, ray };
+  }
+
+  it('uses the Ray child bounds, ignoring the housing geometry', () => {
+    const { root, ray } = makeSensorWithRay();
+    const beam = computeBeamFromBounds(root, findRayChild(root))!;
+    expect(beam.direction).toEqual({ x: 0, y: 0, z: 1 });   // Ray axis, not housing X
+    expect(beam.lengthMm).toBeCloseTo(400);                  // 0.4 m Ray extent
+    expect(beam.originOffset.x).toBeCloseTo(0);
+    expect(beam.originOffset.y).toBeCloseTo(0);
+    expect(beam.originOffset.z).toBeCloseTo(-0.1);           // min face: 0.1 - 0.2
+    void ray;
+  });
+
+  it('falls back to full-node bounds when the Ray marker has no geometry', () => {
+    const root = new Object3D(); root.name = 'Sensor';
+    const housing = new Mesh(new BoxGeometry(0.8, 0.1, 0.2), new MeshBasicMaterial());
+    root.add(housing);
+    const ray = new Object3D(); ray.name = 'Ray'; root.add(ray);   // empty marker
+    const beam = computeBeamFromBounds(root, findRayChild(root))!;
+    expect(beam.direction).toEqual({ x: 1, y: 0, z: 0 });   // housing X axis
+    expect(beam.lengthMm).toBeCloseTo(800);
+  });
+
+  it('findRayChild locates the Ray node and returns null when absent', () => {
+    const { root, ray } = makeSensorWithRay();
+    expect(findRayChild(root)).toBe(ray);
+    const bare = new Object3D(); bare.name = 'Sensor';
+    bare.add(new Mesh(new BoxGeometry(0.1, 0.1, 0.5), new MeshBasicMaterial()));
+    expect(findRayChild(bare)).toBeNull();
+  });
+
+  it('findRayChild tolerates glTF/Unity duplicate-name suffixes on the Ray child', () => {
+    // Two sensors each authored a "Ray" child → the glTF loader renames the
+    // second to "Ray_1". A node named just "Ray" must NOT be required.
+    for (const rayName of ['Ray_1', 'Ray_2', 'Ray (1)', 'Ray_(1)']) {
+      const s = new Object3D(); s.name = 'Sensor-2';
+      const ray = new Mesh(new BoxGeometry(0.05, 0.05, 0.4), new MeshBasicMaterial());
+      ray.name = rayName;
+      s.add(ray);
+      expect(findRayChild(s)).toBe(ray);
+    }
+    // Guard against over-matching unrelated names.
+    const s = new Object3D(); s.name = 'Sensor';
+    s.add(Object.assign(new Mesh(new BoxGeometry(0.1, 0.1, 0.1), new MeshBasicMaterial()), { name: 'RayCast' }));
+    s.add(Object.assign(new Mesh(new BoxGeometry(0.1, 0.1, 0.1), new MeshBasicMaterial()), { name: 'Ray_Beam' }));
+    expect(findRayChild(s)).toBeNull();
+  });
+});
+
 describe('RVSensor — per-instance signal scoping', () => {
   function makeCtx() {
     const registered: { name: string; path: string }[] = [];
@@ -77,5 +138,24 @@ describe('RVSensor — per-instance signal scoping', () => {
     const { ctx, registered } = makeCtx();
     sensor.init(ctx);
     expect(registered[0].name).toBe('Sensor');
+  });
+
+  it('AutoRay derives the beam from a Ray child and hides the marker', () => {
+    const sensorNode = new Object3D(); sensorNode.name = 'Sensor';
+    const housing = new Mesh(new BoxGeometry(0.8, 0.1, 0.2), new MeshBasicMaterial());
+    sensorNode.add(housing);
+    const ray = new Mesh(new BoxGeometry(0.05, 0.05, 0.4), new MeshBasicMaterial());
+    ray.name = 'Ray';
+    sensorNode.add(ray);
+
+    const sensor = new RVSensor(sensorNode, new AABB());
+    sensor.AutoRay = true;
+    const { ctx } = makeCtx();
+    sensor.init(ctx);
+
+    expect(sensor.UseRaycast).toBe(true);
+    expect(sensor.RayCastDirection).toEqual({ x: 0, y: 0, z: 1 }); // Ray axis, not housing X
+    expect(sensor.RayCastLength).toBeCloseTo(400);
+    expect(ray.visible).toBe(false); // marker hidden once used
   });
 });

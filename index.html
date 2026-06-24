@@ -13,6 +13,21 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100dvh; height: 100vh; overflow: hidden; background: #9a9a9a; }
+
+    /* --- Global scrollbar styling ---
+       Transparent track (no white background); the thumb is invisible by default
+       and only fades in while the scrollable container is hovered. Applied
+       app-wide so every UI window matches — including native scrollbars that
+       don't use the .rv-scroll helper class. */
+    * { scrollbar-width: thin; scrollbar-color: transparent transparent; }
+    *:hover { scrollbar-color: rgba(255, 255, 255, 0.25) transparent; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: transparent; border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+    *:hover::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.22); }
+    *:hover::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.38); }
+    ::-webkit-scrollbar-button { display: none !important; }
+    ::-webkit-scrollbar-corner { background: transparent; }
     /* Scale up react-root overlay on touch devices so buttons/text are physically large enough.
        The 3D canvas is unaffected. On phones the viewport is ~360-430px CSS-wide but
        devicePixelRatio is 2-3x, making CSS-px physically tiny. */
@@ -209,7 +224,7 @@
     #rv-watermark {
       position: fixed;
       bottom: 60px;
-      right: 16px;
+      right: 8px;
       z-index: 9999;
       font-family: 'Segoe UI', sans-serif;
       font-size: 13px;

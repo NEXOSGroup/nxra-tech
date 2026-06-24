@@ -13,7 +13,7 @@
 import { Vector3 } from 'three';
 import type { Object3D } from 'three';
 import type { SnapPointPlugin } from '../../plugins/snap-point';
-import { findTransport } from '../../core/library-component-loader';
+import { findAll, NODE_KIND_TESTS } from '../../core/library-component-loader';
 
 export interface SnapLite {
   readonly id: string;
@@ -173,23 +173,37 @@ export function classifyConnections(host: ClassifyHost, root: Object3D): PortCon
     let role: 'input' | 'output' = roleFromFlow(sp.flow);
 
     // Try to refine from the connected conveyor's transport direction.
-    const transportNode = compReg ? findTransport(ownerRoot) : null;
-    const surface = transportNode
-      ? compReg!.findInChildren<TransportSurfaceLike>(transportNode, 'TransportSurface')
-      : null;
-    if (surface) {
-      surface.getWorldDirection(_dir);
-      // Reference vector: from the mating connection point toward the TURNTABLE
-      // CENTRE (`root`). A belt moving toward the centre feeds the table (input);
-      // one moving away discharges from it (output). Using the turntable centre —
-      // NOT the connected conveyor's root origin — keeps the sign correct for
-      // conveyors with an off-centre pivot (origin at the discharge end), a common
-      // library-asset case that otherwise flipped the classification.
+    // Reference vector: from the mating connection point toward the TURNTABLE
+    // CENTRE (`root`). A belt moving toward the centre feeds the table (input);
+    // one moving away discharges from it (output). Using the turntable centre —
+    // NOT the connected conveyor's root origin — keeps the sign correct for
+    // conveyors with an off-centre pivot (origin at the discharge end), a common
+    // library-asset case that otherwise flipped the classification.
+    if (compReg) {
       partner.object3D.getWorldPosition(_matingPos);
       root.getWorldPosition(_tableCentre);
       _toCentre.copy(_tableCentre).sub(_matingPos);
-      const proj = _dir.dot(_toCentre);
-      if (Math.abs(proj) > 1e-4) role = proj > 0 ? 'input' : 'output';
+
+      // A partner may carry SEVERAL transport surfaces (e.g. a ChainTransfer has
+      // both a straight roller line and a perpendicular cross chain). Picking the
+      // first one found would read a surface that is ~perpendicular to this
+      // connection (projection ≈ 0) and silently fall back to the authored flow —
+      // which for a forced-bidi turntable port resolves to 'output', so the table
+      // never recognises the upstream and the handover stalls. Evaluate ALL of the
+      // partner's transport surfaces and keep the one most aligned with the
+      // connection axis (largest |projection|). Single-surface partners are
+      // unaffected — the result is identical to the first-match behaviour.
+      let bestProj = 0;
+      let bestAbs = 1e-4;
+      for (const tNode of findAll(ownerRoot, NODE_KIND_TESTS.transport)) {
+        const surface = compReg.findInChildren<TransportSurfaceLike>(tNode, 'TransportSurface');
+        if (!surface) continue;
+        surface.getWorldDirection(_dir);
+        const proj = _dir.dot(_toCentre);
+        const abs = Math.abs(proj);
+        if (abs > bestAbs) { bestAbs = abs; bestProj = proj; }
+      }
+      if (bestProj !== 0) role = bestProj > 0 ? 'input' : 'output';
     }
 
     out.push({ role, ownerRoot, snap: sp, pairedSnap: partner });

@@ -45,6 +45,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import type { Pass } from 'three/addons/postprocessing/Pass.js';
 import type { AOMode } from './hmi/visual-settings-store';
 import { PostProcessingManager, type PostProcessingHost } from './rv-post-processing';
+import { RVToonMaterialManager } from './rv-toon-materials';
 import { createGroundFade, drawCheckerPattern } from './engine/rv-ground-plane';
 import { createGroundReflector, setReflectorStrength, setReflectorBlur } from './engine/rv-ground-reflector';
 import type { Reflector } from 'three/addons/objects/Reflector.js';
@@ -54,16 +55,21 @@ import {
   getSourceMarkersVisible,
   setSourceMarkersVisible as setSourceMarkersVisibleStore,
   subscribeSourceMarkersVisible,
+  getVanishMUs,
+  setVanishMUs as setVanishMUsStore,
+  subscribeVanishMUs,
 } from './hmi/visual-settings-store';
 import { CameraManager, type ViewportOffset } from './rv-camera-manager';
 import { VisualSettingsManager } from './rv-visual-settings-manager';
+import { getRenderMode, type RenderMode } from './rv-render-modes';
 import Stats from 'stats-gl';
 
 import { EventEmitter } from './rv-events';
 import { debug, logInfo } from './engine/rv-debug';
+import { createLoadProfiler } from './engine/rv-load-profiler';
 import { loadModelSettingsConfig } from './hmi/rv-settings-bundle';
 import { DRAG_THRESHOLD_PX, DEFAULT_DPR_CAP, NO_AO_LAYER } from './engine/rv-constants';
-import { loadGLB, type LoadResult } from './engine/rv-scene-loader';
+import { loadGLB, createRuntimeNode, removeRuntimeNode, type LoadResult, type RuntimeNodeSpec } from './engine/rv-scene-loader';
 import type { RVExtrasOverlay } from './engine/rv-extras-overlay-store';
 import type { RvScene } from './hmi/scene/rv-scene-types';
 import type { PlacementsSnapshot } from './rv-shared-types';
@@ -88,6 +94,7 @@ import type { SignalStore } from './engine/rv-signal-store';
 import type { RVDrivesPlayback } from './engine/rv-drives-playback';
 import type { RVReplayRecording } from './engine/rv-replay-recording';
 import type { RVLogicEngine } from './engine/rv-logic-engine';
+import type { RVIKPath } from './engine/rv-ik-path';
 import type { NodeRegistry, NodeSearchResult } from './engine/rv-node-registry';
 import { TankFillManager } from './engine/rv-tank-fill';
 import { PipeFlowManager } from './engine/rv-pipe-flow';
@@ -120,7 +127,9 @@ import { ContextMenuStore } from './hmi/context-menu-store';
 import type { ContextMenuTarget } from './hmi/context-menu-store';
 import type { SelectionSnapshot } from './engine/rv-selection-manager';
 import { isMobileDevice } from '../hooks/use-mobile-layout';
-import { resetDynamicContexts } from './hmi/ui-context-store';
+import { resetDynamicContexts, setContext } from './hmi/ui-context-store';
+import { ModeManager, computeModePluginSets, modeContext } from './rv-mode-manager';
+import type { ModeId, ModeHost, ModePluginSets } from './rv-mode-manager';
 import { getAppConfig } from './rv-app-config';
 import { PluginContextImpl } from './rv-plugin-context';
 import { SceneFacadeImpl } from './facades/scene-facade';
@@ -164,6 +173,15 @@ const BG_BASE_SCALAR = 0x9a / 255;
 // A long, gentle fade reads better than a hard cut — hence END >> START.
 const FLOOR_FADE_START_RATIO = 1.5;  // × model max half-extent
 const FLOOR_FADE_END_RATIO   = 6.0;  // × model max half-extent (fade length = 4.5×)
+
+// Minimum floor full-extent (metres) for AUTHORING contexts (empty scene /
+// layout planner). Keeps a freshly-emptied scene or a layout that only holds a
+// few small parts from sitting on a tiny checker disc. Matches the synthesized
+// empty-playground extent (see loadModel's empty-bbox branch) so an empty
+// workspace and one holding a single small part read at the same scale.
+// NOT applied to plain model loads — those keep an exact model fit so existing
+// demo-scene framing is unchanged.
+const MIN_AUTHORING_GROUND_EXTENT = 15;
 
 // ─── Plugin Error Isolation ──────────────────────────────────────────────
 
@@ -346,6 +364,8 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   signalStore: SignalStore | null = null;
   registry: NodeRegistry | null = null;
   drives: RVDrive[] = [];
+  /** Robot IK paths (replay engine) — ticked before the drive loop each fixed step. */
+  ikPaths: RVIKPath[] = [];
   /** Unified raycast manager (replaces the old driveHover). */
   raycastManager: RaycastManager | null = null;
   transportManager: RVTransportManager | null = null;
@@ -431,6 +451,12 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   private readonly _unifiedSim = isUnifiedSimEnabled();
   /** IDs of plugins that have been disabled via disablePlugin(). */
   private _disabledIds = new Set<string>();
+  /**
+   * IDs of plugins that were disabled when a model loaded and therefore MISSED
+   * their `onModelLoaded` call. `enablePlugin()` replays `_lastLoadResult` to
+   * them exactly once, then clears the entry. See plan-198 (mode system).
+   */
+  private _missedModelLoad = new Set<string>();
   /** Last successful load result (for retroactive onModelLoaded). */
   private _lastLoadResult: LoadResult | null = null;
   /** Lazy plugin factories: ID → async import factory (code-split by Vite). */
@@ -455,6 +481,23 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
 
   /** UI plugin registry for React slot rendering. */
   readonly uiRegistry = new UIPluginRegistry();
+
+  /**
+   * Workspace mode manager (plan-198) — Blender-style HMI / DES / Planner modes.
+   * Switching a mode enables/disables the participating plugins and swaps the
+   * `mode:<id>` UI context. The host adapter wires the manager to this viewer's
+   * plugin system; all calls are lazy so constructing it here (before plugins
+   * register) is safe.
+   */
+  readonly modes: ModeManager = new ModeManager({
+    viewer: this,
+    pluginsForMode: (from, to) => this.pluginsForMode(from, to),
+    enablePlugin: (id) => this.enablePlugin(id),
+    disablePlugin: (id) => this.disablePlugin(id),
+    callPlugin: (p, method, ...args) => callPlugin(p, method, ...args),
+    setContext: (ctx, active) => setContext(ctx, active),
+    emit: (event, data) => { this.emit(event, data); },
+  } satisfies ModeHost);
 
   /** Centralized left-panel coordination (mutual exclusion, ButtonPanel offset). */
   readonly leftPanelManager = new LeftPanelManager();
@@ -579,6 +622,57 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this._postPlugins = this._postPlugins.filter(p => p.id !== id);
     this._renderPlugins = this._renderPlugins.filter(p => p.id !== id);
     this._disabledIds.add(id);
+  }
+
+  /**
+   * Re-enable a plugin previously disabled via {@link disablePlugin}. Symmetric
+   * counterpart to disablePlugin: re-inserts the plugin into the cached
+   * pre/post/render lists (sorted by order), restores the physics flag, and
+   * removes it from the disabled set.
+   *
+   * If the plugin MISSED an `onModelLoaded` while it was disabled (a model
+   * loaded during that window), its `onModelLoaded` is replayed exactly once
+   * with the current `_lastLoadResult` — so a plugin enabled by a mode switch
+   * after the model is already loaded initializes correctly. No-op if the
+   * plugin is not currently disabled. See plan-198 (mode system).
+   */
+  enablePlugin(id: string): void {
+    if (!this._disabledIds.has(id)) return;
+    this._disabledIds.delete(id);
+    const plugin = this._plugins.find(p => p.id === id);
+    if (!plugin) return;
+
+    const insertSorted = (list: RVViewerPlugin[], p: RVViewerPlugin) => {
+      if (list.includes(p)) return; // defensive — avoid duplicates
+      list.push(p);
+      list.sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
+    };
+    if (plugin.onFixedUpdatePre) insertSorted(this._prePlugins, plugin);
+    if (plugin.onFixedUpdatePost) insertSorted(this._postPlugins, plugin);
+    if (plugin.onRender) insertSorted(this._renderPlugins, plugin);
+    if (plugin.handlesTransport) this._physicsPluginActive = true;
+
+    // Replay a missed onModelLoaded exactly once (mode-driven re-activation).
+    if (this._missedModelLoad.delete(id) && this._lastLoadResult) {
+      callPlugin(plugin, 'onModelLoaded', this._lastLoadResult, this);
+    }
+  }
+
+  /**
+   * @internal — Compute the plugin sets for a `from → to` mode transition.
+   * Driven by the {@link ModeManager} host adapter. `enable`/`disable` reconcile
+   * the actual active state (`_disabledIds`) against the target mode;
+   * `activateHooks`/`deactivateHooks` fire on the participation transition.
+   * Shared (`modes` undefined) and `core` plugins participate in every mode, so
+   * they never appear in any set — the backward-compat guarantee.
+   */
+  pluginsForMode(from: ModeId | null, to: ModeId): ModePluginSets {
+    return computeModePluginSets(
+      this._plugins,
+      (id) => this._disabledIds.has(id),
+      from,
+      to,
+    );
   }
 
   /**
@@ -798,9 +892,119 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this._renderDirty = true;
   }
 
+  /** Create a component node at runtime (op-log `addNode`). Returns false if the
+   *  scene isn't loaded or the parent is missing. */
+  createComponentNode(spec: RuntimeNodeSpec): boolean {
+    if (!this.registry || !this.signalStore || !this.transportManager) return false;
+    return !!createRuntimeNode({
+      registry: this.registry, signalStore: this.signalStore, scene: this.scene,
+      transportManager: this.transportManager, gizmoManager: this.gizmoManager, errorStore: this.errorStore,
+    }, spec);
+  }
+
+  /** Remove an op-created node (op-log `removeNode` / inverse of addNode). */
+  removeComponentNode(nodePath: string): void {
+    if (this.registry) removeRuntimeNode(this.registry, nodePath);
+  }
+
+  /** Re-resolve every IKPath's target list — call after op-created target nodes
+   *  are added/removed so the runtime path picks them up (they don't exist when
+   *  the IKPath first init()s during loadGLB). */
+  rebuildIKPaths(): void {
+    const reg = this.registry;
+    if (!reg) return;
+    for (const { instance } of reg.getAll<{ rebuildTargets?: (r: typeof reg) => void }>('IKPath')) {
+      instance.rebuildTargets?.(reg);
+    }
+  }
+
   /** The ground plane mesh, or null if ground was disabled. */
   get groundMesh(): Mesh | null {
     return this._groundMesh;
+  }
+
+  /**
+   * Resize + reposition the checker floor disc (and its reflection mirror) to a
+   * given centre and full extent. The 200×200 fade plane is scaled so its
+   * inscribed-circle radius equals FLOOR_FADE_END_RATIO × half-extent, the
+   * checker `repeat` is kept at a constant 0.5 m per square, and the reflector
+   * tracks the same scale/position. Single source of truth for floor sizing —
+   * called from loadModel (exact model fit), loadEmptyScene (playground), and
+   * the layout-content grow pass.
+   *
+   * @param center World-space centre; only X/Z are used (floor stays at y=0).
+   * @param fullExtent Floor full extent in metres (max of width/depth).
+   */
+  private _updateGroundPlane(center: Vector3, fullExtent: number): void {
+    if (!this._groundMesh) return;
+    const groundSize = fullExtent * FLOOR_FADE_END_RATIO;
+    this._groundMesh.scale.set(groundSize / 200, groundSize / 200, 1);
+    this._groundMesh.position.set(center.x, 0, center.z);
+
+    // Update checker texture repeat so each square is always 0.5 m.
+    const SQUARE_SIZE = 0.5;     // metres per checker square
+    const TILES_PER_REPEAT = 8;  // tiles baked into the checker texture
+    const metersPerRepeat = TILES_PER_REPEAT * SQUARE_SIZE; // 4 m
+    const checkerMap = ((this._groundMesh as Mesh).material as MeshStandardMaterial).map;
+    if (checkerMap) {
+      checkerMap.repeat.set(groundSize / metersPerRepeat, groundSize / metersPerRepeat);
+    }
+
+    // Keep the reflection mirror locked to the checker disc (same scale and
+    // X/Z position; stays a hair below to avoid z-fighting).
+    if (this._groundReflector) {
+      this._groundReflector.scale.set(groundSize / 200, groundSize / 200, 1);
+      this._groundReflector.position.set(center.x, -0.002, center.z);
+    }
+
+    this._renderDirty = true;
+  }
+
+  /** Coalesce flag so a burst of layout-transform events (e.g. a gizmo drag,
+   *  which fires once per frame) triggers at most one floor re-fit per frame. */
+  private _groundFitQueued = false;
+
+  /** Queue a floor re-fit on the next animation frame (debounces drag bursts). */
+  private _queueGroundFit(): void {
+    if (this._groundFitQueued) return;
+    this._groundFitQueued = true;
+    requestAnimationFrame(() => {
+      this._groundFitQueued = false;
+      this._fitGroundToContent();
+    });
+  }
+
+  /**
+   * Grow the checker floor so it keeps the current authoring content (model
+   * root + placed layout objects, which parent under it) on a visible disc.
+   *
+   * GROW-ONLY: the floor is only ever enlarged here, never shrunk. That keeps
+   * a small inspector nudge or a single placement from collapsing the floor of
+   * an existing scene, while still expanding it when a part is dragged or
+   * placed beyond the current disc. The baseline size is owned by loadModel /
+   * loadEmptyScene; this pass only reacts to subsequent layout edits.
+   */
+  private _fitGroundToContent(): void {
+    if (!this._groundMesh || !this.currentModel) return;
+    const box = new Box3().setFromObject(this.currentModel);
+    const center = new Vector3();
+    let fullExtent: number;
+    if (box.isEmpty()) {
+      center.set(0, 0, 0);
+      fullExtent = MIN_AUTHORING_GROUND_EXTENT;
+    } else {
+      const size = new Vector3();
+      box.getCenter(center);
+      box.getSize(size);
+      fullExtent = Math.max(size.x, size.z, MIN_AUTHORING_GROUND_EXTENT);
+    }
+    // Only apply when it would actually enlarge the disc (grow-only). Compare
+    // against the live scale (groundSize = scale.x × 200) with a small epsilon
+    // so floating-point equality doesn't churn the texture repeat each frame.
+    const currentGroundSize = this._groundMesh.scale.x * 200;
+    const desiredGroundSize = fullExtent * FLOOR_FADE_END_RATIO;
+    if (desiredGroundSize <= currentGroundSize * 1.001) return;
+    this._updateGroundPlane(center, fullExtent);
   }
 
   /** Whether the ground/floor plane is visible. No-op if ground was disabled at construction. */
@@ -1049,6 +1253,9 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   /** Unsubscribe handle for the source-markers reactive store. */
   private _sourceMarkersUnsub: (() => void) | null = null;
 
+  /** Unsubscribe handle for the vanish-MUs reactive store. */
+  private _vanishMUsUnsub: (() => void) | null = null;
+
   /**
    * Show or hide the floor markers under every Source in the current
    * scene. Persists the choice to localStorage via the
@@ -1090,6 +1297,40 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this._applySourceMarkersVisible(getSourceMarkersVisible());
     this._sourceMarkersUnsub = subscribeSourceMarkersVisible(() => {
       this._applySourceMarkersVisible(getSourceMarkersVisible());
+    });
+  }
+
+  // ─── Vanish MUs at end of line ─────────────────────────────────────
+  //
+  // When ON, an MU that leaves all transport surfaces (ran off the end of the
+  // line, no successor belt) is deleted after a short delay. Toggled from the
+  // Layout-Planner toolbar; the flag lives on the transport manager.
+
+  /**
+   * Enable/disable end-of-line MU vanishing. Persists to localStorage and
+   * pushes the flag onto the live transport manager.
+   */
+  setVanishMUs(enabled: boolean): void {
+    setVanishMUsStore(enabled);
+    this._applyVanishMUs(enabled);
+  }
+
+  /** Push the vanish flag onto the current transport manager (no-op if none). */
+  private _applyVanishMUs(enabled: boolean): void {
+    if (this.transportManager) this.transportManager.vanishMUsAtEndOfLine = enabled;
+  }
+
+  /**
+   * Wire the reactive vanish-MUs store to the loaded scene's transport manager.
+   * Called once after a model loads so the persisted value is applied to the
+   * fresh manager and later toggles propagate without callers wiring it.
+   * Safe to call multiple times — re-subscribing replaces the prior handle.
+   */
+  private _installVanishMUsBinding(): void {
+    this._vanishMUsUnsub?.();
+    this._applyVanishMUs(getVanishMUs());
+    this._vanishMUsUnsub = subscribeVanishMUs(() => {
+      this._applyVanishMUs(getVanishMUs());
     });
   }
 
@@ -1379,6 +1620,11 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   /** @internal — exposed to RVOutlineManager so it can insert OutlinePass. */
   get _composer(): EffectComposer | null { return this._postProcessing.composer; }
 
+  // --- Toon (cel) render mode ---
+  // Owns the Std→Toon material swap and the screen-space Sobel outline. Inert
+  // unless the active render mode is 'toon'. See RVToonMaterialManager.
+  private _toon!: RVToonMaterialManager;
+
   /** Diagnostic GPU info — populated synchronously at construction with the
    *  active adapter, then asynchronously merged with high-perf / low-power
    *  probes a tick later (best-effort, see rv-gpu-info.ts). Read via
@@ -1443,9 +1689,35 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       get isWebGPU() { return ppSelf.isWebGPU; },
       get antialiasActive() { return ppSelf._antialiasActive; },
       get outlineHasOutlines() { return ppSelf.outlineManager.hasOutlines; },
+      get toonPassActive() { return ppSelf._toon?.passActive ?? false; },
       markRenderDirty() { ppSelf._renderDirty = true; },
     };
     this._postProcessing = new PostProcessingManager(ppHost);
+    // Toon material/outline manager. Shares the composer + render-dirty plumbing
+    // with the outline manager (same host shape), so its Sobel pass slots into
+    // the composer the same way OutlinePass does.
+    this._toon = new RVToonMaterialManager({
+      get scene() { return ppSelf.scene; },
+      get camera() { return ppSelf.camera; },
+      get renderer() { return ppSelf.renderer; },
+      get isWebGPU() { return ppSelf.isWebGPU; },
+      get sceneFixtures() { return ppSelf.sceneFixtures; },
+      get groundMesh() { return ppSelf._groundMesh; },
+      get antialiasActive() { return ppSelf._antialiasActive; },
+      _ensureComposer() { ppSelf._ensureComposer(); },
+      get _composer() { return ppSelf._composer; },
+      markRenderDirty() { ppSelf._renderDirty = true; },
+    });
+    // A model loaded while toon mode is already active must be converted (its
+    // materials swapped to the banded toon material) once it is fully built.
+    this.on('model-loaded', () => {
+      if (this._toon.isActive && this.currentModel) this._toon.convert(this.currentModel);
+    });
+    // Grow the checker floor to keep placed / dragged layout content on a
+    // visible disc. Both events parent their objects under the model root, so
+    // a re-fit (grow-only, coalesced to one per frame) tracks the live bounds.
+    this.on('layout-transform-update', () => this._queueGroundFit());
+    this.on('layout-drag-end', () => this._queueGroundFit());
     // Route standard hover/selection through the OutlinePass so they render
     // as a true silhouette (matching the layout planner look). Each channel
     // (hover / selection) keeps its own color, derived from the active
@@ -1549,6 +1821,14 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
 
     // --- Renderer-dependent init ---
     renderer.domElement.style.touchAction = 'none';
+    // The canvas always fills its container via CSS (100%/100%); the drawing-buffer
+    // resolution is updated separately by setSize(w, h, false) on resize. Letting CSS
+    // own the display size means the canvas element keeps covering the full viewport
+    // during a resize even before the buffer catches up — so the grey page background
+    // (body { background:#9a9a9a }) can never show through a one-frame size gap.
+    renderer.domElement.style.display = 'block';
+    renderer.domElement.style.width = '100%';
+    renderer.domElement.style.height = '100%';
     container.appendChild(renderer.domElement);
 
     // --- Controls ---
@@ -1638,7 +1918,6 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
 
     // --- Resize (ResizeObserver on container — handles soft keyboard, orientation) ---
     if (autoResize) {
-      let resizeRafId = 0;
       this.resizeHandler = () => {
         const w = container.clientWidth || window.innerWidth;
         const h = container.clientHeight || window.innerHeight;
@@ -1653,16 +1932,29 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
         this.orthoCamera.top = halfH;
         this.orthoCamera.bottom = -halfH;
         this.orthoCamera.updateProjectionMatrix();
-        this.renderer.setSize(w, h);
+        // updateStyle:false — CSS owns the display size (100%/100%), we only
+        // resize the drawing buffer. This keeps the canvas covering the viewport
+        // during the resize and avoids fighting the CSS with inline px.
+        this.renderer.setSize(w, h, false);
         this._postProcessing.setSize(w, h);
         // OutlinePass renders at full resolution — keep it in sync with the canvas.
         this.outlineManager.setSize(w, h);
+        // Toon Sobel outline gbuffer also renders at full resolution.
+        this._toon.setSize(w, h);
+        // Render-on-demand: setSize reallocates (and clears) the drawing buffer
+        // and the composer's render targets. Without an immediate redraw the
+        // cleared buffer reaches the screen for a frame (grey flash) — or persists
+        // until the next dirty event if the scene is static ("rendered grey").
+        // Repaint synchronously, in this same frame, before the browser composites.
         this._renderDirty = true;
+        this.render();
       };
-      this.resizeObserver = new ResizeObserver(() => {
-        cancelAnimationFrame(resizeRafId);
-        resizeRafId = requestAnimationFrame(() => this.resizeHandler!());
-      });
+      // Run synchronously in the ResizeObserver delivery (after layout, before
+      // paint) rather than deferring a frame — the buffer then tracks the
+      // container in the same frame it changes, with no one-frame grey gap.
+      // Safe from the "ResizeObserver loop" warning: we resize the canvas (a
+      // child) and the composer, never the observed `container` itself.
+      this.resizeObserver = new ResizeObserver(() => this.resizeHandler!());
       this.resizeObserver.observe(container);
       // Fallback for browsers without ResizeObserver on window events
       window.addEventListener('resize', this.resizeHandler);
@@ -2014,12 +2306,17 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       overlay: options?.overlay,
     });
 
+    // Profile the expensive post-loadGLB steps separately (gated on ?debug=perf).
+    const prof = createLoadProfiler('loadModel');
+    prof.mark('loadGLB');
+
     // Pre-compile shaders to avoid first-frame stutter (available on WebGPURenderer)
     if ('compileAsync' in this.renderer) {
       try {
         await this.renderer.compileAsync(this.scene, this.camera, this.scene);
       } catch { /* non-critical */ }
     }
+    prof.mark('compileAsync');
 
     // GLB root is reported deterministically by loadGLB (LoadResult.root) —
     // no diffing scene.children. The `_rvModelRoot` userData tag stays as
@@ -2029,6 +2326,35 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this.currentModel.userData._rvModelRoot = true;
     this.drives = result.drives;
     this.transportManager = result.transportManager;
+    // Bridge end-of-line vanish to snap connectivity: a connected outgoing snap
+    // (e.g. a conveyor → rotated turntable) must never let its MUs vanish even
+    // when geometry no longer overlaps. Structural snap-registry access keeps the
+    // engine free of any snap-plugin dependency; queried lazily so it always sees
+    // the current pairings. The asset root is the topmost `_layoutObject`
+    // ancestor — exactly the registry `ownerRoot` set at placement time.
+    if (this.transportManager) {
+      type SnapLike = { flow?: string; pairedSnapId?: string; ownerRoot: Object3D };
+      type SnapRegLike = {
+        getByOwnerRoot(r: Object3D): readonly SnapLike[];
+        getById(id: string): SnapLike | undefined;
+      };
+      this.transportManager.isOutputConnected = (surface) => {
+        const reg = this.getPlugin<RVViewerPlugin & { getRegistry?(): SnapRegLike | undefined }>(
+          'snap-point')?.getRegistry?.();
+        if (!reg) return false;
+        let root: Object3D | null = null;
+        for (let cur: Object3D | null = surface.node; cur; cur = cur.parent) {
+          if (cur.userData?._layoutObject === true) root = cur;
+        }
+        if (!root) return false;
+        for (const sp of reg.getByOwnerRoot(root)) {
+          if (sp.flow !== 'out' || !sp.pairedSnapId) continue;
+          const partner = reg.getById(sp.pairedSnapId);
+          if (partner && partner.ownerRoot !== root) return true;
+        }
+        return false;
+      };
+    }
     this._simTime = 0; // Plan 201 (E2): fresh sim clock for the new model
     this.statisticsManager.clear(); // Plan 201: drop prior model's registrations (components re-register on bind)
     // Plan 194 P1: invalidate the unified kernel so it rebuilds against the new
@@ -2040,12 +2366,18 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this.replayRecordings = result.replayRecordings;
     this.logicEngine = result.logicEngine;
     this.registry = result.registry;
+    // Collect robot IK paths (replay engine) from the registry for per-frame ticking.
+    this.ikPaths = this.registry.getAll<RVIKPath>('IKPath').map((r) => r.instance);
     this.groups = result.groups;
 
     // Wire the source-floor-marker visibility flag (plan-181) — applies the
     // persisted value to all freshly-loaded Sources AND subscribes to future
     // settings-panel toggles. Idempotent across re-loads.
     this._installSourceMarkersBinding();
+
+    // Wire the end-of-line vanish-MUs flag onto the fresh transport manager
+    // (applies the persisted value + subscribes to toolbar toggles).
+    this._installVanishMUsBinding();
 
     // Component event dispatcher — routes viewer events (object-hover, object-clicked,
     // selection-changed) to per-component onHover/onClick/onSelect callbacks.
@@ -2164,34 +2496,9 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       result.boundingBox.getSize(size);
     }
 
-    if (this._groundMesh) {
-      // Ground is a 200×200 fade plane with a circular alpha map. The fade
-      // geometry is driven by FLOOR_FADE_START_RATIO and FLOOR_FADE_END_RATIO
-      // — both expressed in units of the model's half-extent. The plane is
-      // sized so its inscribed-circle radius equals FLOOR_FADE_END_RATIO ×
-      // model-half-extent, and the alpha map puts opaque out to
-      // FLOOR_FADE_START_RATIO / FLOOR_FADE_END_RATIO of that radius.
-      const modelMaxFullExtent = Math.max(size.x, size.z);
-      const groundSize = modelMaxFullExtent * FLOOR_FADE_END_RATIO;
-      this._groundMesh.scale.set(groundSize / 200, groundSize / 200, 1);
-      this._groundMesh.position.set(center.x, 0, center.z);
-
-      // Update checker texture repeat so each square is always 0.5m
-      const SQUARE_SIZE = 0.5; // meters per checker square
-      const TILES_PER_REPEAT = 8; // tiles baked into the checker texture
-      const metersPerRepeat = TILES_PER_REPEAT * SQUARE_SIZE; // 4m
-      const checkerMap = ((this._groundMesh as Mesh).material as MeshStandardMaterial).map;
-      if (checkerMap) {
-        checkerMap.repeat.set(groundSize / metersPerRepeat, groundSize / metersPerRepeat);
-      }
-
-      // Keep the reflection mirror locked to the checker disc (same scale and
-      // X/Z position; stays a hair below to avoid z-fighting).
-      if (this._groundReflector) {
-        this._groundReflector.scale.set(groundSize / 200, groundSize / 200, 1);
-        this._groundReflector.position.set(center.x, -0.002, center.z);
-      }
-    }
+    // Plain model load: fit the floor exactly to the model footprint (no
+    // authoring minimum) so existing demo-scene framing is unchanged.
+    this._updateGroundPlane(center, Math.max(size.x, size.z));
 
     // Fit camera to model
 
@@ -2256,13 +2563,13 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     if (declared === undefined) {
       // ALL-MODE: no rv_plugins declared — activate ALL registered plugins (backward compatible)
       for (const p of this._plugins) {
-        if (this._disabledIds.has(p.id)) continue;
+        if (this._disabledIds.has(p.id)) { this._missedModelLoad.add(p.id); continue; }
         callPlugin(p, 'onModelLoaded', result, this);
       }
     } else {
       // SELECTIVE-MODE: only declared plugins + core plugins activate
       for (const p of this._plugins) {
-        if (this._disabledIds.has(p.id)) continue;
+        if (this._disabledIds.has(p.id)) { this._missedModelLoad.add(p.id); continue; }
         if (p.core || declared.includes(p.id)) {
           callPlugin(p, 'onModelLoaded', result, this);
         }
@@ -2279,13 +2586,14 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     // Re-evaluate _physicsPluginActive — plugins may have changed handlesTransport in onModelLoaded
     // Re-evaluate _physicsPluginActive — plugins may have changed handlesTransport in onModelLoaded
     this._physicsPluginActive = this._plugins.some(p => p.handlesTransport);
+    prof.mark('onModelLoaded-plugins');
 
     // Ensure first frame renders fully (shadows + scene)
     this._shadowsDirty = true;
     this._renderDirty = true;
 
-    // Build reverse-reference index for O(1) lookup in PropertyInspector
-    result.registry.buildReverseRefIndex();
+    // reverse-ref index is built lazily on first PropertyInspector access
+    // (NodeRegistry.getReferencesTo), keeping it off the model-load critical path.
 
     logInfo(`Model loaded: ${this.drives.length} drives, ${this.signalStore?.size ?? 0} signals`);
     this.emit('model-loaded', { result });
@@ -2294,6 +2602,8 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     // `await viewer.loadModel(...)` only resolves once the scene is fully
     // ready to be revealed.
     await this.whenLoadingIdle();
+    prof.mark('whenLoadingIdle');
+    prof.report();
     return result;
   }
 
@@ -2308,11 +2618,17 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     // Close context menu to prevent stale target references
     this.contextMenu.close();
 
-    // Safety net: clear all dynamic UI contexts, preserve initial ones from config
+    // Safety net: clear all dynamic UI contexts, preserve initial ones from
+    // config. The active workspace-mode context (plan-198) is app-level state
+    // that MUST survive a model switch — otherwise the mode-gated UI (planner
+    // panel/tools, DES panel) disappears when loading another scene. Keep it.
     const initialCtxs = getAppConfig().ui?.initialContexts;
-    resetDynamicContexts(Array.isArray(initialCtxs) ? initialCtxs : undefined);
+    const keepCtxs = Array.isArray(initialCtxs) ? [...initialCtxs] : [];
+    if (this.modes.activeMode) keepCtxs.push(modeContext(this.modes.activeMode));
+    resetDynamicContexts(keepCtxs);
 
     this._lastLoadResult = null;
+    this._missedModelLoad.clear();
 
     this.selectionManager.clear();
     this.selectionManager.dispose();
@@ -2327,6 +2643,8 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     // a stale source list.
     this._sourceMarkersUnsub?.();
     this._sourceMarkersUnsub = null;
+    this._vanishMUsUnsub?.();
+    this._vanishMUsUnsub = null;
 
     // IMPORTANT: Reset transport manager BEFORE scene traverse to remove
     // active MU nodes from scene tree. MU clones share geometry by reference
@@ -2350,6 +2668,12 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     for (const child of this.scene.children) {
       if (child.userData?._rvModelRoot) modelRootsToClear.add(child);
     }
+
+    // Toon mode swaps every mesh's material to a MeshToonMaterial. Restore the
+    // original PBR materials BEFORE disposal so the MeshStandardMaterial-typed
+    // teardown below frees them + their textures. Keeps toon active — the next
+    // load re-converts via the `model-loaded` subscription.
+    if (this._toon.isActive) this._toon.onModelClearing(modelRootsToClear);
 
     // After material deduplication, multiple meshes share the same material
     // instance. Use a Set to avoid disposing the same material/texture twice
@@ -2387,6 +2711,7 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     }
     this.currentModel = null;
     this.drives = [];
+    this.ikPaths = [];
     if (this.playback) {
       this.playback.stop();
       this.playback = null;
@@ -2545,14 +2870,33 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     // intent rather than placement count.
     planner?.setLayoutFloorVisible?.(false);
 
+    // Phase 4c — op-created nodes (e.g. inserted IK waypoints). Create them, then
+    // re-resolve IK paths so their target lists pick up the new nodes (they didn't
+    // exist when IKPath.init() ran during loadGLB).
+    if (materialised.addedNodes.length > 0) {
+      for (const added of materialised.addedNodes) this.createComponentNode(added.spec);
+      this.rebuildIKPaths();
+    }
+
     // Phase 5 — drain again. loadModel already awaited whenLoadingIdle, but
     // applyPlacements above and any onModelLoaded handlers may have queued
     // additional cascading work after that point. Cheap when the queue is
     // empty; ensures `scene-loaded` only fires once the scene is fully ready.
     await this.whenLoadingIdle();
 
-    // Camera preset has already been applied by the camera-startpos plugin
-    // during onModelLoaded (it reads currentScene).
+    // Camera: the camera-startpos plugin already applied any preset during
+    // onModelLoaded (per-scene op → user override → GLB author default). When
+    // there is NO preset, loadModel's inline fit only saw the base GLB bounds —
+    // for planner/published scenes the placements were added in Phase 4 above,
+    // so frame the full assembled content now. Skipped when a preset positioned
+    // the camera, or when FPV owns it.
+    const camStart = this.getPlugin<RVViewerPlugin & { resolvePreset?: (v: RVViewer) => unknown }>('camera-startpos');
+    const hasCameraPreset = !!camStart?.resolvePreset?.(this);
+    const fpv = this.getPlugin<RVViewerPlugin & { isActive?: boolean }>('fpv');
+    if (!hasCameraPreset && fpv?.isActive !== true) {
+      this.frameSceneContent();
+    }
+
     this.emit('scene-loaded', { scene });
   }
 
@@ -2564,6 +2908,11 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this.clearModel();
     this._currentModelUrl = null;
     this._currentScene = null;
+    // Reset the checker floor to the standard authoring playground. clearModel
+    // does NOT touch the ground — it is sized only in loadModel — so without
+    // this the floor would keep the previous model's (often small) size and
+    // look "too small" for the now-empty scene.
+    this._updateGroundPlane(new Vector3(0, 0, 0), MIN_AUTHORING_GROUND_EXTENT);
     this.markRenderDirty();
   }
 
@@ -2605,6 +2954,9 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     }
     this.loop.stop();
     this.clearModel();
+    // Free toon gradient / gbuffer RT / normal + Sobel materials. clearModel
+    // (above) has already restored originals onto any meshes.
+    this._toon.dispose();
     if (this.resizeHandler) {
       window.removeEventListener('resize', this.resizeHandler);
     }
@@ -2729,6 +3081,65 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     const dir = new Vector3().subVectors(this.camera.position, this.controls.target).normalize();
     const endPos = center.clone().add(dir.multiplyScalar(dist));
     this.animateCameraTo(endPos, center);
+  }
+
+  /**
+   * Frame the camera so the whole assembled scene content fits the viewport —
+   * base model plus any planner placements. `loadModel`'s inline fit only sees
+   * the base GLB bounds; for planner/published scenes the placements are added
+   * afterwards (loadScene Phase 4), so without this the camera would frame the
+   * (often empty) base, not the finished layout.
+   *
+   * Snaps instantly by default (used right after a scene loads, matching
+   * loadModel's default iso framing); pass `animate=true` to tween instead.
+   */
+  frameSceneContent(animate = false): void {
+    const box = this._computeContentBounds();
+    if (box.isEmpty()) return;
+
+    const center = new Vector3();
+    const size = new Vector3();
+    box.getCenter(center);
+    box.getSize(size);
+
+    const maxDim = Math.max(size.x, size.y, size.z, 0.1);
+    const fov = this.perspCamera.fov * (Math.PI / 180);
+    const dist = (maxDim / (2 * Math.tan(fov / 2))) * 1.5;
+
+    if (animate) {
+      const dir = new Vector3().subVectors(this.camera.position, this.controls.target).normalize();
+      const endPos = center.clone().add(dir.multiplyScalar(dist));
+      this.animateCameraTo(endPos, center);
+      return;
+    }
+
+    // Same iso angle as loadModel's initial fit so the framing feels identical.
+    this.camera.position.set(center.x + dist * 0.7, center.y + dist * 0.5, center.z + dist * 0.7);
+    this.controls.target.copy(center);
+    this.controls.update();
+    this.markRenderDirty();
+  }
+
+  /**
+   * Bounding box over visible scene content, excluding non-content scenery:
+   * the ground fade disc, the reflection mirror, and the planner authoring
+   * floor. Cameras and lights are skipped naturally (not meshes).
+   */
+  private _computeContentBounds(): Box3 {
+    const box = new Box3();
+    const tmp = new Box3();
+    this.scene.traverse((obj) => {
+      const m = obj as Mesh;
+      if (!m.isMesh || !m.geometry || !m.visible) return;
+      const ud = m.userData;
+      if (ud?._rvGroundPlane || ud?._rvGroundReflector || ud?._layoutFloor) return;
+      m.updateWorldMatrix(true, false);
+      if (!m.geometry.boundingBox) m.geometry.computeBoundingBox();
+      if (!m.geometry.boundingBox) return;
+      tmp.copy(m.geometry.boundingBox).applyMatrix4(m.matrixWorld);
+      box.union(tmp);
+    });
+    return box;
   }
 
   /** Clear pinned drive focus (e.g., user clicked canvas). */
@@ -2878,10 +3289,142 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   // side-effects. They are marked `@deprecated` to nudge new code toward
   // `viewer.visualSettings.*`; removal is planned for v2.0.
 
-  /** @deprecated Use `viewer.visualSettings.lightingMode` instead. Will be removed in v2.0. */
-  get lightingMode() { return this._visualSettings.lightingMode; }
-  /** @deprecated Use `viewer.visualSettings.lightingMode` instead. Will be removed in v2.0. */
-  set lightingMode(mode: import('./hmi/visual-settings-store').LightingMode) { this._visualSettings.lightingMode = mode; }
+  /**
+   * Active render mode ('simple' | 'default' | …) — the master rendering preset.
+   *
+   * Setting it applies the mode's lighting / environment / tone-mapping (via
+   * VisualSettingsManager) AND gates the post-processing pipeline (ambient
+   * occlusion, bloom, shadows) by the mode's capabilities. A mode that doesn't
+   * support a feature forces it off, so e.g. 'simple' tears the composer down
+   * entirely (direct render, zero post-processing cost). Switching to a mode
+   * that supports those features restores the user's persisted global values.
+   */
+  get renderMode(): RenderMode { return this._visualSettings.lightingMode; }
+  set renderMode(mode: RenderMode) {
+    // 1. Lighting / environment / tone-mapping.
+    this._visualSettings.lightingMode = mode;
+    // 2. Capability-gated post-processing + shadows. Read persisted globals so
+    //    a mode that supports the feature comes back with the user's values.
+    const caps = getRenderMode(mode).capabilities;
+    const s = loadVisualSettings();
+    this.aoMode = caps.ambientOcclusion ? s.aoMode : 'off';
+    this.bloomEnabled = caps.bloom ? s.bloomEnabled : false;
+    if (!caps.shadows) this.shadowEnabled = false;
+    // Floor reflection: off in modes that don't support it (toon); restore the
+    // user's persisted preference when switching to a mode that does.
+    this.reflectionEnabled = caps.reflection ? s.reflectionEnabled : false;
+    // 3. Toon material swap + outline (entering / leaving toon). Runs AFTER the
+    //    lighting mode is set so the toon materials compile against toon lights.
+    this._applyToonForMode(mode);
+    this.emit('render-mode-changed', { mode });
+  }
+
+  /**
+   * Apply the active render mode to a subtree added AFTER the initial model load
+   * (e.g. a library component dropped via the layout planner). Converts toon
+   * materials when toon mode is active and recompiles the subtree's materials for
+   * the current lighting mode, so the new geometry matches the rest of the scene
+   * without requiring a manual render-mode toggle. Mirrors the `model-loaded`
+   * toon hook used for full GLB loads. Idempotent (safe to call during load too).
+   */
+  applyRenderModeToSubtree(root: Object3D): void {
+    if (this._toon.isActive) this._toon.convert(root); // idempotent (rv-toon-materials.ts:606)
+    this._visualSettings.recompileMaterials(root); // scoped material shader recompile
+    this._renderDirty = true;
+  }
+
+  /**
+   * Enter or leave toon mode to match `mode`. Idempotent — only acts on an
+   * actual transition. Toon swaps materials to a banded MeshToonMaterial, so it
+   * needs the model root; `currentModel` may be null (mode chosen before a model
+   * loads), in which case the `model-loaded` subscription converts on arrival.
+   */
+  private _applyToonForMode(mode: RenderMode): void {
+    const wantToon = getRenderMode(mode).capabilities.toon;
+    if (wantToon && !this._toon.isActive) this._toon.enable(this.currentModel);
+    else if (!wantToon && this._toon.isActive) this._toon.disable(this.currentModel);
+  }
+
+  // ─── Toon (cel) render-mode settings ───────────────────────────────────
+
+  /** Number of discrete diffuse bands (2–6). */
+  get toonBands(): number { return this._toon.bands; }
+  set toonBands(n: number) { this._toon.setGradient(n, this._toon.coolShadows); }
+
+  /** Tint the dark bands slightly cool (blue) instead of just darker. */
+  get toonCoolShadows(): boolean { return this._toon.coolShadows; }
+  set toonCoolShadows(v: boolean) { this._toon.setGradient(this._toon.bands, v); }
+
+  /** Metallic look strength (0 = off, 1 = fully recoloured metal surfaces). */
+  get toonMetallic(): number { return this._toon.metallic; }
+  set toonMetallic(v: number) { this._toon.setMetallic(v); }
+
+  /** Metallic tint colour as #rrggbb hex (applied to metal surfaces, cel-banded). */
+  get toonMetallicColor(): string { return this._toon.metallicColorHex; }
+  set toonMetallicColor(v: string) { this._toon.setMetallicColor(v); }
+
+  /** Albedo grade minimum brightness (0–1, remapped linearly). */
+  get toonAlbedoMinBrightness(): number { return this._toon.albedoMinBrightness; }
+  set toonAlbedoMinBrightness(v: number) {
+    this._toon.setAlbedo(v, this._toon.albedoMaxBrightness, this._toon.albedoSaturation);
+  }
+
+  /** Albedo grade maximum brightness (0–1, remapped linearly). */
+  get toonAlbedoMaxBrightness(): number { return this._toon.albedoMaxBrightness; }
+  set toonAlbedoMaxBrightness(v: number) {
+    this._toon.setAlbedo(this._toon.albedoMinBrightness, v, this._toon.albedoSaturation);
+  }
+
+  /** Albedo saturation (0 = greyscale, 1 = unchanged, 2 = boosted). */
+  get toonAlbedoSaturation(): number { return this._toon.albedoSaturation; }
+  set toonAlbedoSaturation(v: number) {
+    this._toon.setAlbedo(this._toon.albedoMinBrightness, this._toon.albedoMaxBrightness, v);
+  }
+
+  /** Toon outline (edge) strength / opacity (0 = off, 1 = full). */
+  get toonOutlineAmount(): number { return this._toon.outlineAmount; }
+  set toonOutlineAmount(v: number) {
+    this._toon.setOutline(v, this._toon.outlineThickness, this._toon.outlineThreshold, this._toon.outlineColorHex);
+  }
+
+  /** Toon outline thickness in pixels. */
+  get toonOutlineThickness(): number { return this._toon.outlineThickness; }
+  set toonOutlineThickness(v: number) {
+    this._toon.setOutline(this._toon.outlineAmount, v, this._toon.outlineThreshold, this._toon.outlineColorHex);
+  }
+
+  /** Toon outline edge threshold (0 = sensitive, 1 = only strong edges). */
+  get toonOutlineThreshold(): number { return this._toon.outlineThreshold; }
+  set toonOutlineThreshold(v: number) {
+    this._toon.setOutline(this._toon.outlineAmount, this._toon.outlineThickness, v, this._toon.outlineColorHex);
+  }
+
+  /** Toon outline max view distance in meters (0–100); edges fade out beyond it. */
+  get toonOutlineDistance(): number { return this._toon.outlineDistance; }
+  set toonOutlineDistance(v: number) {
+    this._toon.setOutline(
+      this._toon.outlineAmount,
+      this._toon.outlineThickness,
+      this._toon.outlineThreshold,
+      this._toon.outlineColorHex,
+      v,
+    );
+  }
+
+  /** Toon outline: 2× supersample the depth/normal gbuffer (higher quality, heavier). */
+  get toonOutlineSupersample(): boolean { return this._toon.outlineSupersample; }
+  set toonOutlineSupersample(v: boolean) { this._toon.setSupersample(v); }
+
+  /** Toon outline color as #rrggbb hex. */
+  get toonOutlineColor(): string { return this._toon.outlineColorHex; }
+  set toonOutlineColor(v: string) {
+    this._toon.setOutline(this._toon.outlineAmount, this._toon.outlineThickness, this._toon.outlineThreshold, v);
+  }
+
+  /** @deprecated Use `viewer.renderMode` instead. Will be removed in v2.0. */
+  get lightingMode(): RenderMode { return this.renderMode; }
+  /** @deprecated Use `viewer.renderMode` instead. Will be removed in v2.0. */
+  set lightingMode(mode: RenderMode) { this.renderMode = mode; }
 
   /** @deprecated Use `viewer.visualSettings.toneMapping` instead. Will be removed in v2.0. */
   get toneMapping(): ToneMappingType { return this._visualSettings.toneMapping; }
@@ -2938,6 +3481,14 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   /** @deprecated Use `viewer.visualSettings.lightIntensity` instead. Will be removed in v2.0. */
   set lightIntensity(v: number) { this._visualSettings.lightIntensity = v; }
 
+  /** Unlit-only HDRI reflections: assign the env map for metallic/glossy
+   *  reflections while keeping the flat ambient look. No effect outside Unlit. */
+  get unlitReflectionsEnabled(): boolean { return this._visualSettings.unlitReflectionsEnabled; }
+  set unlitReflectionsEnabled(v: boolean) { this._visualSettings.unlitReflectionsEnabled = v; }
+  /** Unlit reflection strength → scene.environmentIntensity (0–2). */
+  get unlitReflectionsIntensity(): number { return this._visualSettings.unlitReflectionsIntensity; }
+  set unlitReflectionsIntensity(v: number) { this._visualSettings.unlitReflectionsIntensity = v; }
+
   // ─── Individual Rendering Settings (delegated to VisualSettingsManager) ──
 
   /**
@@ -2945,7 +3496,10 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
    * Delegates to individual setters on VisualSettingsManager.
    */
   applyVisualSettings(settings: import('./hmi/visual-settings-store').VisualSettings): void {
-    const ms = settings.modeSettings[settings.lightingMode];
+    const ms = settings.modeSettings[settings.renderMode];
+    // Capability gating — features the active render mode doesn't support are
+    // forced off so the first frame (e.g. in 'simple') is already minimal.
+    const caps = getRenderMode(settings.renderMode).capabilities;
 
     // 1. Direct properties
     this.toneMappingExposure = ms.toneMappingExposure;
@@ -2959,29 +3513,56 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     this.shadowMapSize = settings.shadowMapSize ?? 1024;
 
     // 3. DirLight on/off (before shadows, since shadowEnabled checks dirLight.parent)
-    this.dirLightEnabled = ms.dirLightEnabled;
+    this.dirLightEnabled = caps.directionalLight && ms.dirLightEnabled;
 
     // 4. Shadows
-    this.shadowEnabled = ms.shadowEnabled;
+    this.shadowEnabled = caps.shadows && ms.shadowEnabled;
 
-    // 5. Tone mapping + lighting mode
+    // 5. Tone mapping + render mode (sets lighting/environment via the manager)
     this.toneMapping = ms.toneMapping;
-    this.lightingMode = settings.lightingMode;
+    // Seed unlit-reflection config so the imminent lightingMode switch's
+    // applyLightingMode assigns scene.environment when Unlit + reflections on.
+    this._visualSettings.configureUnlitReflections(
+      settings.envReflectionsEnabled ?? false,
+      settings.envReflectionsIntensity ?? 0.3,
+    );
+    this._visualSettings.lightingMode = settings.renderMode;
 
-    // 6. Light intensity (depends on lightingMode being set)
+    // 5b. Toon (cel) params. Configure gradient + metallic + outline first,
+    //     then enter/leave toon so `enable` builds with the right values.
+    this._toon.setGradient(settings.toonBands, settings.toonCoolShadows);
+    this._toon.setMetallic(settings.toonMetallic);
+    this._toon.setMetallicColor(settings.toonMetallicColor);
+    this._toon.setAlbedo(
+      settings.toonAlbedoMinBrightness,
+      settings.toonAlbedoMaxBrightness,
+      settings.toonAlbedoSaturation,
+    );
+    this._toon.setOutline(
+      settings.toonOutlineAmount,
+      settings.toonOutlineThickness,
+      settings.toonOutlineThreshold,
+      settings.toonOutlineColor,
+      settings.toonOutlineDistance,
+    );
+    this._toon.setSupersample(settings.toonOutlineSupersample);
+    this._applyToonForMode(settings.renderMode);
+    this.emit('render-mode-changed', { mode: settings.renderMode });
+
+    // 6. Light intensity (depends on render mode being set)
     this.lightIntensity = ms.lightIntensity;
 
     // 7. Camera
     this.fov = settings.fov;
     this.projection = settings.projection;
 
-    // 8. SSAO (WebGL only)
-    this.aoMode = settings.aoMode ?? 'gtao';
+    // 8. SSAO (WebGL only) — only when the mode supports it
+    this.aoMode = caps.ambientOcclusion ? (settings.aoMode ?? 'gtao') : 'off';
     this.ssaoIntensity = settings.ssaoIntensity ?? 1.0;
     this.ssaoRadius = settings.ssaoRadius ?? 0.15;
 
-    // 9. Bloom (WebGL only)
-    this.bloomEnabled = settings.bloomEnabled ?? true;
+    // 9. Bloom (WebGL only) — only when the mode supports it
+    this.bloomEnabled = caps.bloom ? (settings.bloomEnabled ?? true) : false;
     this.bloomIntensity = settings.bloomIntensity ?? 0.2;
     this.bloomThreshold = settings.bloomThreshold ?? 0.85;
     this.bloomRadius = settings.bloomRadius ?? 0.4;
@@ -2998,7 +3579,8 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     // once with the right values when reflection is switched on.
     this.reflectionStrength = settings.reflectionStrength ?? 0.8;
     this.reflectionBlur = settings.reflectionBlur ?? 1.0;
-    this.reflectionEnabled = settings.reflectionEnabled ?? false;
+    // Reflection only in modes that support it (off in toon).
+    this.reflectionEnabled = caps.reflection ? (settings.reflectionEnabled ?? false) : false;
 
     // 11. Navigation sensitivity (OrbitControls)
     if (this.controls) {
@@ -3332,6 +3914,13 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       this.logicEngine.fixedUpdate(dt);
     }
 
+    // Robot IK path replay engine — runs after LogicStep (so LogicStep-started
+    // paths advance the same frame) and BEFORE the drive loop (so target/overwrite
+    // writes apply this frame).
+    for (const ik of this.ikPaths) {
+      ik.fixedUpdate(dt);
+    }
+
     // ReplayRecording signal-triggered sequences — each has its own Active
     for (const rr of this.replayRecordings) {
       if (isActiveForState(rr.activeOnly, isConnected)) {
@@ -3363,9 +3952,10 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       }
     }
 
-    // Mark shadows + render dirty only when MU count changes (spawn/despawn),
-    // not when MUs merely exist. MU position changes already trigger render via
-    // drive.isRunning on the transport surface drive.
+    // Mark shadows + render dirty when the MU count changes (spawn/despawn).
+    // Shadows for MUs that *move* (riding an active belt) are handled in the
+    // transport block below — conveyor drives are jogForward/jogBackward, so
+    // the drive loop above intentionally skips _shadowsDirty for them.
     const muCount = this.transportManager ? this.transportManager.mus.length : 0;
     if (muCount !== this._prevMuCount) {
       this._shadowsDirty = true;
@@ -3390,12 +3980,25 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     // ── Texture animation (always runs, even when physics plugin handles transport) ──
     if (this.transportManager) {
       this.transportManager.updateTextureAnimations(dt);
-      // Mark render dirty when any surface is actively animating its belt texture
+      // Mark render dirty when any surface is actively animating its belt texture.
       for (const surface of this.transportManager.surfaces) {
         if (surface.isActive) {
           this._renderDirty = true;
+          // MUs riding an active belt move every frame. Conveyor drives are
+          // jogForward/jogBackward, so the drive loop above intentionally skips
+          // _shadowsDirty for them — meaning the shadow map would otherwise stay
+          // frozen at the MU's spawn position. Regenerate it each frame while a
+          // belt carries MUs so MU shadows track the parts dynamically.
+          if (muCount > 0) this._shadowsDirty = true;
           break;
         }
+      }
+      // Keep the renderer awake while an MU plays its end-of-line burn dissolve
+      // / spawn grow-out (the MU is parked, so nothing else would mark the frame
+      // dirty). The MU footprint changes during these effects, so refresh shadows too.
+      if (this.transportManager.hasVanishingMU) {
+        this._renderDirty = true;
+        this._shadowsDirty = true;
       }
     }
 
@@ -3636,6 +4239,10 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
           const aoCam = this._postProcessing.syncAoCamera(this.camera);
           if (gtaoPass) gtaoPass.camera = aoCam;
           if (n8cam) n8cam.camera = aoCam;
+          // Toon outline: render the normal + depth gbuffer the Sobel pass
+          // reads. Uses the AO clone camera so overlay + NO_AO-tagged UI
+          // (gizmos, ghosts, grid) are excluded from the outline.
+          if (this._toon.outlineActive) this._toon.renderPrepass(aoCam);
           composer.render();
         } else {
           // Non-composer path — render scene without overlay layers so the
@@ -3841,23 +4448,18 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
         return;
       }
 
-      // Normal selection: route through SelectionManager
+      // Normal selection: route through SelectionManager.
+      // Resolve via the SAME pipeline hover uses (raycastForRVNodeDetailed →
+      // _resolveHit → findContentAncestor owner), so what you hover is exactly
+      // what you select — no per-type special-case (e.g. the old Drive walk-up).
       let hitPath: string | null = null;
       let hitNode: Object3D | null = null;
       let hitPoint: [number, number, number] | undefined;
 
-      if (hoveredDrive) {
-        hitPath = this.registry?.getPathForNode(hoveredDrive.node) ?? null;
-        hitNode = hoveredDrive.node;
-        // Get hit point from detailed raycast
-        const detailed = this.raycastManager?.raycastForRVNodeDetailed(e);
-        hitPoint = detailed?.hitPoint;
-      } else {
-        const detailed = this.raycastManager?.raycastForRVNodeDetailed(e);
-        hitPath = detailed?.path ?? this._raycastForRVNode(e);
-        hitPoint = detailed?.hitPoint;
-        hitNode = hitPath && this.registry ? this.registry.getNode(hitPath) ?? null : null;
-      }
+      const detailed = this.raycastManager?.raycastForRVNodeDetailed(e);
+      hitPath = detailed?.path ?? this._raycastForRVNode(e);
+      hitPoint = detailed?.hitPoint;
+      hitNode = hitPath && this.registry ? this.registry.getNode(hitPath) ?? null : null;
 
       if (hitPath && hitNode) {
         if (e.shiftKey) {

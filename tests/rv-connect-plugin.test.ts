@@ -10,15 +10,15 @@ describe('ConnectPlugin', () => {
     expect(plugin.id).toBe('connect');
   });
 
-  it('should register a toolbar-button slot', () => {
+  it('should register an activity-bar slot', () => {
     const plugin = new ConnectPlugin();
     expect(plugin.slots).toBeDefined();
     expect(plugin.slots.length).toBe(1);
-    // ConnectPlugin renders in the TopBar (toolbar-button slot), not in
-    // the left vertical Nav strip — see TopBar.tsx <SlotRenderer
-    // slot="toolbar-button" />. Earlier revisions used 'button-group'.
-    expect(plugin.slots[0].slot).toBe('toolbar-button');
-    expect(plugin.slots[0].order).toBe(10);
+    // CONNECT opens a left-docked window, so its button lives in the left
+    // ACTIVITY BAR (activity-bar slot) — see ActivityBar.tsx. Earlier revisions
+    // used 'toolbar-button' (TopBar) and 'button-group'.
+    expect(plugin.slots[0].slot).toBe('activity-bar');
+    expect(plugin.slots[0].order).toBe(60);
     expect(typeof plugin.slots[0].component).toBe('function');
   });
 

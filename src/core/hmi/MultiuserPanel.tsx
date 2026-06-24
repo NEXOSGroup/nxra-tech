@@ -16,13 +16,14 @@ import {
   Button,
   TextField,
   IconButton,
+  Tooltip,
   Divider,
   Collapse,
 } from '@mui/material';
-import { Close, PersonOutline, WifiOff, Wifi, Share, ExpandMore, ExpandLess } from '@mui/icons-material';
+import { Close, People, PersonOutline, WifiOff, Wifi, Share, ExpandMore, ExpandLess } from '@mui/icons-material';
 import { useViewer } from '../../hooks/use-viewer';
 import { useMultiuser } from '../../hooks/use-multiuser';
-import { loadMultiuserSettings, saveMultiuserSettings } from './multiuser-settings-store';
+import { loadMultiuserSettings, saveMultiuserSettings, useMultiuserEnabled } from './multiuser-settings-store';
 import type { MultiuserPluginAPI } from '../types/plugin-types';
 import type { PlayerInfo } from '../engine/rv-avatar-manager';
 import { ISA_GREEN, ISA_RED } from './isa-colors';
@@ -362,5 +363,42 @@ export function MultiuserPanel({ onClose }: MultiuserPanelProps) {
         </Box>
       )}
     </Box>
+  );
+}
+
+// ── Activity-bar button ─────────────────────────────────────────────────────
+
+/**
+ * MultiuserButton — the activity-bar entry point for Multiuser: a People icon
+ * (with a green dot when connected) that toggles the {@link MultiuserPanel}
+ * popup. Self-contained — owns its open state and only renders when the feature
+ * is enabled (reactive) and the multiuser plugin is present.
+ */
+export function MultiuserButton({ placement = 'right' }: { placement?: 'right' | 'top' }) {
+  const viewer = useViewer();
+  const enabled = useMultiuserEnabled();
+  const mu = useMultiuser();
+  const [open, setOpen] = useState(false);
+  const muPlugin = viewer.getPlugin<MultiuserPluginAPI>('multiuser');
+
+  if (!enabled || !muPlugin) return null;
+
+  return (
+    <>
+      <Tooltip title={open ? 'Close Multiuser' : 'Multiuser'} placement={placement}>
+        <IconButton
+          size="medium"
+          color={open ? 'primary' : 'inherit'}
+          onClick={() => setOpen((o) => !o)}
+          sx={{ position: 'relative' }}
+        >
+          <People />
+          {mu.connected && !open && (
+            <Box sx={{ position: 'absolute', top: 2, right: 2, width: 6, height: 6, borderRadius: '50%', bgcolor: ISA_GREEN }} />
+          )}
+        </IconButton>
+      </Tooltip>
+      {open && <MultiuserPanel onClose={() => setOpen(false)} />}
+    </>
   );
 }

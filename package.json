@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node scripts/build-local-library-catalog.mjs",
     "build": "vite build",
+    "postbuild": "node scripts/inject-ga-settings.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -14,6 +16,7 @@
     "e2e:headed": "npx playwright test --headed",
     "perf": "npx playwright test e2e/perf-smoke.spec.ts --headed",
     "build:aasx-index": "node scripts/build-aasx-index.mjs",
+    "build:library": "node scripts/build-local-library-catalog.mjs",
     "deploy": "node scripts/bunny-deploy.mjs",
     "deploy:private": "node scripts/bunny-deploy.mjs --private",
     "test:node": "vitest run --config vitest.node.config.ts",
@@ -38,6 +41,7 @@
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-pdf": "^10.4.1",
+    "read-excel-file": "^5.8.5",
     "stats-gl": "^4.1.0",
     "three": "^0.171.0",
     "three-mesh-bvh": "^0.9.9"

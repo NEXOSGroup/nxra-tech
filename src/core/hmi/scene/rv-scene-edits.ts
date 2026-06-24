@@ -95,6 +95,35 @@ export interface SetCameraOp extends EditOpBase {
   prev: ModelCameraStart | null;
 }
 
+/** Describes a node to create at runtime (op-log `addNode`). Factory-based
+ *  components only (e.g. IKTarget) — Drive/signals are not constructed here. */
+export interface NodeSpec {
+  parentPath: string;
+  name: string;
+  position: [number, number, number];
+  quaternion: [number, number, number, number];
+  scale: [number, number, number];
+  /** userData.realvirtual content: { ComponentType: { field: value, … } }. */
+  components: Record<string, Record<string, unknown>>;
+}
+
+/** Create a new node (e.g. an inserted IK path waypoint) under an existing parent. */
+export interface AddNodeOp extends EditOpBase {
+  kind: 'addNode';
+  /** Resulting full path of the new node (parentPath + '/' + name). */
+  nodePath: string;
+  spec: NodeSpec;
+}
+
+/** Remove a node created by an `addNode` op (inverse / delete of an added node).
+ *  Carries the full spec so undo can re-create it. Removal only affects nodes
+ *  marked as op-created — original GLB nodes are unaffected. */
+export interface RemoveNodeOp extends EditOpBase {
+  kind: 'removeNode';
+  nodePath: string;
+  spec: NodeSpec;
+}
+
 /** Composite (transaction) — multiple primitive ops as one undo unit. */
 export interface CompositeOp extends EditOpBase {
   kind: 'composite';
@@ -111,7 +140,9 @@ export type PrimitiveEditOp =
   | AddPlacementOp
   | RemovePlacementOp
   | TransformPlacementOp
-  | SetCameraOp;
+  | SetCameraOp
+  | AddNodeOp
+  | RemoveNodeOp;
 
 /** Top-level op type (anything that may appear in `_ops`). */
 export type EditOp = PrimitiveEditOp | CompositeOp;
@@ -130,11 +161,18 @@ export interface SceneEdits {
   settings: SceneEditsSettings;
 }
 
+/** A node to create after the base GLB loads (op-log `addNode`). */
+export interface AddedNode {
+  nodePath: string;
+  spec: NodeSpec;
+}
+
 /** The shape `materialise()` produces — fed into `loadGLB` and `applyPlacements`. */
 export interface MaterialisedEdits {
   overlay: RVExtrasOverlay;
   placements: PlacedComponent[];
   cameraStart: ModelCameraStart | null;
+  addedNodes: AddedNode[];
 }
 
 // ─── Constants ──────────────────────────────────────────────────────────
@@ -170,16 +208,31 @@ export function freshOpId(): string {
 export function materialise(ops: ReadonlyArray<EditOp>): MaterialisedEdits {
   const overlay: RVExtrasOverlay = emptyOverlay();
   const placements = new Map<string, PlacedComponent>();
+  const addedNodes = new Map<string, AddedNode>();
   let cameraStart: ModelCameraStart | null = null;
 
   for (const op of flattenOps(ops)) {
-    applyForwardPure(op, overlay, placements, (next) => { cameraStart = next; });
+    applyForwardPure(op, overlay, placements, addedNodes, (next) => { cameraStart = next; });
+  }
+
+  // Fold any field overrides that target an added node INTO its spec, and drop
+  // them from the overlay (the node doesn't exist during loadGLB traversal, so
+  // the overlay can't apply them — createRuntimeNode reads them from the spec).
+  for (const added of addedNodes.values()) {
+    const nodeOv = overlay.nodes[added.nodePath];
+    if (!nodeOv) continue;
+    for (const [comp, fields] of Object.entries(nodeOv)) {
+      const target = (added.spec.components[comp] ??= {});
+      Object.assign(target, fields);
+    }
+    delete overlay.nodes[added.nodePath];
   }
 
   return {
     overlay,
     placements: [...placements.values()],
     cameraStart,
+    addedNodes: [...addedNodes.values()],
   };
 }
 
@@ -197,9 +250,18 @@ function applyForwardPure(
   op: PrimitiveEditOp,
   overlay: RVExtrasOverlay,
   placements: Map<string, PlacedComponent>,
+  addedNodes: Map<string, AddedNode>,
   setCamera: (next: ModelCameraStart | null) => void,
 ): void {
   switch (op.kind) {
+    case 'addNode': {
+      addedNodes.set(op.nodePath, { nodePath: op.nodePath, spec: deepCloneJSON(op.spec) });
+      return;
+    }
+    case 'removeNode': {
+      addedNodes.delete(op.nodePath);
+      return;
+    }
     case 'setField': {
       ensureNode(overlay, op.nodePath);
       ensureComponent(overlay, op.nodePath, op.componentType);
@@ -292,7 +354,9 @@ export function canCoalesce(last: EditOp, next: EditOp): boolean {
     }
     case 'addPlacement':
     case 'removePlacement':
-      return false; // never coalesce add/remove — discrete user actions
+    case 'addNode':
+    case 'removeNode':
+      return false; // never coalesce structural add/remove — discrete user actions
   }
 }
 
@@ -326,7 +390,9 @@ export function mergeOps(last: EditOp, next: EditOp): EditOp {
     }
     case 'addPlacement':
     case 'removePlacement':
-      throw new Error('mergeOps: should not be called for add/removePlacement');
+    case 'addNode':
+    case 'removeNode':
+      throw new Error('mergeOps: should not be called for structural add/remove ops');
   }
 }
 
@@ -351,6 +417,10 @@ export function describeOp(op: EditOp): string {
       return `Move ${shortPlacementLabel(op)}`;
     case 'setCamera':
       return op.preset ? 'Set camera view' : 'Clear camera view';
+    case 'addNode':
+      return `Add ${op.spec.name}`;
+    case 'removeNode':
+      return `Remove ${op.spec.name}`;
     case 'composite':
       return op.label;
   }
@@ -447,6 +517,12 @@ export function inverseOp(op: EditOp): EditOp {
         kind: 'setCamera',
         preset: op.prev, prev: op.preset,
       };
+    }
+    case 'addNode': {
+      return { id: freshOpId(), ts: Date.now(), schemaV: 1, kind: 'removeNode', nodePath: op.nodePath, spec: op.spec };
+    }
+    case 'removeNode': {
+      return { id: freshOpId(), ts: Date.now(), schemaV: 1, kind: 'addNode', nodePath: op.nodePath, spec: op.spec };
     }
     case 'composite': {
       const reversed: PrimitiveEditOp[] = [];

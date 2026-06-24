@@ -5,12 +5,14 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { Typography, Box, Button, Select, MenuItem, Switch, TextField } from '@mui/material';
 import { useViewer } from '../../../hooks/use-viewer';
 import { useMultiuser } from '../../../hooks/use-multiuser';
-import { loadMultiuserSettings, saveMultiuserSettings, type MultiuserSettings } from '../multiuser-settings-store';
+import { loadMultiuserSettings, saveMultiuserSettings, useMultiuserEnabled, type MultiuserSettings } from '../multiuser-settings-store';
 import type { MultiuserPluginAPI } from '../../types/plugin-types';
-import { StatRow } from './settings-helpers';
+import { StatRow, SettingsSection, FieldRow } from './settings-helpers';
 
-export function MultiuserTab({ muEnabled, onMuEnabledChange }: { muEnabled: boolean; onMuEnabledChange: (v: boolean) => void }) {
+export function MultiuserTab() {
   const viewer = useViewer();
+  // Reactive: drives the Switch here and the activity-bar Multiuser button.
+  const muEnabled = useMultiuserEnabled();
   const mu = useMultiuser();
   const muPlugin = viewer.getPlugin<MultiuserPluginAPI>('multiuser');
 
@@ -47,95 +49,79 @@ export function MultiuserTab({ muEnabled, onMuEnabledChange }: { muEnabled: bool
   };
 
   const handleEnabledToggle = (_: unknown, v: boolean) => {
+    // saveMultiuserSettings emits → useMultiuserEnabled re-renders here and the
+    // activity-bar Multiuser button, so no callback prop is needed.
     persist({ enabled: v });
-    onMuEnabledChange(v);
     if (!v && mu.connected) muPlugin?.leaveSession();
   };
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-      {/* Enable toggle */}
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Box>
-          <Typography variant="body2" sx={{ color: 'text.primary', fontWeight: 500 }}>Multiuser</Typography>
-          <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', fontSize: 10 }}>
-            Show multiuser button in toolbar
-          </Typography>
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+      {/* Enable toggle + status */}
+      <SettingsSection id="multiuser-general" title="Multiuser">
+        <FieldRow label="Multiuser" hint="Show multiuser button in toolbar">
+          <Switch size="small" checked={muEnabled} onChange={handleEnabledToggle} />
+        </FieldRow>
+
+        {/* Status */}
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+          <StatRow label="State" value={stateLabel} color={stateColor} />
+          {mu.connected && <StatRow label="Server" value={mu.serverUrl} />}
+          {mu.connected && <StatRow label="Role" value={mu.localRole} />}
         </Box>
-        <Switch size="small" checked={muEnabled} onChange={handleEnabledToggle} />
-      </Box>
+      </SettingsSection>
 
-      {/* Status */}
-      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-        <StatRow label="State" value={stateLabel} color={stateColor} />
-        {mu.connected && <StatRow label="Server" value={mu.serverUrl} />}
-        {mu.connected && <StatRow label="Role" value={mu.localRole} />}
-      </Box>
+      {/* Connection settings */}
+      <SettingsSection id="multiuser-connection" title="Connection">
+        {/* Server URL */}
+        <FieldRow label="Server URL">
+          <TextField
+            fullWidth size="small"
+            placeholder="ws://192.168.1.5:7000"
+            value={serverUrl}
+            onChange={(e) => { setServerUrl(e.target.value); persist({ serverUrl: e.target.value }); }}
+            disabled={mu.connected}
+            sx={{ '& input': { fontFamily: 'monospace', fontSize: 12 } }}
+          />
+        </FieldRow>
 
-      {/* Server URL */}
-      <Box>
-        <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 600, mb: 0.5, display: 'block' }}>
-          Server URL
-        </Typography>
-        <TextField
-          fullWidth size="small"
-          placeholder="ws://192.168.1.5:7000"
-          value={serverUrl}
-          onChange={(e) => { setServerUrl(e.target.value); persist({ serverUrl: e.target.value }); }}
-          disabled={mu.connected}
-          sx={{ '& input': { fontFamily: 'monospace', fontSize: 12 } }}
-        />
-      </Box>
+        {/* Join Code (optional session/room identifier) */}
+        <FieldRow label="Join Code" hint="Identifies the session on a relay server hosting multiple models">
+          <TextField
+            fullWidth size="small"
+            placeholder="e.g. ABC123"
+            value={joinCode}
+            onChange={(e) => { setJoinCode(e.target.value); persist({ joinCode: e.target.value }); }}
+            disabled={mu.connected}
+            sx={{ '& input': { fontFamily: 'monospace', fontSize: 12, textTransform: 'uppercase' } }}
+          />
+        </FieldRow>
 
-      {/* Join Code (optional session/room identifier) */}
-      <Box>
-        <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 600, mb: 0.5, display: 'block' }}>
-          Join Code (optional)
-        </Typography>
-        <TextField
-          fullWidth size="small"
-          placeholder="e.g. ABC123"
-          value={joinCode}
-          onChange={(e) => { setJoinCode(e.target.value); persist({ joinCode: e.target.value }); }}
-          disabled={mu.connected}
-          sx={{ '& input': { fontFamily: 'monospace', fontSize: 12, textTransform: 'uppercase' } }}
-        />
-        <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mt: 0.25, fontSize: 10 }}>
-          Identifies the session on a relay server hosting multiple models
-        </Typography>
-      </Box>
+        {/* Display Name */}
+        <FieldRow label="Display Name">
+          <TextField
+            fullWidth size="small"
+            placeholder="Browser"
+            value={name}
+            onChange={(e) => { setName(e.target.value); persist({ displayName: e.target.value }); }}
+            disabled={mu.connected}
+            sx={{ '& input': { fontSize: 12 } }}
+          />
+        </FieldRow>
 
-      {/* Display Name */}
-      <Box>
-        <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 600, mb: 0.5, display: 'block' }}>
-          Display Name
-        </Typography>
-        <TextField
-          fullWidth size="small"
-          placeholder="Browser"
-          value={name}
-          onChange={(e) => { setName(e.target.value); persist({ displayName: e.target.value }); }}
-          disabled={mu.connected}
-          sx={{ '& input': { fontSize: 12 } }}
-        />
-      </Box>
-
-      {/* Role */}
-      <Box>
-        <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 600, mb: 0.5, display: 'block' }}>
-          Role
-        </Typography>
-        <Select
-          fullWidth size="small"
-          value={role}
-          onChange={(e) => { setRole(e.target.value); persist({ role: e.target.value as 'observer' | 'operator' }); }}
-          disabled={mu.connected}
-          sx={{ fontSize: 12 }}
-        >
-          <MenuItem value="observer" sx={{ fontSize: 12 }}>Observer (watch only)</MenuItem>
-          <MenuItem value="operator" sx={{ fontSize: 12 }}>Operator (full control)</MenuItem>
-        </Select>
-      </Box>
+        {/* Role */}
+        <FieldRow label="Role">
+          <Select
+            fullWidth size="small"
+            value={role}
+            onChange={(e) => { setRole(e.target.value); persist({ role: e.target.value as 'observer' | 'operator' }); }}
+            disabled={mu.connected}
+            sx={{ fontSize: 12 }}
+          >
+            <MenuItem value="observer" sx={{ fontSize: 12 }}>Observer (watch only)</MenuItem>
+            <MenuItem value="operator" sx={{ fontSize: 12 }}>Operator (full control)</MenuItem>
+          </Select>
+        </FieldRow>
 
       {/* Connect / Disconnect */}
       {!mu.connected ? (
@@ -154,14 +140,15 @@ export function MultiuserTab({ muEnabled, onMuEnabledChange }: { muEnabled: bool
           Disconnect
         </Button>
       )}
+      </SettingsSection>
 
       {/* Connected players */}
       {mu.connected && mu.players.length > 0 && (
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-          <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 600 }}>
-            Connected Users ({mu.players.length + 1})
+        <SettingsSection id="multiuser-players" title="Connected Users">
+          <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
+            {mu.players.length + 1} users connected
           </Typography>
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.25, pl: 1 }}>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.25 }}>
             {mu.players.map(p => (
               <Box key={p.id} sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
                 <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: p.color, flexShrink: 0 }} />
@@ -174,7 +161,7 @@ export function MultiuserTab({ muEnabled, onMuEnabledChange }: { muEnabled: bool
               </Box>
             ))}
           </Box>
-        </Box>
+        </SettingsSection>
       )}
     </Box>
   );

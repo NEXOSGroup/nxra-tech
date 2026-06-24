@@ -43,6 +43,24 @@ import {
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
+//! Load credentials from a gitignored .env file into process.env (dependency-free).
+//! CI / real shell env wins — we only fill keys that aren't already set. Vite
+//! auto-loads .env.production for the BUILD, but this plain Node script does not,
+//! so without this `npm run deploy` can't see BUNNY_* locally. Mirrors .env.example.
+function loadDotEnv() {
+  for (const name of ['.env.production', '.env']) {
+    const p = join(ROOT, name);
+    if (!existsSync(p)) continue;
+    for (const line of readFileSync(p, 'utf8').split(/\r?\n/)) {
+      const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
+      if (!m) continue;
+      const key = m[1];
+      const val = m[2].replace(/^["']|["']$/g, '');
+      if (process.env[key] === undefined || process.env[key] === '') process.env[key] = val;
+    }
+  }
+}
+
 // ─── CLI args (parity with webtest.mjs getArg/hasFlag) ───────────────────
 
 const args = process.argv.slice(2);
@@ -349,6 +367,7 @@ async function maybePurge(client, uploadedCount, opts) {
 // ─── main ────────────────────────────────────────────────────────────────
 
 async function main() {
+  loadDotEnv(); // populate process.env from .env.production / .env (CI env still wins)
   const opts = {
     private: hasFlag('private'),
     project: getArg('project', null),

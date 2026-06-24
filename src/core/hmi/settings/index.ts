@@ -6,7 +6,6 @@ export { BackupTab } from './ModelTab';
 export { BackupTab as ModelTab } from './ModelTab';
 export { MouseTab } from './MouseTab';
 export { VisualTab } from './VisualTab';
-export { EnvironmentTab } from './EnvironmentTab';
 export { InterfacesTab } from './InterfacesTab';
 export { DevToolsTab } from './DevToolsTab';
 export { TestsTab } from './TestsTab';

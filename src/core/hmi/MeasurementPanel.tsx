@@ -13,7 +13,6 @@ import {
   Box,
   Typography,
   IconButton,
-  Divider,
   Paper,
   TextField,
 } from '@mui/material';
@@ -42,12 +41,13 @@ import {
   LEFT_PANEL_BOTTOM,
   LEFT_PANEL_ZINDEX,
 } from './layout-constants';
+import { WINDOW_DARK_BG } from './LeftPanel';
 import { useMobileLayout } from '../../hooks/use-mobile-layout';
+import { useViewportInsets } from '../../hooks/use-viewport-insets';
 
 // ── Constants ──────────────────────────────────────────────────────────
 
 const PANEL_WIDTH = 280;
-const BG = 'rgba(18,22,30,0.96)';
 const BORDER = 'rgba(255,255,255,0.07)';
 
 // ── Panel Component ────────────────────────────────────────────────────
@@ -61,6 +61,7 @@ export function MeasurementPanel() {
   const isOpen = useSyncExternalStore(lpm.subscribe, lpm.getSnapshot).activePanel === 'measurements';
 
   const isMobile = useMobileLayout();
+  const topOffset = useViewportInsets().top;
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
@@ -142,12 +143,12 @@ export function MeasurementPanel() {
       sx={{
         position: 'fixed',
         left: LEFT_PANEL_LEFT,
-        top: LEFT_PANEL_TOP,
+        top: LEFT_PANEL_TOP + topOffset,
         bottom: LEFT_PANEL_BOTTOM,
         width: PANEL_WIDTH,
-        bgcolor: BG,
-        border: `1px solid ${BORDER}`,
-        borderRadius: 1,
+        backgroundColor: `${WINDOW_DARK_BG} !important`,
+        borderRight: `1px solid ${BORDER}`,
+        borderRadius: 0,
         zIndex: LEFT_PANEL_ZINDEX,
         display: 'flex',
         flexDirection: 'column',
@@ -155,10 +156,10 @@ export function MeasurementPanel() {
         pointerEvents: 'auto',
       }}
     >
-      {/* Header */}
-      <Box sx={{ display: 'flex', alignItems: 'center', p: 1, gap: 0.5 }}>
-        <Straighten sx={{ fontSize: 14, color: '#4fc3f7' }} />
-        <Typography sx={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.9)', flexGrow: 1 }}>
+      {/* Unified header (matches LeftPanel) */}
+      <Box sx={{ display: 'flex', alignItems: 'center', px: 1.5, py: 1.25, gap: 0.5, borderBottom: `1px solid ${BORDER}`, flexShrink: 0 }}>
+        <Straighten sx={{ fontSize: 16, color: '#4fc3f7' }} />
+        <Typography variant="subtitle2" sx={{ fontSize: '0.8rem', fontWeight: 600, color: 'text.primary', flexGrow: 1 }}>
           Measurements ({snap.measurements.length})
         </Typography>
         {snap.measurements.length > 0 && (
@@ -186,12 +187,10 @@ export function MeasurementPanel() {
             </IconButton>
           </>
         )}
-        <IconButton size="small" onClick={handleClose} sx={{ color: 'rgba(255,255,255,0.4)', p: 0.25 }}>
-          <Close sx={{ fontSize: 14 }} />
+        <IconButton size="small" onClick={handleClose} sx={{ color: 'text.secondary', p: 0.25 }}>
+          <Close sx={{ fontSize: 16 }} />
         </IconButton>
       </Box>
-
-      <Divider sx={{ borderColor: BORDER }} />
 
       {/* Unit + Axis lock toggles */}
       <Box sx={{ display: 'flex', justifyContent: 'center', gap: 1, py: 0.5 }}>

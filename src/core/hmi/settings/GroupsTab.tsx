@@ -15,6 +15,7 @@ import {
   type GroupVisibilitySettings,
 } from '../group-visibility-store';
 import type { GroupInfo } from '../../engine/rv-group-registry';
+import { SettingsSection } from './settings-helpers';
 
 export function GroupsTab() {
   const viewer = useViewer();
@@ -72,16 +73,13 @@ export function GroupsTab() {
   }
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
       {/* Default Visibility */}
-      <Box>
-        <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-          Default Visibility
-        </Typography>
-        <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mt: 0.25, fontSize: 10 }}>
+      <SettingsSection id="groups-default-visibility" title="Default Visibility">
+        <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', fontSize: 10 }}>
           Groups hidden when model loads
         </Typography>
-        <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 0 }}>
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
           {groups.map(g => (
             <FormControlLabel
               key={`dh-${g.name}`}
@@ -105,17 +103,14 @@ export function GroupsTab() {
             />
           ))}
         </Box>
-      </Box>
+      </SettingsSection>
 
       {/* Excluded from Overlay */}
-      <Box sx={{ borderTop: '1px solid rgba(255,255,255,0.08)', pt: 2 }}>
-        <Typography variant="caption" sx={{ color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
-          Excluded from Overlay
-        </Typography>
-        <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mt: 0.25, fontSize: 10 }}>
+      <SettingsSection id="groups-excluded-from-overlay" title="Excluded from Overlay">
+        <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', fontSize: 10 }}>
           Groups not shown in Groups panel
         </Typography>
-        <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 0 }}>
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
           {groups.map(g => (
             <FormControlLabel
               key={`ex-${g.name}`}
@@ -136,7 +131,7 @@ export function GroupsTab() {
             />
           ))}
         </Box>
-      </Box>
+      </SettingsSection>
     </Box>
   );
 }

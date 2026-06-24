@@ -64,26 +64,28 @@ export interface HighlightStyle {
   showEdges: boolean;
 }
 
-/** Default hover style — vivid orange. The edgeColor is what the OutlinePass
- *  silhouette uses; overlayColor matters only on WebGPU fallback. */
+/** Default hover style — soft, bright orange (brighter + less saturated than the
+ *  old vivid 0xff8800). The edgeColor is what the OutlinePass silhouette uses;
+ *  overlayColor is also used by the overlay highlight path. */
 export const DEFAULT_HOVER_STYLE: HighlightStyle = Object.freeze({
-  overlayColor: 0xff8800,
+  overlayColor: 0xffb366,
   overlayOpacity: 0.10,
   overlayWireframe: false,
-  edgeColor: 0xff8800,
+  edgeColor: 0xffb366,
   edgeOpacity: 0.4,
   edgeLinewidth: 1,
   showOverlay: true,
   showEdges: true,
 });
 
-/** Default selection style — vivid cyan/blue. */
+/** Default selection style — soft, bright blue (brighter + less saturated than
+ *  the old vivid 0x00bfff, with slightly gentler opacity). */
 export const DEFAULT_SELECTION_STYLE: HighlightStyle = Object.freeze({
-  overlayColor: 0x00bfff,
-  overlayOpacity: 0.25,
+  overlayColor: 0x66c4ff,
+  overlayOpacity: 0.18,
   overlayWireframe: false,
-  edgeColor: 0x00bfff,
-  edgeOpacity: 0.8,
+  edgeColor: 0x66c4ff,
+  edgeOpacity: 0.6,
   edgeLinewidth: 1,
   showOverlay: true,
   showEdges: true,
@@ -329,7 +331,30 @@ export class RVHighlightManager {
    */
   highlight(root: Object3D, track = false, options?: { includeSensorViz?: boolean; includeChildDrives?: boolean }): void {
     this.clear();
-    if (this._useOutline()) {
+    const includeSensorViz = options?.includeSensorViz ?? false;
+    const includeChildDrives = options?.includeChildDrives ?? false;
+    const meshes = this.collectMeshes(root, includeSensorViz, includeChildDrives);
+
+    // OutlinePass silhouettes only VISIBLE meshes. Use it whenever the subtree
+    // has at least one visible mesh (the common case — Drives, transports,
+    // sensors, library/layout instances). Only fall back to the overlay path
+    // (which builds fill+edge meshes from the geometry, visible or not) when the
+    // subtree is FULLY invisible — e.g. an object whose geometry was pooled into
+    // a shared chunk by the static-merge pass, so its own subtree has no visible
+    // mesh for OutlinePass to draw.
+    const hasVisible = meshes.some(m => m.visible);
+    if (typeof window !== 'undefined' && (window as unknown as Record<string, unknown>).__rvDiagHighlight) {
+      const pathOf = (n: Object3D): string => { const p: string[] = []; let c: Object3D | null = n; while (c && c.parent) { p.unshift(c.name || '(unnamed)'); c = c.parent; } return p.join('/'); };
+      // eslint-disable-next-line no-console
+      console.log('[rvDiagHighlight]', {
+        root: pathOf(root), rvType: root.userData?._rvType, hasMetadata: !!root.userData?._rvMetadata,
+        useOutline: this._useOutline(), collectedMeshes: meshes.length,
+        visible: meshes.filter(m => m.visible).length, hidden: meshes.filter(m => !m.visible).length,
+        path: (this._useOutline() && hasVisible) ? 'OutlinePass'
+          : meshes.length > this.maxHoverMeshes ? 'boundingBox' : 'overlay',
+      });
+    }
+    if (this._useOutline() && hasVisible) {
       // OutlinePass renders the silhouette of the live scene mesh, so
       // tracking is implicit (no per-frame matrix sync needed) and dense
       // subtrees don't need the bounding-box fallback.
@@ -337,9 +362,6 @@ export class RVHighlightManager {
       return;
     }
     this.hoverTracked = track;
-    const includeSensorViz = options?.includeSensorViz ?? false;
-    const includeChildDrives = options?.includeChildDrives ?? false;
-    const meshes = this.collectMeshes(root, includeSensorViz, includeChildDrives);
 
     if (meshes.length > this.maxHoverMeshes) {
       this._highlightBoundingBox(root);
@@ -389,29 +411,33 @@ export class RVHighlightManager {
    */
   highlightMultiple(roots: Object3D[], options?: { includeSensorViz?: boolean }): void {
     this.clear();
-    if (this._useOutline()) {
-      this._outlineManager!.setHoverOutlined(roots);
-      return;
-    }
-    this.hoverTracked = true;
     const includeSensorViz = options?.includeSensorViz ?? false;
 
-    // Collect all meshes first to check total count
-    const allMeshes: { root: Object3D; meshes: Mesh[] }[] = [];
-    let totalMeshes = 0;
+    // Partition roots: those with a visible mesh use OutlinePass; those whose
+    // geometry is fully merged/hidden (e.g. static-merge-pooled objects) fall
+    // back to the overlay path built from their hidden geometry. A mixed set
+    // uses both.
+    const outlineRoots: Object3D[] = [];
+    const overlayEntries: { root: Object3D; meshes: Mesh[] }[] = [];
     for (const root of roots) {
       const meshes = this.collectMeshes(root, includeSensorViz);
-      allMeshes.push({ root, meshes });
-      totalMeshes += meshes.length;
+      const hasVisible = meshes.some(m => m.visible);
+      if (this._useOutline() && hasVisible) outlineRoots.push(root);
+      else overlayEntries.push({ root, meshes });
     }
 
+    if (outlineRoots.length > 0) this._outlineManager!.setHoverOutlined(outlineRoots);
+    if (overlayEntries.length === 0) return;
+
+    this.hoverTracked = true;
+    const totalMeshes = overlayEntries.reduce((n, e) => n + e.meshes.length, 0);
     if (totalMeshes > this.maxHoverMeshes) {
-      for (const { root } of allMeshes) this._highlightBoundingBox(root);
+      for (const { root } of overlayEntries) this._highlightBoundingBox(root);
       return;
     }
 
     const thresholdRad = EDGE_THRESHOLD_DEG * (Math.PI / 180);
-    for (const { meshes } of allMeshes) {
+    for (const { meshes } of overlayEntries) {
       for (const mesh of meshes) {
         mesh.updateWorldMatrix(true, false);
         this.hoverPairs.push(this._createOverlayPair(
@@ -446,20 +472,30 @@ export class RVHighlightManager {
   highlightSelection(roots: Object3D[], options?: { includeSensorViz?: boolean; includeChildDrives?: boolean }): void {
     this.clearSelection();
     if (roots.length === 0) return;
-    if (this._useOutline()) {
-      this._outlineManager!.setOutlined(roots);
-      return;
+    const includeSensorViz = options?.includeSensorViz ?? false;
+    const includeChildDrives = options?.includeChildDrives ?? false;
+
+    // Partition roots: visible geometry → OutlinePass; fully merged/hidden
+    // geometry (e.g. static-merge-pooled objects) → overlay built from the
+    // hidden meshes.
+    const outlineRoots: Object3D[] = [];
+    const overlayEntries: { root: Object3D; meshes: Mesh[] }[] = [];
+    for (const root of roots) {
+      const meshes = this.collectMeshes(root, includeSensorViz, includeChildDrives);
+      const hasVisible = meshes.some(m => m.visible);
+      if (this._useOutline() && hasVisible) outlineRoots.push(root);
+      else overlayEntries.push({ root, meshes });
     }
-    // Skip the work entirely when the active style suppresses both layers
+
+    if (outlineRoots.length > 0) this._outlineManager!.setOutlined(outlineRoots);
+    if (overlayEntries.length === 0) return;
+    // Skip overlay work entirely when the active style suppresses both layers
     // (e.g. planner mode delegates the selection visual to OutlinePass).
     if (!this._selectionStyle.showOverlay && !this._selectionStyle.showEdges) return;
     this.selectionTracked = true;
-    const includeSensorViz = options?.includeSensorViz ?? false;
-    const includeChildDrives = options?.includeChildDrives ?? false;
     const thresholdRad = EDGE_THRESHOLD_DEG * (Math.PI / 180);
 
-    for (const root of roots) {
-      const meshes = this.collectMeshes(root, includeSensorViz, includeChildDrives);
+    for (const { meshes } of overlayEntries) {
       for (const mesh of meshes) {
         mesh.updateWorldMatrix(true, false);
         this.selectionPairs.push(this._createOverlayPair(
