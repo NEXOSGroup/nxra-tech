@@ -37,10 +37,16 @@ interface PdfDocProxy {
 // ─── Lazy react-pdf loading ─────────────────────────────────────────────
 // react-pdf + pdf.js worker are loaded only when the overlay first opens.
 
-type ReactPdfModule = typeof import('react-pdf');
+export type ReactPdfModule = typeof import('react-pdf');
 let _pdfModulePromise: Promise<ReactPdfModule> | null = null;
 
-function loadReactPdf(): Promise<ReactPdfModule> {
+/**
+ * Load the react-pdf module (with the pdf.js worker configured) exactly once and
+ * cache the promise. Exported so non-overlay callers (e.g. headless page-text
+ * extraction in `pdf-text.ts`) reuse the same single worker setup instead of
+ * spinning up a second loader.
+ */
+export function loadReactPdf(): Promise<ReactPdfModule> {
   if (!_pdfModulePromise) {
     _pdfModulePromise = import('react-pdf').then((mod) => {
       // Worker served from public/ as .js — CDNs/servers universally serve .js with correct MIME type

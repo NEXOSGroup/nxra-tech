@@ -27,8 +27,10 @@ import { EnergyChart } from './EnergyChart';
 // Demo chart overlays (co-located in plugins/demo/)
 import { SensorChartOverlay } from './SensorChartOverlay';
 import { DriveChartOverlay } from './DriveChartOverlay';
-import { DocViewerOverlay } from '../../core/hmi/DocViewerOverlay';
 import { openPdfViewer } from '../../core/hmi/pdf-viewer-store';
+
+// Robot AI alarm assistant (FANUC CRX SYST-320)
+import { RobotContactForceAlarm } from './robot-alarm/RobotContactForceAlarm';
 
 const BOSCH_AAS_ID = 'https://aas.boschrexroth.com/ctrlxdrive/R911410072-MS2N-Demo-0001';
 const BOSCH_MS2N_PDF_ZIP_PATH = 'aasx/Documentation/R911347581_MS2N_Synchronous_Servomotors_Operating_Instructions_0002.pdf';
@@ -336,25 +338,6 @@ function SewMotorSlipMessage({ viewer }: UISlotProps) {
   );
 }
 
-const DOC_URL = `${import.meta.env.BASE_URL}pdf/fanuc-crx-educational-cell-manual.pdf#page=105`;
-
-function RobotMaintenanceMessage(_props: UISlotProps) {
-  const [docOpen, setDocOpen] = useState(false);
-  return (
-    <>
-      <TileCard
-        title="Robot Maintenance"
-        subtitle={<>Motor J4 overheating — <a href="#" onClick={(e) => { e.preventDefault(); e.stopPropagation(); setDocOpen(true); }} style={{ color: '#4fc3f7', textDecoration: 'underline', cursor: 'pointer' }}>see manual p.105</a></>}
-        severity="warning"
-        icon="build"
-        timestamp="Today"
-        componentPath="A4"
-      />
-      {docOpen && <DocViewerOverlay url={DOC_URL} title="Robot Maintenance — Manual p.105" onClose={() => setDocOpen(false)} />}
-    </>
-  );
-}
-
 // ─── Plugin ─────────────────────────────────────────────────────────────
 
 export class DemoHMIPlugin implements RVViewerPlugin {
@@ -377,6 +360,6 @@ export class DemoHMIPlugin implements RVViewerPlugin {
     { slot: 'messages', component: DriveOverloadMessage, order: 10 },
     { slot: 'messages', component: MaintenanceDueMessage, order: 20 },
     { slot: 'messages', component: DriveInfoMessage, order: 30 },
-    { slot: 'messages', component: RobotMaintenanceMessage, order: 40 },
+    { slot: 'messages', component: RobotContactForceAlarm, order: 40 },
   ];
 }

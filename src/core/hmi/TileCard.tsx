@@ -30,9 +30,15 @@ export interface TileCardProps {
   componentPath?: string;
   /** Called on card body click — overrides default componentPath focus when provided. */
   onAction?: () => void;
+  /**
+   * Optional footer button row rendered below the card body. Buttons here must call
+   * `e.stopPropagation()` so they don't trigger the card-body click. Purely additive —
+   * omitting it keeps the card identical to its previous layout.
+   */
+  actions?: React.ReactNode;
 }
 
-export function TileCard({ title, subtitle, severity, icon, timestamp, componentPath, onAction }: TileCardProps) {
+export function TileCard({ title, subtitle, severity, icon, timestamp, componentPath, onAction, actions }: TileCardProps) {
   const color = severityColors[severity];
   const viewer = useViewer();
 
@@ -95,6 +101,11 @@ export function TileCard({ title, subtitle, severity, icon, timestamp, component
           </Box>
         </Box>
       </Box>
+      {actions && (
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mt: 1 }}>
+          {actions}
+        </Box>
+      )}
     </Paper>
   );
 }

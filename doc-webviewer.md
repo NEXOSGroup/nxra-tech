@@ -222,6 +222,7 @@ src/
 │   │   ├── index.ts                     # Barrel exports
 │   │   ├── kpi-demo-plugin.ts           # OEE/Parts/CycleTime demo data
 │   │   ├── demo-hmi-plugin.tsx          # Demo KPI cards, buttons, messages
+│   │   ├── robot-alarm/                 # FANUC CRX "Ask AI" alarm assistant
 │   │   ├── machine-control-plugin.ts    # Machine start/stop panel
 │   │   ├── maintenance-plugin.ts        # Maintenance checklists
 │   │   ├── test-axes-plugin.tsx         # Manual axis control slider
@@ -407,6 +408,9 @@ The `GizmoOverlayManager` (`viewer.gizmoManager`) is a reusable infrastructure f
 
 ### Component Event Dispatcher
 Per-component event callbacks for `onHover` / `onClick` / `onSelect` are routed centrally via `viewer.componentEventDispatcher` — components implement optional methods on the `RVComponent` interface and the dispatcher resolves which component matches each viewer-level event (via `node.userData._rvComponentInstance` + parent-chain walk). Exception-isolated and listener-leak-safe. See [doc-extending-webviewer.md § 18](./doc-extending-webviewer.md#18-component-event-dispatcher-viewercomponenteventdispatcher).
+
+### AI Alarm Assistant (demo)
+The standard demo ships a FANUC CRX alarm tile (`src/plugins/demo/robot-alarm/`) for **SYST-320 — Contact Force Exceeds Limit**. The card offers a prominent **Ask AI** button and a **History** icon button (badge = note count). Ask AI shows a short "analyzing" spinner, then types out a structured answer: diagnosis, recommended steps, a **live excerpt pulled from the bundled FANUC PDF** with a page deep-link, a summary of what previous operators did, and a **Sources** block whose entries open the manual at the cited page. The History dialog lists the operator notes and lets a visitor add their own (stored in `localStorage`); a new note is considered in the next answer. The assistant answer is generated client-side via an `AlarmAssistantProvider` seam — no backend — while the PDF excerpt and page links are real.
 
 ### Raycast System
 
