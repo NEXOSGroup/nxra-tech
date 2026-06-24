@@ -48,9 +48,11 @@ Interactive 3D models that let prospects explore machines live in the browser. M
 Build browser-based 3D product configurators where customers select options, variants, and accessories — and see the result rendered in real time. Combine with the plugin system to add pricing, BOM generation, or quote workflows.
 
 ### Layout Planning
-Assemble factory layouts directly in the browser — drag conveyors, robots, fixtures, and pallets from a parts library onto a grid, connect them with typed snap points, and arrange them with transform gizmos. Ships with a standard parts library and loads any GLB catalog straight from a GitHub repository.
+Assemble factory layouts directly in the browser — drag conveyors, robots, fixtures, and pallets from a parts library onto a grid, connect them with typed snap points, and arrange them with transform gizmos. Ships with a standard parts library, and can additionally load GLB catalogs from a URL or GitHub repository.
 
 ![Layout Planner — the library panel with conveyors and pallets, placing a snap-connected chain conveyor on the grid](docs/images/screenshot-layout-planner.jpg)
+
+**Try it live:** [Layout Planner demo](https://web.realvirtual.io/demo/?scene=published%3ADemoPlanner&mode=planner)
 
 ### Training & Onboarding
 Operators learn machine behavior interactively before touching the real system. No software installation, no VPN, no IT department required.
