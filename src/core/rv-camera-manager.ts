@@ -13,6 +13,8 @@ import {
   PerspectiveCamera,
   OrthographicCamera,
   Vector3,
+  Quaternion,
+  Euler,
   Box3,
   Matrix4,
   Mesh,
@@ -22,6 +24,22 @@ import type { Renderer } from 'three/webgpu';
 import type { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { ProjectionType } from './hmi/visual-settings-store';
 import type { LeftPanelManager } from './hmi/left-panel-manager';
+import type { FollowSource } from './engine/rv-follow-source';
+
+/** Follow/Sit-On tracking mode. */
+export type CameraFollowMode = 'off' | 'follow' | 'siton';
+
+/**
+ * Follow smoothing rate (per second) for the frame-rate-independent damping
+ * `alpha = 1 - exp(-FOLLOW_DAMPING * dt)`. Higher = snappier follow.
+ */
+const FOLLOW_DAMPING = 12;
+
+/** Look sensitivity (radians per pixel) for Sit-On mouse look. */
+const LOOK_SENSITIVITY = 0.0025;
+
+/** Pitch clamp for Sit-On look (slightly under 90° to avoid gimbal flip). */
+const MAX_LOOK_PITCH = Math.PI / 2 - 0.01;
 
 /** Pixel offsets for panels obscuring the 3D viewport. */
 export interface ViewportOffset {
@@ -77,6 +95,28 @@ export class CameraManager {
   private state: ViewerCameraState;
   cameraAnim: CameraAnimation | null = null;
   projectionAnim: ProjectionAnimation | null = null;
+
+  // ─── Follow / Sit-On state ────────────────────────────────────────
+  private _followMode: CameraFollowMode = 'off';
+  private _source: FollowSource | null = null;
+  /** Sit-On seat offset in the target's local frame. */
+  private _seatLocalOffset = new Vector3();
+  /** Accumulated Sit-On mouse-look angles. */
+  private _lookYaw = 0;
+  private _lookPitch = 0;
+  /** Saved orbit state for restore on exit. */
+  private _savedCamPos = new Vector3();
+  private _savedCamTarget = new Vector3();
+
+  // Pre-allocated temps (NO GC in the per-frame tick):
+  private _tmpPos = new Vector3();
+  private _tmpPrevTarget = new Vector3();   // delta-follow previous target
+  private _tmpDelta = new Vector3();
+  private _tmpOffset = new Vector3();        // rotated seat offset
+  private _tmpQuat = new Quaternion();
+  private _lookQuat = new Quaternion();      // mouse-look quaternion
+  private _tmpEuler = new Euler(0, 0, 0, 'YXZ');
+  private _tmpBox = new Box3();
 
   constructor(state: ViewerCameraState) {
     this.state = state;
@@ -167,6 +207,120 @@ export class CameraManager {
     this.state.controls.target.lerpVectors(this.cameraAnim.startTgt, this.cameraAnim.endTgt, e);
 
     if (t >= 1) this.cameraAnim = null;
+  }
+
+  // ─── Follow / Sit-On ──────────────────────────────────────────────
+
+  /** Current follow/sit-on tracking mode. */
+  get followMode(): CameraFollowMode { return this._followMode; }
+
+  /**
+   * Start orbit-follow: the camera keeps its relative offset to the target as
+   * the target moves. OrbitControls stays ENABLED so the user can keep
+   * orbiting/zooming around the moving target (delta-pattern in tickFollow).
+   */
+  startFollow(src: FollowSource): void {
+    this.cancelCameraAnimation();
+    this._source = src;
+    this._followMode = 'follow';
+    this._savedCamPos.copy(this.state._activeCamera.position);
+    this._savedCamTarget.copy(this.state.controls.target);
+    // OrbitControls stays active — target is carried along each tick.
+  }
+
+  /**
+   * Start sit-on: the camera rides on the target (position + orientation
+   * follow it) and the user can look around with the mouse. Only meaningful in
+   * perspective — if currently orthographic, switch to perspective first.
+   */
+  startSitOn(src: FollowSource, seatLocalOffset?: Vector3): void {
+    if (this.projection === 'orthographic') this.projection = 'perspective';
+    this.cancelCameraAnimation();
+    this._source = src;
+    this._followMode = 'siton';
+    this._savedCamPos.copy(this.state._activeCamera.position);
+    this._savedCamTarget.copy(this.state.controls.target);
+    this.state.controls.enabled = false;       // same as FPV — we own the camera
+    this._lookYaw = 0;
+    this._lookPitch = 0;
+    src.getBounds(this._tmpBox);
+    if (seatLocalOffset) {
+      this._seatLocalOffset.copy(seatLocalOffset);
+    } else {
+      this._defaultSeatOffset(this._tmpBox, this._seatLocalOffset);
+    }
+  }
+
+  /**
+   * Leave follow/sit-on. Re-enables OrbitControls; when `restore` is true,
+   * smoothly animates back to the view captured on entry.
+   */
+  stopFollowMode(restore = true): void {
+    if (this._followMode === 'off') return;
+    this._followMode = 'off';
+    this._source = null;
+    this.state.controls.enabled = true;
+    if (restore) this.animateCameraTo(this._savedCamPos, this._savedCamTarget, 0.4);
+  }
+
+  /** Apply a Sit-On mouse-look delta (pixels). No-op outside Sit-On. */
+  applyLookDelta(dx: number, dy: number, sensitivity = LOOK_SENSITIVITY): void {
+    if (this._followMode !== 'siton') return;
+    this._lookYaw -= dx * sensitivity;
+    this._lookPitch -= dy * sensitivity;
+    this._lookPitch = Math.max(-MAX_LOOK_PITCH, Math.min(MAX_LOOK_PITCH, this._lookPitch));
+    this.state._renderDirty = true;
+  }
+
+  /**
+   * Per-frame follow tick. MUST be called from the render loop BEFORE
+   * `controls.update()` so OrbitControls applies the user orbit on top of the
+   * carried target (Follow) and so the camera pose isn't overwritten.
+   */
+  tickFollow(dtSec: number): void {
+    if (this._followMode === 'off' || !this._source) return;
+    // Target vanished (MU consumed, node removed) → end the mode cleanly.
+    if (!this._source.isAlive()) { this.stopFollowMode(false); return; }
+
+    const cam = this.state._activeCamera;
+    const alpha = 1 - Math.exp(-FOLLOW_DAMPING * dtSec);   // frame-rate-independent
+
+    if (this._followMode === 'follow') {
+      // DELTA-offset pattern (preserves user orbit): move controls.target toward
+      // the part, then shift the camera by the SAME delta — never set the camera
+      // position absolutely. controls.update() (in render()) then re-applies the
+      // user's orbit around the carried target.
+      this._tmpPrevTarget.copy(this.state.controls.target);
+      this._source.getWorldPosition(this._tmpPos);
+      this.state.controls.target.lerp(this._tmpPos, alpha);
+      this._tmpDelta.copy(this.state.controls.target).sub(this._tmpPrevTarget);
+      cam.position.add(this._tmpDelta);
+    } else { // 'siton'
+      this._source.getWorldPosition(this._tmpPos);
+      this._source.getWorldQuaternion(this._tmpQuat);
+      // Camera position = part position + seat offset (rotated into part frame).
+      this._tmpOffset.copy(this._seatLocalOffset).applyQuaternion(this._tmpQuat);
+      cam.position.copy(this._tmpPos).add(this._tmpOffset);
+      // Camera orientation = part orientation × mouse-look (Euler YXZ), GC-free.
+      this._tmpEuler.set(this._lookPitch, this._lookYaw, 0, 'YXZ');
+      this._lookQuat.setFromEuler(this._tmpEuler);
+      cam.quaternion.copy(this._tmpQuat).multiply(this._lookQuat);
+    }
+    this.state._renderDirty = true;   // keep rendering while the mode is active
+  }
+
+  /**
+   * Default Sit-On seat offset from the target's world bounds: a little above
+   * the box top, centered. Falls back to (0, 1, 0) for an empty/degenerate box.
+   */
+  private _defaultSeatOffset(box: Box3, out: Vector3): void {
+    if (box.isEmpty() || !isFinite(box.min.x) || !isFinite(box.max.x)) {
+      out.set(0, 1, 0);
+      return;
+    }
+    const sizeY = box.max.y - box.min.y;
+    // Eye height a bit above the top of the part.
+    out.set(0, sizeY * 0.5 + Math.max(sizeY * 0.25, 0.2), 0);
   }
 
   // ─── Projection Animation ─────────────────────────────────────────

@@ -19,7 +19,7 @@ import type { NodeSearchResult } from './engine/rv-node-registry';
 import type { HoverableType, ObjectHoverData, ObjectUnhoverData, ObjectClickData } from './engine/rv-raycast-manager';
 import type { SelectionSnapshot } from './engine/rv-selection-manager';
 import type { MultiuserSnapshot } from '../plugins/multiuser-plugin';
-import type { McpBridgeSnapshot } from '../plugins/mcp-bridge-plugin';
+import type { McpBridgeSnapshot, McpServerLogLine } from '../plugins/mcp-bridge-plugin';
 import type { ModeId } from './rv-mode-manager';
 import type { RenderMode } from './rv-render-modes';
 import type { Object3D } from 'three';
@@ -106,11 +106,17 @@ export interface ViewerEvents {
   'fpv-enter': void;
   'fpv-exit': void;
 
+  // ── Camera Follow / Sit-On events ──
+  /** Fired when the Follow/Sit-On camera mode changes (toolbar buttons listen
+   *  for the active state). `mode` is null when neither mode is active. */
+  'camera-mode-changed': { mode: 'follow' | 'siton' | null };
+
   // ── Multiuser events (emitted by multiuser-plugin) ──
   'multiuser-changed': MultiuserSnapshot;
 
   // ── MCP Bridge events (emitted by mcp-bridge-plugin) ──
   'mcp-bridge-changed': McpBridgeSnapshot;
+  'mcp-bridge-log': McpServerLogLine[];
 
   // ── Context Menu events ──
   'context-menu-request': { pos: { x: number; y: number }; path: string; node: Object3D };

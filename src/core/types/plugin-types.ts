@@ -118,6 +118,28 @@ export interface FpvPluginAPI {
   toggle(): void;
 }
 
+// ─── Camera Follow / Sit-On Types ─────────────────────────────────────────
+
+/** Active camera follow mode exposed by CameraFollowPlugin (null = inactive). */
+export type CameraFollowMode = 'follow' | 'siton' | null;
+
+/**
+ * Public API surface of CameraFollowPlugin consumed by the camera toolbar.
+ */
+export interface CameraFollowPluginAPI {
+  readonly id: string;
+  /** Active mode, or null when neither Follow nor Sit-On is running. */
+  readonly mode: CameraFollowMode;
+  /** Toggle a mode: re-invoking the active mode exits, otherwise enters it. */
+  toggle(mode: 'follow' | 'siton'): void;
+  /** Enter a mode for the current selection (no-op if nothing followable). */
+  enter(mode: 'follow' | 'siton'): void;
+  /** Leave the active mode and restore the entry view. */
+  exit(): void;
+  /** Whether a followable part is currently selected. */
+  canFollow(): boolean;
+}
+
 // ─── MCP Bridge Types ───────────────────────────────────────────────────
 
 /**
@@ -127,6 +149,14 @@ export interface McpBridgePluginAPI {
   readonly id: string;
   reconnect(port?: string): void;
   setEnabled(enabled: boolean): void;
+  /** Set the target port without connecting (applied on next enable/reconnect). */
+  setPort(port: string): void;
+  /** Ask the bridge server to shut down (process exits; restart via the MCP host). */
+  shutdownServer(): void;
+  /** Pause the bridge server (stop accepting browser connections). */
+  pauseServer(): void;
+  /** Resume accepting browser connections. */
+  resumeServer(): void;
 }
 
 // ─── Multiuser Types ────────────────────────────────────────────────────

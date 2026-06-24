@@ -13,7 +13,8 @@
  */
 
 import { useState, useEffect } from 'react';
-import { Vector3, Raycaster, Object3D, Euler, MathUtils } from 'three';
+import { Vector3, Raycaster, Object3D, Euler } from 'three';
+import { applyMouseLook, type LookState } from './_shared/camera-look';
 import { BaseViewerPlugin } from '../core/rv-base-plugin';
 import type { RVViewer } from '../core/rv-viewer';
 import type { LoadResult } from '../core/engine/rv-scene-loader';
@@ -35,9 +36,6 @@ const DEFAULT_SPEED = 2.5;
 const DEFAULT_SPRINT_SPEED = 5.0;
 const DEFAULT_SENSITIVITY = 0.002;
 const DEFAULT_EYE_HEIGHT = 1.7;
-
-/** Max pitch angle in radians (slightly less than 90° to avoid gimbal lock). */
-const MAX_PITCH = MathUtils.degToRad(85);
 
 // ─── Key codes for WASD + arrows ────────────────────────────────────────
 
@@ -102,9 +100,8 @@ export class FpvPlugin extends BaseViewerPlugin {
   private _currentGroundY = 0;
   private _hasGroundHit = false;
 
-  // Camera Euler angles (yaw = Y rotation, pitch = X rotation)
-  private _yaw = 0;
-  private _pitch = 0;
+  // Camera look state (yaw = Y rotation, pitch = X rotation), shared helper.
+  private _look: LookState = { yaw: 0, pitch: 0 };
 
   // Right-click drag state
   private _isLooking = false;
@@ -290,8 +287,8 @@ export class FpvPlugin extends BaseViewerPlugin {
     // Initialize yaw/pitch from current camera orientation
     const euler = new Euler();
     euler.setFromQuaternion(viewer.camera.quaternion, 'YXZ');
-    this._yaw = euler.y;
-    this._pitch = euler.x;
+    this._look.yaw = euler.y;
+    this._look.pitch = euler.x;
 
     // Position camera at current orbit position but at eye height
     const camPos = viewer.camera.position;
@@ -443,17 +440,8 @@ export class FpvPlugin extends BaseViewerPlugin {
 
   private _applyMouseLook(movementX: number, movementY: number): void {
     if (!this._viewer) return;
-
-    this._yaw -= movementX * this.sensitivity;
-    this._pitch -= movementY * this.sensitivity;
-
-    // Clamp pitch to avoid flipping
-    this._pitch = MathUtils.clamp(this._pitch, -MAX_PITCH, MAX_PITCH);
-
-    // Apply rotation via Euler (YXZ order: yaw first, then pitch)
-    const euler = new Euler(this._pitch, this._yaw, 0, 'YXZ');
-    this._viewer.camera.quaternion.setFromEuler(euler);
-
+    // Shared GC-free yaw/pitch accumulation → camera quaternion (YXZ, clamped).
+    applyMouseLook(this._look, movementX, movementY, this.sensitivity, this._viewer.camera.quaternion);
     this._viewer.markRenderDirty();
   }
 

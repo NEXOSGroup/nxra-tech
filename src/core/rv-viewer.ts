@@ -60,6 +60,7 @@ import {
   subscribeVanishMUs,
 } from './hmi/visual-settings-store';
 import { CameraManager, type ViewportOffset } from './rv-camera-manager';
+import type { FollowSource } from './engine/rv-follow-source';
 import { VisualSettingsManager } from './rv-visual-settings-manager';
 import { getRenderMode, type RenderMode } from './rv-render-modes';
 import Stats from 'stats-gl';
@@ -3808,6 +3809,39 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   /** Whether a projection animation is currently in progress. */
   get isProjectionAnimating(): boolean { return this._cameraManager.isProjectionAnimating; }
 
+  // ─── Camera Follow / Sit-On (delegated to CameraManager) ───────────
+  //
+  // CameraManager is an internal implementation detail (no public getter); the
+  // Follow/Sit-On modes are exposed through these facade methods, consistent
+  // with animateCameraTo(). Each kicks markRenderDirty() so the first follow
+  // tick runs even under render-on-demand (avoids a render-on-demand chicken/egg).
+
+  /** Start orbit-follow of a moving target (keeps relative offset; orbit stays live). */
+  startCameraFollow(src: FollowSource): void {
+    this._cameraManager.startFollow(src);
+    this.markRenderDirty();
+  }
+
+  /** Start sit-on: ride the target's pose with free mouse look (perspective only). */
+  startCameraSitOn(src: FollowSource, seat?: Vector3): void {
+    this._cameraManager.startSitOn(src, seat);
+    this.markRenderDirty();
+  }
+
+  /** Leave follow/sit-on; `restore` animates back to the entry view. */
+  stopCameraFollow(restore = true): void {
+    this._cameraManager.stopFollowMode(restore);
+    this.markRenderDirty();
+  }
+
+  /** Apply a Sit-On mouse-look delta (pixels). No-op outside Sit-On. */
+  applyCameraLookDelta(dx: number, dy: number): void {
+    this._cameraManager.applyLookDelta(dx, dy);
+  }
+
+  /** Current camera follow mode ('off' | 'follow' | 'siton'). */
+  get cameraFollowMode(): 'off' | 'follow' | 'siton' { return this._cameraManager.followMode; }
+
   // ──── Helper Methods für HMI/Plugin-Konsumenten (Phase 4b of plan-182) ────
   //
   // Diese Methoden delegieren an die Sub-Facaden (_scene/_camera/_controls)
@@ -4144,6 +4178,10 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     // place, so the renderer needs to redraw every frame for the duration.
     this._cameraManager.tickProjectionAnimation(frameDt);
     if (this._cameraManager.isProjectionAnimating) this._renderDirty = true;
+    // Follow / Sit-On tracking — MUST run before controls.update() so the
+    // carried orbit target / camera pose isn't overwritten (sets _renderDirty
+    // while a mode is active).
+    this._cameraManager.tickFollow(frameDt);
     // Damping: keep rendering for N frames after last user input
     if (this._dampingFramesRemaining > 0) {
       this._dampingFramesRemaining--;

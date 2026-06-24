@@ -3,9 +3,9 @@
 
 import { useState, useRef, useCallback, useEffect, Fragment } from 'react';
 import { Vector3 } from 'three';
-import { Visibility, VisibilityOff, DirectionsWalk, PhotoCamera, PhotoCameraOutlined } from '@mui/icons-material';
+import { Visibility, VisibilityOff, DirectionsWalk, PhotoCamera, PhotoCameraOutlined, GpsFixed, EventSeat } from '@mui/icons-material';
 import { useViewer } from '../../hooks/use-viewer';
-import type { FpvPluginAPI } from '../types/plugin-types';
+import type { FpvPluginAPI, CameraFollowPluginAPI } from '../types/plugin-types';
 import { loadVisualSettings, saveVisualSettings, type CameraBookmark } from './visual-settings-store';
 import { toggleHmiVisible, useHmiVisible } from './hmi-visibility-store';
 import { ActionSegment, ActionDivider } from './action-group';
@@ -140,6 +140,56 @@ export function FpvBarButton() {
       active={active}
       onClick={handleClick}
       icon={<DirectionsWalk />}
+    />
+  );
+}
+
+/** Hook: subscribe to the camera follow mode + whether the selection is followable. */
+function useCameraFollowState(): { mode: 'follow' | 'siton' | null; canFollow: boolean } {
+  const viewer = useViewer();
+  const [mode, setMode] = useState<'follow' | 'siton' | null>(null);
+  const [canFollow, setCanFollow] = useState(false);
+  useEffect(() => {
+    const plugin = () => viewer.getPlugin<CameraFollowPluginAPI>('camera-follow');
+    const onMode = (e: { mode: 'follow' | 'siton' | null }) => setMode(e.mode);
+    const onSel = () => setCanFollow(!!plugin()?.canFollow());
+    viewer.on('camera-mode-changed', onMode);
+    viewer.on('selection-changed', onSel);
+    onSel(); // initial state
+    return () => {
+      viewer.off('camera-mode-changed', onMode);
+      viewer.off('selection-changed', onSel);
+    };
+  }, [viewer]);
+  return { mode, canFollow };
+}
+
+/** Follow toggle — the camera follows the selected moving part keeping the view distance. */
+export function FollowCamButton() {
+  const viewer = useViewer();
+  const { mode, canFollow } = useCameraFollowState();
+  return (
+    <ActionSegment
+      title="Follow selected part"
+      active={mode === 'follow'}
+      color={canFollow ? undefined : 'rgba(255,255,255,0.35)'}
+      icon={<GpsFixed />}
+      onClick={() => { if (canFollow) viewer.getPlugin<CameraFollowPluginAPI>('camera-follow')?.toggle('follow'); }}
+    />
+  );
+}
+
+/** Sit-On toggle — the camera rides on the selected part; right-drag to look around. */
+export function SitOnCamButton() {
+  const viewer = useViewer();
+  const { mode, canFollow } = useCameraFollowState();
+  return (
+    <ActionSegment
+      title="Sit on selected part (right-drag to look)"
+      active={mode === 'siton'}
+      color={canFollow ? undefined : 'rgba(255,255,255,0.35)'}
+      icon={<EventSeat />}
+      onClick={() => { if (canFollow) viewer.getPlugin<CameraFollowPluginAPI>('camera-follow')?.toggle('siton'); }}
     />
   );
 }

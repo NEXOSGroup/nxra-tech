@@ -15,7 +15,7 @@ import { FLOATING_TOP_MARGIN, ACTIVITY_BAR_WIDTH } from './layout-constants';
 import { useLeftWindowWidth, useRightWindowWidth } from '../../hooks/use-left-window-width';
 import { useViewportInsets } from '../../hooks/use-viewport-insets';
 import { ModeDropdown } from './ModeDropdown';
-import { CameraBookmarks, HmiToggleButton, FpvBarButton } from './CameraBar';
+import { CameraBookmarks, HmiToggleButton, FpvBarButton, FollowCamButton, SitOnCamButton } from './CameraBar';
 import { ActionGroupPill, ActionSegment, ActionDivider } from './action-group';
 import { SettingsPanel } from './SettingsPanel';
 import { SceneWindow } from './scene/SceneWindow';
@@ -137,7 +137,19 @@ export function TopBar() {
         }}
       >
         <SlotRenderer slot="toolbar-button-trailing" />
-        <ActionGroupPill><CameraBookmarks /></ActionGroupPill>
+        <ActionGroupPill>
+          <CameraBookmarks />
+          {/* Follow / Sit-On sit next to the camera bookmarks. Right-click drag
+              for Sit-On look has no touch equivalent → desktop only. */}
+          {!isMobileDevice() && (
+            <>
+              <ActionDivider />
+              <FollowCamButton />
+              <ActionDivider />
+              <SitOnCamButton />
+            </>
+          )}
+        </ActionGroupPill>
         <ActionGroupPill><HmiToggleButton /></ActionGroupPill>
         {viewer.groups && viewer.groups.groupCount > 0 && (
           <ActionGroupPill>
