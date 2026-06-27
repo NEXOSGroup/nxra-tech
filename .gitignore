@@ -17,3 +17,9 @@ LocalFolderTest/
 
 # Oversized AASX asset (exceeds GitHub 100 MB limit)
 public/aasx/26_SEW_KA47-DRN90M4.aasx
+
+# Test / dev demo models — excluded from the public deploy by the model allowlist
+# and kept out of the repo (only DemoRealvirtual* + the library ship publicly).
+public/models/DemoRobotIK.glb
+public/models/EuropalletEmpty.glb
+public/models/tests.glb
