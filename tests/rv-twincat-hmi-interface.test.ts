@@ -148,20 +148,22 @@ describe('mapTcHmiType', () => {
 });
 
 describe('mapTcHmiAccess', () => {
-  it('maps read access to input direction', () => {
-    expect(mapTcHmiAccess('read')).toBe('input');
-    expect(mapTcHmiAccess('Read')).toBe('input');
+  // PLC perspective: a 'write' symbol is a PLC input (viewer writes it); everything else
+  // is a PLC output (viewer reads it, read-only).
+  it('maps read access to output direction', () => {
+    expect(mapTcHmiAccess('read')).toBe('output');
+    expect(mapTcHmiAccess('Read')).toBe('output');
   });
 
-  it('maps write access to output direction', () => {
-    expect(mapTcHmiAccess('write')).toBe('output');
-    expect(mapTcHmiAccess('Write')).toBe('output');
+  it('maps write access to input direction', () => {
+    expect(mapTcHmiAccess('write')).toBe('input');
+    expect(mapTcHmiAccess('Write')).toBe('input');
   });
 
-  it('maps readwrite/undefined to input (default)', () => {
-    expect(mapTcHmiAccess('readwrite')).toBe('input');
-    expect(mapTcHmiAccess(undefined)).toBe('input');
-    expect(mapTcHmiAccess('')).toBe('input');
+  it('maps readwrite/undefined to output (default)', () => {
+    expect(mapTcHmiAccess('readwrite')).toBe('output');
+    expect(mapTcHmiAccess(undefined)).toBe('output');
+    expect(mapTcHmiAccess('')).toBe('output');
   });
 });
 
@@ -293,14 +295,15 @@ describe('TwinCatHmiInterface - Response Parsing', () => {
 
     // STRING should be filtered out
     expect(signals).toHaveLength(3);
+    // PLC perspective: readwrite/read → 'output' (viewer reads), write → 'input' (viewer writes).
     expect(signals.find((s: { name: string }) => s.name === 'PLC1.MAIN.bStart')).toMatchObject({
-      type: 'bool', direction: 'input',
+      type: 'bool', direction: 'output',
     });
     expect(signals.find((s: { name: string }) => s.name === 'PLC1.MAIN.nCounter')).toMatchObject({
-      type: 'int', direction: 'input',
+      type: 'int', direction: 'output',
     });
     expect(signals.find((s: { name: string }) => s.name === 'PLC1.MAIN.rTemp')).toMatchObject({
-      type: 'float', direction: 'output',
+      type: 'float', direction: 'input',
     });
     // STRING signal should NOT be present
     expect(signals.find((s: { name: string }) => s.name === 'PLC1.MAIN.sName')).toBeUndefined();

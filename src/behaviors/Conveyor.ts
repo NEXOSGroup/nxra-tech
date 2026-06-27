@@ -79,6 +79,13 @@ function tryRelease(self: ConveyorSelf, mu: RV.MU): boolean {
 const def = {
   type: 'Conveyor' as const,
   kind: 'conveyor' as const,
+  description: 'Straight conveyor that transports parts along its length.',
+  mcpDocs:
+    'Straight transport conveyor. Material flows along its local +Z: input snap ' +
+    'Snap-ZN-convroll (-Z end), output snap Snap-ZP-convroll (+Z end). Chain a run by ' +
+    'snap-attaching the next conveyor to the previous output (Snap-ZP-convroll). For a 90° ' +
+    'turn, insert a Turntable. Speed comes from the embedded Transport Drive (TargetSpeed); ' +
+    'the central drive-speed override scales it.',
   models: ['*Conveyor*'],
   // No DES timing fields: the transit timing is derived from the real belt
   // geometry (length) and the Transport Drive's TargetSpeed (speed), so there is
@@ -133,6 +140,24 @@ const def = {
       { id: 'stop', label: 'Stop', danger: true, dividerBefore: true,
         action: () => self.sig.Run.set(false) },
     ]);
+  },
+
+  // Lifecycle: clear the per-run flow state on reset (part-at-sensor flag, part
+  // counter, blocked/transit bookkeeping) and zero the published outputs; the
+  // belt drive itself is reset by RVDrive.reset(). `start` re-asserts Run so the
+  // belt resumes after a reset.
+  reset(self: ConveyorSelf): void {
+    const l = self.local;
+    l.partAtSensor = false;
+    l.partCount = 0;
+    l.blockedMUs.length = 0;
+    l.transitMUs.clear();
+    self.sig.PartCount.set(0);
+    self.sig.Occupied.set(false);
+    self.sig.Running.set(false);
+  },
+  start(self: ConveyorSelf): void {
+    self.sig.Run.set(true);
   },
 
   continuous: {

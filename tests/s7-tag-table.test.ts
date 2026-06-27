@@ -71,6 +71,41 @@ describe('parseTagTable — CSV', () => {
     expect(result.tags[1].dataType).toBe('DInt');
   });
 
+  it('bareAddress: accepts byte.bit addresses without an area letter (raw process image)', async () => {
+    const csv = [
+      'Name,Type,Adress,Comment',
+      '3146,Bool,96.0,bare bit',
+      '3145,Bool,96.1,bare bit',
+    ].join('\n');
+    const result = await parseTagTable(csvFile(csv));
+    expect(result.tags).toHaveLength(2);
+    expect(result.tags[0].address).toBe('96.0');
+    expect(result.tags[0].area).toBe('');
+    expect(result.tags[1].address).toBe('96.1');
+    expect(result.warnings).toHaveLength(0);
+  });
+
+  it('bareAddressByte: accepts a bare byte address without area letter or bit', async () => {
+    const csv = [
+      'Name,Type,Adress,Comment',
+      'Counter,Word,96,bare byte word',
+    ].join('\n');
+    const result = await parseTagTable(csvFile(csv));
+    expect(result.tags).toHaveLength(1);
+    expect(result.tags[0].address).toBe('96');
+  });
+
+  it('bareAddressNoHeader: first row with a bare address is imported as data (no header)', async () => {
+    const csv = [
+      '3146,Bool,96.0,bare bit',
+      '3145,Bool,96.1,bare bit',
+    ].join('\n');
+    const result = await parseTagTable(csvFile(csv));
+    expect(result.tags).toHaveLength(2);
+    expect(result.tags[0].name).toBe('3146');
+    expect(result.tags[1].name).toBe('3145');
+  });
+
   it('invalidAddress: produces a warning and drops the tag', async () => {
     const csv = [
       'Name,Type,Adress,Comment',
@@ -133,20 +168,21 @@ describe('parseTagTable — CSV', () => {
 });
 
 describe('deriveWireType', () => {
-  it('Bool → PLCInputBool', () => {
-    expect(deriveWireType('Bool')).toBe('PLCInputBool');
+  // Imported process-image signals are PLC outputs (PLC writes, viewer reads — read-only).
+  it('Bool → PLCOutputBool', () => {
+    expect(deriveWireType('Bool')).toBe('PLCOutputBool');
   });
 
-  it('Word/Byte/Int/DWord/DInt → PLCInputInt', () => {
-    expect(deriveWireType('Word')).toBe('PLCInputInt');
-    expect(deriveWireType('Byte')).toBe('PLCInputInt');
-    expect(deriveWireType('Int')).toBe('PLCInputInt');
-    expect(deriveWireType('DWord')).toBe('PLCInputInt');
-    expect(deriveWireType('DInt')).toBe('PLCInputInt');
+  it('Word/Byte/Int/DWord/DInt → PLCOutputInt', () => {
+    expect(deriveWireType('Word')).toBe('PLCOutputInt');
+    expect(deriveWireType('Byte')).toBe('PLCOutputInt');
+    expect(deriveWireType('Int')).toBe('PLCOutputInt');
+    expect(deriveWireType('DWord')).toBe('PLCOutputInt');
+    expect(deriveWireType('DInt')).toBe('PLCOutputInt');
   });
 
-  it('Real/LReal → PLCInputFloat', () => {
-    expect(deriveWireType('Real')).toBe('PLCInputFloat');
-    expect(deriveWireType('LReal')).toBe('PLCInputFloat');
+  it('Real/LReal → PLCOutputFloat', () => {
+    expect(deriveWireType('Real')).toBe('PLCOutputFloat');
+    expect(deriveWireType('LReal')).toBe('PLCOutputFloat');
   });
 });

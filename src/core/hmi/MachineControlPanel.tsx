@@ -21,6 +21,7 @@ import {
 import { useViewer } from '../../hooks/use-viewer';
 import { useMobileLayout } from '../../hooks/use-mobile-layout';
 import { useMachineControl } from '../../hooks/use-machine-control';
+import { useDropOrphanedPanelSlot } from '../../hooks/use-drop-orphaned-panel-slot';
 import { LeftPanel } from './LeftPanel';
 import { MACHINE_PANEL_WIDTH } from './layout-constants';
 import type { MachineControlPluginAPI, MachineState, MachineMode, MachineComponent, ComponentStatus } from '../types/plugin-types';
@@ -535,6 +536,11 @@ export function MachineControlPanel() {
 
   const handleClose = useCallback(() => { lpm.close('machine-control'); }, [lpm]);
   const handleModeChange = useCallback((mode: MachineMode) => { plugin?.setMode(mode); }, [plugin]);
+
+  // The per-model demo HMI plugin backs this slot; drop it if the slot was
+  // restored for a model that doesn't load the plugin (else its inset reserves
+  // an empty strip — see useDropOrphanedPanelSlot).
+  useDropOrphanedPanelSlot('machine-control', isOpen, !!plugin);
 
   if (!isOpen || !plugin) return null;
 

@@ -35,7 +35,7 @@ beforeEach(() => {
 
 // ─── Mock host (mirrors tests/conveyor-behavior.test.ts) ─────────────────────
 
-function makeHost(root: Object3D): { host: BindContextHost; values: Map<string, boolean | number> } {
+function makeHost(root: Object3D): { host: BindContextHost; values: Map<string, boolean | number>; events: EventEmitter<Record<string, unknown>> } {
   const subs = new Map<string, Set<(v: boolean | number) => void>>();
   const values = new Map<string, boolean | number>();
   const events = new EventEmitter<Record<string, unknown>>();
@@ -53,7 +53,7 @@ function makeHost(root: Object3D): { host: BindContextHost; values: Map<string, 
     drives: [],
     registry: null,
   };
-  return { host, values };
+  return { host, values, events };
 }
 
 interface FooLocal { ticks: number; setupRan: boolean; }
@@ -238,6 +238,52 @@ describe('defineLibraryComponent — statistics registration (Plan 201)', () => 
     expect(mgr.size).toBe(1);
     handle.dispose();
     expect(mgr.size).toBe(0);
+  });
+});
+
+describe('defineLibraryComponent — reset lifecycle wiring', () => {
+  it('invokes def.reset / def.start / def.resetStat on the matching viewer events', () => {
+    const calls: string[] = [];
+    const behavior = defineLibraryComponent<FooLocal>(makeDef({
+      reset(self) { calls.push('reset'); self.local.ticks = 0; },
+      start() { calls.push('start'); },
+      resetStat() { calls.push('resetStat'); },
+    }));
+    const root = new Object3D(); root.name = 'Foo';
+    const { host, events } = makeHost(root);
+    const { ctx, handle } = createBindContext(root, host, {} as KinematicsSpec);
+    behavior.bind(ctx);
+
+    // Drive the instance, then reset — the reset block restores local state.
+    iterateFixedUpdate(handle, DT);
+
+    events.emit('simulation-reset', undefined);
+    events.emit('simulation-resetstat', undefined);
+    events.emit('simulation-start', undefined);
+    expect(calls).toEqual(['reset', 'resetStat', 'start']);
+
+    // After dispose the handlers are unsubscribed (no duplicate firing).
+    handle.dispose();
+    events.emit('simulation-reset', undefined);
+    expect(calls.filter((c) => c === 'reset')).toHaveLength(1);
+  });
+
+  it('a disabled instance does NOT wire reset/start handlers', () => {
+    const calls: string[] = [];
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const behavior = defineLibraryComponent<FooLocal>(makeDef({
+      setup(self) { self.disable('missing node'); },
+      reset() { calls.push('reset'); },
+      start() { calls.push('start'); },
+    }));
+    const root = new Object3D(); root.name = 'Foo';
+    const { host, events } = makeHost(root);
+    const { ctx } = createBindContext(root, host, {} as KinematicsSpec);
+    behavior.bind(ctx);
+    events.emit('simulation-reset', undefined);
+    events.emit('simulation-start', undefined);
+    expect(calls).toEqual([]); // disabled before reset/start wiring
+    warn.mockRestore();
   });
 });
 

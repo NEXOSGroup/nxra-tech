@@ -132,6 +132,19 @@ export class RVGrip implements RVComponent {
     if (this.grippedMUs.includes(mu)) return;
     if (mu.isInstanced) return;
 
+    // Free the GripTarget this MU was sitting on (if any). The C# Grip clears the
+    // source Fixer/GripTarget when it picks a part; without this the target stays
+    // occupied forever, which (a) blocks follow-up parts from ever being parented
+    // onto it (so they no longer co-move with a moving target / machine axis), and
+    // (b) leaves parentBeforeGrip pointing at the target node — so a later fallback
+    // release would drop the part right back onto the (moving) target.
+    const sourceTargets = this.allGripTargets?.();
+    if (sourceTargets) {
+      for (const t of sourceTargets) {
+        if (t.occupiedBy === mu) t.clearOccupied();
+      }
+    }
+
     // Save parent before gripping
     mu.parentBeforeGrip = mu.node.parent;
 
@@ -187,15 +200,26 @@ export class RVGrip implements RVComponent {
         return;
       }
     }
-    // Fallback: just release at current world position
-    this.unfix(mu);
+    // Fallback: nothing recognized → release at the current world position under a
+    // stable StandardParent (matches C# AutoPlace → ReparentToStandardParent), so a
+    // part picked out of a moving Fixer does not snap back into the machine; the
+    // transport surface then claims it onto the belt.
+    this.unfix(mu, true);
   }
 
-  private unfix(mu: RVMovingUnit): void {
+  // Releases the MU. `toStandardParent` mirrors C# AutoPlace: a Place() that did
+  // NOT land on a GripTarget reparents to the StandardParent (here the scene root)
+  // at the current world position — NOT to parentBeforeGrip, which for a part
+  // picked out of a Fixer on a moving machine axis would drop it straight back into
+  // the (moving) machine. The transport surface then claims it onto the belt. A
+  // plain release (no auto-place) restores the pre-grip parent.
+  private unfix(mu: RVMovingUnit, toStandardParent = false): void {
     mu.isGripped = false;
 
-    // Reparent back to original parent (or scene root) preserving world transform
-    const restoreParent = mu.parentBeforeGrip ?? this.node.parent;
+    // Reparent preserving world transform.
+    const restoreParent = toStandardParent
+      ? this.sceneRoot()
+      : (mu.parentBeforeGrip ?? this.node.parent);
     if (restoreParent) {
       restoreParent.attach(mu.node);
     }
@@ -206,6 +230,15 @@ export class RVGrip implements RVComponent {
     if (idx >= 0) this.grippedMUs.splice(idx, 1);
 
     debug('grip', `Grip "${this.node.name}" released MU "${mu.getName()}"`);
+  }
+
+  /** Top-level scene root above this grip — a stable, non-moving container to
+   *  release parts into at their current world position (the StandardParent-null
+   *  equivalent of C# ReparentToStandardParent). */
+  private sceneRoot(): Object3D {
+    let n: Object3D = this.node;
+    while (n.parent) n = n.parent;
+    return n;
   }
 
   // ── Detection ──

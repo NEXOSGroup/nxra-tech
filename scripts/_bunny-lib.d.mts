@@ -86,3 +86,15 @@ export function stagePrivateProject(opts: {
   projectDir: string;
   googleAnalyticsId?: string;
 }): string;
+
+export const PUBLIC_MODEL_PREFIX: string;
+
+export interface PublicModelAllowlistResult {
+  kept: string[];
+  dropped: string[];
+  droppedAssets: string[];
+}
+export function applyPublicModelAllowlist(
+  distDir: string,
+  opts?: { prefix?: string; dryRun?: boolean },
+): PublicModelAllowlistResult;

@@ -228,6 +228,14 @@ export function defineLibraryComponent<
         });
       }
 
+      // Reset lifecycle: restore internal state to the start (reset), (re)start
+      // from the clean state (start), and clear stat accumulators (resetStat) —
+      // each wired to the matching viewer event. Authors opt in per block. Live
+      // instance only (we are past the disable checks).
+      if (def.reset) rv.onReset(() => def.reset!(self));
+      if (def.start) rv.onStart(() => def.start!(self));
+      if (def.resetStat) rv.onResetStat(() => def.resetStat!(self));
+
       if (c.teardown || (mgr && statsPath)) {
         rv.onDispose(() => {
           c.teardown?.(self);

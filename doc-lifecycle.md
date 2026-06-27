@@ -39,8 +39,8 @@ what is otherwise spread across `rv-viewer.ts`, `rv-plugin.ts`,
    │   PAUSED  (rendering continues,             pause-changed'   │
    │            fixed step skipped)                               │
    │                                                              │
-   │   resetSimulation()  — clears MUs + LogicSteps               │
-   │                        (drives/signals/pause untouched)      │
+   │   resetSimulation()  — restore start state (reset→start):    │
+   │                        behaviors/drives reset, MUs cleared   │
    └──────────────────────────────────────────────────────────────┘
                                   │
                                   ▼
@@ -172,30 +172,37 @@ requestAnimationFrame / renderer.setAnimationLoop tick
        ┌────────────────────────────────────────────┘
        ▼  RVViewer.fixedUpdate(dt):
        │
-       │  ── PRE STAGE (TickStage.PRE) ──────────────────────────────────
+       │  ── Setup (runs before TickStages) ─────────────────────────────
        │  1. playback.update(dt)             (DrivesRecorder playback, Active-gated)
        │  2. logicEngine.fixedUpdate(dt)     (LogicSteps, Active-gated)
-       │  3. for each replayRecording:       (ReplayRecording, Active-gated)
+       │  3. ikPaths[].fixedUpdate(dt)       (robot IK path replay; after
+       │                                      LogicStep, before the drive loop)
+       │  4. for each replayRecording:       (ReplayRecording, Active-gated)
        │       rr.fixedUpdate(dt)
        │
-       │  4. _prePlugins[].onFixedUpdatePre(dt)      ← legacy plugin callbacks
+       │  ── TickStage.PRE ──────────────────────────────────────────────
+       │  5. _prePlugins[].onFixedUpdatePre(dt)      ← legacy plugin callbacks
        │       (ErraticDriver, replay, CAM, interface-write — set drive targets)
        │     + onTick(PRE) callbacks
        │
-       │  ── SIM STAGE (TickStage.SIM) ──────────────────────────────────
-       │  5. drives[].update(dt)             ← drive physics (motion + behaviors)
+       │  ── TickStage.SIM ──────────────────────────────────────────────
+       │  6. drives[].update(dt)             ← drive physics (motion + behaviors)
        │
-       │  6. transportManager.update(dt)     (kinematic transport; skipped when
+       │  7. transportManager.update(dt)     (kinematic transport; skipped when
        │                                      a physics plugin handles transport)
        │
-       │  7. transportManager.updateTextureAnimations(dt)   (always)
+       │  8. transportManager.updateTextureAnimations(dt)   (always)
        │     tankFillManager.update()
        │     gizmoManager.tick(dt * 1000)
        │     pipeFlowManager.update(dt)
        │     + onTick(SIM) callbacks
        │
-       │  ── POST STAGE (TickStage.POST) ─────────────────────────────────
-       │  8. _postPlugins[].onFixedUpdatePost(dt)    ← legacy plugin callbacks
+       │  9. behaviors.tick(dt)              (discrete material-flow / DES
+       │                                      components; skipped when the unified
+       │                                      simulation kernel is active)
+       │
+       │  ── TickStage.POST ─────────────────────────────────────────────
+       │ 10. _postPlugins[].onFixedUpdatePost(dt)    ← legacy plugin callbacks
        │       (DriveRecorder, SensorMonitor, interface-read,
        │        chart sampling, event emission)
        │     + onTick(POST) callbacks
@@ -337,29 +344,39 @@ no drives/transport to advance.
 
 ### 6.2 `resetSimulation()` — "new demo run" without unload
 
-Effects:
+Restores the running model to its freshly-loaded **start** state — like a
+reload, but without re-fetching/re-parsing the GLB. Runs in three phases, each
+surfaced as an event so components react:
 
-- Clears all live MUs and resets transport counters (`totalSpawned`,
-  `totalConsumed`)
-- Resets all LogicSteps to `Idle` (`logicEngine.reset()`)
+1. **`'simulation-reset'`** — components restore their internal state to the
+   start: behaviors (Conveyor / Turntable / ChainTransfer) reset their FSM, part
+   counters, timers and routing bookkeeping; drives snap back to their authored
+   `StartPosition` (`RVDrive.reset()`); conveyor belt textures rewind. Then the
+   engine clears live MUs + transport counters (`transportManager.reset()`),
+   resets LogicSteps to `Idle` (`logicEngine.reset()`), and resets the active
+   DES executor.
+2. **`'simulation-resetstat'`** — statistics accumulators are cleared
+   (registrations persist). Also fired standalone for DES stat-only resets.
+3. **`'simulation-start'`** — components (re)start from the clean state (e.g. a
+   conveyor re-asserts `Run = true`).
 
 Intentionally **untouched**:
 
-- **Drives** — stay at current position; conveyor textures do not snap back
-- **Signals** — stay at current values (essential for Live mode — resetting
-  would just be overwritten on the next tick and would briefly visualise
-  stale data)
-- **Pause state** — reset can be invoked while paused or running
+- **Signals** are NOT blanket-reset — that would fight Live mode (Unity / PLC
+  stream), where the next tick overwrites them anyway. Instead each component
+  re-establishes only the signals it OWNS in its `onReset` / `onStart` handler
+  (e.g. a conveyor zeroes `PartCount`, re-asserts `Run`).
+- **Pause state** — reset can be invoked while paused or running.
 
-**No event fires today.** Plugins that need to observe a reset must wrap
-their own button/command. A dedicated `'simulation-reset'` event is on the
-roadmap.
+Components subscribe via the bind-context hooks `onReset` / `onStart` /
+`onResetStat` (a material-flow definition adds top-level `reset` / `start` /
+`resetStat` blocks), or directly via `viewer.on('simulation-reset', …)`.
 
 ### 6.3 Side-by-side
 
 | | drives | signals | MUs | LogicSteps | pause | camera | listeners |
 |---|---|---|---|---|---|---|---|
-| `resetSimulation()` | kept | kept | cleared | reset | kept | kept | kept |
+| `resetSimulation()` | reset to StartPosition | component-owned only | cleared | reset | kept | kept | kept |
 | `clearModel()` | gone | gone | gone | gone | kept | kept | kept |
 | `loadModel(newUrl)` | replaced | replaced | replaced | replaced | kept | kept | kept |
 | `dispose()` | gone | gone | gone | gone | gone | gone | gone |
@@ -451,6 +468,9 @@ For the complete list (hover, selection, charts, XR, FPV, layout, etc.) see
 | `'model-cleared'` | `void` | First step of `clearModel()` | HMI reset, listener cleanup |
 | `'scene-loaded'` | `{ scene: RvScene }` | After `loadScene()` Phase 5 | camera-startpos plugin, scene-aware overlays |
 | `'simulation-pause-changed'` | `{ paused, reasons, reason }` | On `idle ↔ paused` transition only | External PLC I/O, animations, recorders |
+| `'simulation-reset'` | `void` | `resetSimulation()` phase 1 | Behaviors / drives restoring start state (bind-context `onReset`) |
+| `'simulation-resetstat'` | `void` | `resetSimulation()` phase 2 (or DES stat-only reset) | Statistics accumulators (bind-context `onResetStat`) |
+| `'simulation-start'` | `void` | `resetSimulation()` phase 3 | Behaviors (re)starting from the clean state (bind-context `onStart`) |
 | `'connection-state-changed'` | `{ state, previous }` | Viewer-wide Live/Direct flip | Status badges, reconnection UX |
 | `'interface-connected'` | `{ interfaceId, type }` | Industrial interface attaches | Connection status per interface |
 | `'interface-disconnected'` | `{ interfaceId, reason? }` | Industrial interface drops | Reconnect UX, alarm raising |
@@ -461,7 +481,6 @@ For the complete list (hover, selection, charts, XR, FPV, layout, etc.) see
 
 - `'model-loading'` — would let plugins show a spinner during step 3 of §3.1
 - `'model-load-error'` — see §3.3
-- `'simulation-reset'` — see §6.2
 
 If you need one of these today, the workaround is documented inline above.
 

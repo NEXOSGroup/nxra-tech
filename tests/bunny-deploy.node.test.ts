@@ -33,6 +33,8 @@ import {
   buildRemoteIndex,
   mimeType,
   ALWAYS_UPLOAD_FILES,
+  applyPublicModelAllowlist,
+  PUBLIC_MODEL_PREFIX,
 } from '../scripts/_bunny-lib.mjs';
 
 // ─── 9.1 buildUploadUrl ──────────────────────────────────────────────────
@@ -158,6 +160,103 @@ describe('stagePrivateProject', () => {
     } finally {
       rmSync(staging, { recursive: true, force: true });
     }
+  });
+});
+
+// ─── 9.4b applyPublicModelAllowlist ──────────────────────────────────────
+
+describe('applyPublicModelAllowlist', () => {
+  let work: string;
+  beforeEach(() => { work = mkdtempSync(join(tmpdir(), 'rvallow-')); });
+  afterEach(() => { rmSync(work, { recursive: true, force: true }); });
+
+  /** Build a dist/ mirroring a real public build: verbatim models/ + library/,
+   *  plus the hashed assets/ duplicates Vite emits for every globbed GLB. */
+  function makeDist(): string {
+    const dist = join(work, 'dist');
+    mkdirSync(join(dist, 'models', 'library', 'PalletHandling'), { recursive: true });
+    mkdirSync(join(dist, 'assets'), { recursive: true });
+    // top-level models (verbatim publicDir copies)
+    for (const f of ['DemoRealvirtualWeb.glb', 'DemoRobotIK.glb', 'EuropalletEmpty.glb', 'tests.glb']) {
+      writeFileSync(join(dist, 'models', f), 'GLB');
+    }
+    // planner library (must always survive)
+    for (const f of ['Europallet.glb', 'EuropalletLoaded.glb', 'ChainConveyor-1m.glb']) {
+      writeFileSync(join(dist, 'models', 'library', 'PalletHandling', f), 'GLB');
+    }
+    writeFileSync(join(dist, 'models', 'library', 'catalog.json'), '{"entries":[]}');
+    // hashed assets/ duplicates (Vite content hash; note a hash may contain '-')
+    for (const f of [
+      'DemoRealvirtualWeb-D17zvQbu.glb', 'DemoRobotIK-DVCOxFk2.glb',
+      'EuropalletEmpty-CRO-B5qD.glb', 'tests-Du1D0p2I.glb',
+      'Europallet-YuOv3y_q.glb', 'EuropalletLoaded-Dc8dx8gC.glb', 'ChainConveyor-1m-CFqim7Ud.glb',
+      'index-abc.js',
+    ]) {
+      writeFileSync(join(dist, 'assets', f), 'X');
+    }
+    return dist;
+  }
+
+  it('keeps DemoRealvirtual* + library, prunes the rest incl. hashed copies', () => {
+    const dist = makeDist();
+    const res = applyPublicModelAllowlist(dist, { prefix: 'DemoRealvirtual' });
+
+    expect(res.kept).toEqual(['DemoRealvirtualWeb.glb']);
+    expect(res.dropped).toEqual(['DemoRobotIK.glb', 'EuropalletEmpty.glb', 'tests.glb']);
+
+    // top-level models pruned / kept on disk
+    expect(existsSync(join(dist, 'models', 'DemoRealvirtualWeb.glb'))).toBe(true);
+    expect(existsSync(join(dist, 'models', 'DemoRobotIK.glb'))).toBe(false);
+    expect(existsSync(join(dist, 'models', 'EuropalletEmpty.glb'))).toBe(false);
+    expect(existsSync(join(dist, 'models', 'tests.glb'))).toBe(false);
+
+    // planner library fully intact
+    expect(existsSync(join(dist, 'models', 'library', 'PalletHandling', 'Europallet.glb'))).toBe(true);
+    expect(existsSync(join(dist, 'models', 'library', 'PalletHandling', 'EuropalletLoaded.glb'))).toBe(true);
+    expect(existsSync(join(dist, 'models', 'library', 'catalog.json'))).toBe(true);
+
+    // hashed duplicates of dropped models removed; demo + library + non-glb kept
+    expect(existsSync(join(dist, 'assets', 'DemoRobotIK-DVCOxFk2.glb'))).toBe(false);
+    expect(existsSync(join(dist, 'assets', 'tests-Du1D0p2I.glb'))).toBe(false);
+    expect(existsSync(join(dist, 'assets', 'EuropalletEmpty-CRO-B5qD.glb'))).toBe(false); // hash with '-'
+    expect(existsSync(join(dist, 'assets', 'DemoRealvirtualWeb-D17zvQbu.glb'))).toBe(true);
+    expect(existsSync(join(dist, 'assets', 'index-abc.js'))).toBe(true);
+
+    // EuropalletEmpty must NOT take down library Europallet*/loaded assets (hyphen boundary)
+    expect(existsSync(join(dist, 'assets', 'Europallet-YuOv3y_q.glb'))).toBe(true);
+    expect(existsSync(join(dist, 'assets', 'EuropalletLoaded-Dc8dx8gC.glb'))).toBe(true);
+    expect(existsSync(join(dist, 'assets', 'ChainConveyor-1m-CFqim7Ud.glb'))).toBe(true);
+    expect(res.droppedAssets).toEqual(
+      ['DemoRobotIK-DVCOxFk2.glb', 'EuropalletEmpty-CRO-B5qD.glb', 'tests-Du1D0p2I.glb'],
+    );
+  });
+
+  it('writes models.json listing only the kept demo models', () => {
+    const dist = makeDist();
+    applyPublicModelAllowlist(dist, { prefix: 'DemoRealvirtual' });
+    expect(JSON.parse(readFileSync(join(dist, 'models.json'), 'utf8'))).toEqual(['DemoRealvirtualWeb.glb']);
+  });
+
+  it('dry-run computes the report without deleting or writing', () => {
+    const dist = makeDist();
+    const res = applyPublicModelAllowlist(dist, { prefix: 'DemoRealvirtual', dryRun: true });
+    expect(res.dropped).toEqual(['DemoRobotIK.glb', 'EuropalletEmpty.glb', 'tests.glb']);
+    expect(existsSync(join(dist, 'models', 'tests.glb'))).toBe(true);           // not deleted
+    expect(existsSync(join(dist, 'assets', 'tests-Du1D0p2I.glb'))).toBe(true);  // not deleted
+    expect(existsSync(join(dist, 'models.json'))).toBe(false);                  // not written
+  });
+
+  it('is idempotent on an already-pruned dist/', () => {
+    const dist = makeDist();
+    applyPublicModelAllowlist(dist, { prefix: 'DemoRealvirtual' });
+    const res = applyPublicModelAllowlist(dist, { prefix: 'DemoRealvirtual' });
+    expect(res.kept).toEqual(['DemoRealvirtualWeb.glb']);
+    expect(res.dropped).toEqual([]);
+    expect(res.droppedAssets).toEqual([]);
+  });
+
+  it('default prefix is DemoRealvirtual', () => {
+    expect(PUBLIC_MODEL_PREFIX).toBe('DemoRealvirtual');
   });
 });
 

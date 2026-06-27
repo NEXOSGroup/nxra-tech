@@ -210,7 +210,8 @@ export class WebSocketRealtimeInterface extends BaseIndustrialInterface {
     const types = msg.signalTypes ?? {};
 
     for (const name in values) {
-      const plcType = types[name] ?? 'PLCInputFloat';
+      // Default unknown-typed signals to a PLC output (PLC writes, viewer reads = display-only).
+      const plcType = types[name] ?? 'PLCOutputFloat';
       const { type, direction } = parseSignalType(plcType);
       const rawValue = values[name];
 

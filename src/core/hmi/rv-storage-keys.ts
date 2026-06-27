@@ -21,6 +21,7 @@ export const ALL_RV_STORAGE_KEYS = [
   'rv-hierarchy-signal-sort',
   'rv-inspector-collapsed',
   'rv-inspector-consumed-only',
+  'rv-inspector-detached',
   'rv-group-visibility',
   'rv-maintenance-progress',
   'rv-ai-bridge',

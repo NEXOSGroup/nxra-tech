@@ -50,6 +50,11 @@ const def = {
   // Any placed asset whose name contains "Source": Source, PartSource, …
   type: 'Source' as const,
   kind: 'source' as const,
+  description: 'Source that spawns parts (MUs) and feeds them into the line.',
+  mcpDocs:
+    'Start of a material-flow line: spawns MUs (pallets/boxes) at an interval and pushes them ' +
+    'onto the connected conveyor. Place it at the head of a run (snap it to a conveyor input). ' +
+    'Spawn rate / part template / automatic generation are config fields.',
   models: ['*Source*'],
   // Spawn config — the SAME field names the engine RVSource consumes. This
   // behavior is inert:true (no continuous fixedUpdate) and only the `des` block

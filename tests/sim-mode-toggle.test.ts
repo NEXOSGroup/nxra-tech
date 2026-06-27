@@ -187,13 +187,14 @@ describe('SimModeToggle — sub-mode switching via desControl()', () => {
   });
 });
 
-describe('SimControllerPlugin — registers the mode-toggle slot', () => {
-  it('registers BOTH leading toolbar slots (controls + mode-toggle)', () => {
+describe('SimControllerPlugin — toolbar slots', () => {
+  it('registers ONLY the sim-controls leading slot (mode-toggle removed, plan-198)', () => {
     const plugin = new SimControllerPlugin({ shortcuts: false });
     const leading = plugin.slots.filter(s => s.slot === 'toolbar-button-leading');
-    expect(leading.length).toBe(2);
-    // The mode-toggle renders AFTER the play/pause/reset controls.
-    const orders = leading.map(s => s.order ?? 100).sort((a, b) => a - b);
-    expect(orders).toEqual([10, 20]);
+    // plan-198 removed the old Realtime/DES execution toggle from the toolbar
+    // (DES is now selected via the TopBar workspace-mode dropdown), so the
+    // play/pause/reset controls are the only leading slot.
+    expect(leading.length).toBe(1);
+    expect(leading[0].order).toBe(10);
   });
 });

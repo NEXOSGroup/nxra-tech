@@ -145,21 +145,38 @@ PLC / Controller receives updated values
 Each simulation tick at 60 Hz follows this exact order:
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  SimulationLoop.onFixedUpdate(dt = 1/60)                     │
-│                                                              │
-│  1. LogicEngine.step()        ← LogicStep sequencing         │
-│  2. Playback.advance()        ← Recording playback           │
-│  3. Plugins.onFixedUpdatePre  ← Interface flushes incoming   │
-│     └─ pendingIncoming → signalStore.setMany()               │
-│  4. Drive.fixedUpdate()       ← Drive physics (sorted)       │
-│  5. TransportManager.step()   ← Sources → Conveyors → Sinks │
-│  6. Plugins.onFixedUpdatePost ← Interface sends outgoing     │
-│     └─ dirtyOutgoing → sendSignals()                         │
-│                                                              │
-│  Result: PLC input values applied before physics,            │
-│          PLC output values sent after physics.               │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│  SimulationLoop fixed tick (dt = 1/60)                                 │
+│                                                                        │
+│  PRE-DRIVE                                                             │
+│   1. Playback.update(dt)            ← recording playback              │
+│   2. LogicEngine.fixedUpdate(dt)    ← LogicStep sequencing            │
+│   3. IKPath.fixedUpdate(dt) [loop]  ← robot path replay               │
+│   4. ReplayRecording.fixedUpdate(dt) [loop] ← signal replay          │
+│   5. Plugins.onFixedUpdatePre()     ← interface flushes incoming      │
+│      └─ pendingIncoming → signalStore.setMany()                       │
+│   6. TickStage.PRE callbacks                                          │
+│                                                                        │
+│  CORE PHYSICS & TRANSPORT                                             │
+│   7. Drive.update(dt) [loop]        ← drive motion (sorted)           │
+│   8. TransportManager.update(dt)    ← conveyors, MUs, routing         │
+│   9. TransportManager.updateTextureAnimations(dt) ← belt skins        │
+│  10. TankFillManager.update()       ← tank fill clip planes           │
+│  11. GizmoManager.tick(dt)          ← gizmo overlay blink             │
+│  12. PipeFlowManager.update(dt)     ← pipe flow rings                 │
+│                                                                        │
+│  POST-PHYSICS                                                         │
+│  13. TickStage.SIM callbacks        ← plugin readback                 │
+│  14. Behavior.tick(dt)              ← discrete material flow          │
+│                                        (skipped when unified kernel   │
+│                                         active)                       │
+│  15. Plugins.onFixedUpdatePost()    ← interface sends outgoing        │
+│      └─ dirtyOutgoing → sendSignals()                                 │
+│  16. TickStage.POST callbacks       ← recorders, stats               │
+│                                                                        │
+│  Result: PLC input values (step 5) applied before physics,            │
+│          PLC output values (step 15) sent after physics.              │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 This ensures:
@@ -306,7 +323,7 @@ Use the `useInterfaceStatus` React hook for UI integration:
 import { useInterfaceStatus } from '../hooks/use-interface-status';
 
 function StatusIndicator() {
-  const { connected, interfaceId, error } = useInterfaceStatus();
+  const connected = useInterfaceStatus('websocket-realtime');
   return <span>{connected ? 'Connected' : 'Disconnected'}</span>;
 }
 ```

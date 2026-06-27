@@ -76,7 +76,9 @@ export interface TestViewer {
    * In normal usage (createTestViewer()) this is always initialized non-null.
    */
   signalStore: TestSignalStore | null;
-  /** User-facing reset facade — clears MUs + LogicSteps; leaves signals alone. */
+  /** User-facing reset facade — emits simulation-reset → (engine clear) →
+   *  simulation-resetstat → simulation-start, mirroring RVViewer. Clears MUs +
+   *  LogicSteps and resets drives; leaves signals alone. */
   resetSimulation(): void;
   /** Plugin map (for layout-planner tests that do `viewer.getPlugin('layout-planner')`). */
   _plugins: Map<string, unknown>;
@@ -300,8 +302,15 @@ export function createTestViewer(options: CreateTestViewerOptions = {}): TestVie
     logicEngine,
     get signalStore(): TestSignalStore | null { return currentSignalStore; },
     resetSimulation(): void {
+      // Mirror RVViewer.resetSimulation()'s three-phase orchestration (minus the
+      // statisticsManager the mock doesn't carry): RESET → engine clear →
+      // RESETSTAT → START, so event-ordering assertions match production.
+      emitter.emit('simulation-reset', undefined);
+      for (const d of viewer.drives) (d as { reset?(): void }).reset?.();
       transportManager.reset();
       logicEngine.reset();
+      emitter.emit('simulation-resetstat', undefined);
+      emitter.emit('simulation-start', undefined);
     },
     _plugins: plugins,
     getPlugin<T = unknown>(id: string): T | undefined {

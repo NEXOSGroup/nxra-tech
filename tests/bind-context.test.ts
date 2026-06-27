@@ -161,6 +161,60 @@ describe('createBindContext — auto-dispose (F12)', () => {
   });
 });
 
+describe('createBindContext — reset lifecycle hooks', () => {
+  it('onReset fires on simulation-reset and auto-disposes', () => {
+    const { host, events } = makeHost();
+    const { ctx, handle } = createBindContext(new Object3D(), host, {});
+    const cb = vi.fn();
+    ctx.onReset(cb);
+    events.emit('simulation-reset', undefined);
+    expect(cb).toHaveBeenCalledTimes(1);
+    handle.dispose();
+    events.emit('simulation-reset', undefined);
+    expect(cb).toHaveBeenCalledTimes(1); // no further calls after dispose
+  });
+
+  it('onStart fires on simulation-start and auto-disposes', () => {
+    const { host, events } = makeHost();
+    const { ctx, handle } = createBindContext(new Object3D(), host, {});
+    const cb = vi.fn();
+    ctx.onStart(cb);
+    events.emit('simulation-start', undefined);
+    expect(cb).toHaveBeenCalledTimes(1);
+    handle.dispose();
+    events.emit('simulation-start', undefined);
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it('onResetStat fires on simulation-resetstat and auto-disposes', () => {
+    const { host, events } = makeHost();
+    const { ctx, handle } = createBindContext(new Object3D(), host, {});
+    const cb = vi.fn();
+    ctx.onResetStat(cb);
+    events.emit('simulation-resetstat', undefined);
+    expect(cb).toHaveBeenCalledTimes(1);
+    handle.dispose();
+    events.emit('simulation-resetstat', undefined);
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it('the three hooks subscribe to distinct events', () => {
+    const { host, events } = makeHost();
+    const { ctx } = createBindContext(new Object3D(), host, {});
+    const onReset = vi.fn(); const onStart = vi.fn(); const onResetStat = vi.fn();
+    ctx.onReset(onReset);
+    ctx.onStart(onStart);
+    ctx.onResetStat(onResetStat);
+    events.emit('simulation-reset', undefined);
+    expect(onReset).toHaveBeenCalledTimes(1);
+    expect(onStart).not.toHaveBeenCalled();
+    expect(onResetStat).not.toHaveBeenCalled();
+    events.emit('simulation-start', undefined);
+    expect(onStart).toHaveBeenCalledTimes(1);
+    expect(onReset).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('createBindContext — per-instance signal scoping', () => {
   function placedRoot(name: string): Object3D {
     const o = new Object3D(); o.name = name;

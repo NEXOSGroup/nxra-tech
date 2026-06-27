@@ -128,7 +128,7 @@ The document index is a JSON file mapping identifiers to arrays of document entr
 
 ### Index Generation Script
 
-Create a Node.js script that scans the `docs/` folder:
+This script is not shipped with realvirtual WEB — create it in your own project's `scripts/` folder. The example below scans the `docs/` folder and writes `docs-index.json`:
 
 ```javascript
 import { readdir, writeFile } from 'fs/promises';
@@ -172,7 +172,7 @@ for (const { relativePath, filename } of pdfs) {
 await writeFile(join(__dirname, '..', 'docs-index.json'), JSON.stringify(index, null, 2));
 ```
 
-Run it whenever the docs folder changes:
+Save it as `scripts/build-docs-index.mjs` in your project and run it whenever your docs folder changes:
 ```bash
 node scripts/build-docs-index.mjs
 ```
@@ -203,7 +203,12 @@ export class DocsLinkPlugin implements RVViewerPlugin {
 
   constructor(private basePath: string) {}
 
-  async onModelLoaded(result: LoadResult, viewer: RVViewer): Promise<void> {
+  onModelLoaded(result: LoadResult, viewer: RVViewer): void {
+    // Index loading is async; start it fire-and-forget with error handling
+    void this.attachLinks(viewer).catch(err => console.error('[docs-link]', err));
+  }
+
+  private async attachLinks(viewer: RVViewer): Promise<void> {
     // Load the generated index
     const resp = await fetch(`${this.basePath}docs-index.json`);
     if (!resp.ok) return;

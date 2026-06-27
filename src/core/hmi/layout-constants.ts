@@ -67,3 +67,25 @@ export const ORDER_PANEL_WIDTH = 320;
 /** Width of the CONNECT panel. */
 export const CONNECT_PANEL_WIDTH = 360;
 
+// ── Property-Inspector row layout ───────────────────────────────────────────
+// Shared dimensions for the uniform `label → field` grid used by every
+// inspector row (see rv-inspector-row.tsx). A scalar row is a 4-track grid:
+//   [dot gutter] [label ≤40%] [flexible gap] [field ≤40%]
+// so the label hugs the left, the field hugs the right, and both columns line
+// up across every row regardless of label length.
+
+/** Fixed px width of the leading gutter holding the override/reset dot. */
+export const INSPECTOR_DOT_GUTTER = 14;
+
+/** Max width of the label column (CSS %, relative to the inspector content box). */
+export const INSPECTOR_LABEL_MAX = '40%';
+
+/** Max width of the scalar field column (CSS %). */
+export const INSPECTOR_FIELD_MAX = '40%';
+
+/** Floor (px) so the field column stays usable on a 240px-wide panel. */
+export const INSPECTOR_FIELD_MIN = 72;
+
+/** Gap (px) between the grid tracks. */
+export const INSPECTOR_ROW_GAP = 4;
+

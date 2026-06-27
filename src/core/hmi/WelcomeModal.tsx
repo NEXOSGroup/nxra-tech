@@ -5,7 +5,23 @@ import { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Box, Paper, Typography, Button } from '@mui/material';
 import SlideshowOutlinedIcon from '@mui/icons-material/SlideshowOutlined';
+import ViewQuiltOutlinedIcon from '@mui/icons-material/ViewQuiltOutlined';
+import GridViewOutlinedIcon from '@mui/icons-material/GridViewOutlined';
 import { setWelcomeModalOpen } from './welcome-modal-store';
+import { useCustomBranding } from './branding-store';
+
+/** Primary use cases, shown as a compact list. */
+const USE_CASES: Array<[string, string]> = [
+  ['3D HMI & monitoring', 'live PLC dashboards in the browser'],
+  ['Machine & maintenance info', 'documents, guides and drawings on 3D parts'],
+  ['Product configuration', 'interactive configurators from a single GLB'],
+  ['Sales & presales', 'share a live digital twin with one link'],
+  ['Training', 'safe, interactive learning environments'],
+];
+
+/** Deep links to the two built-in demos (resolved against the deploy base path). */
+const HMI_DEMO_HREF = `${import.meta.env.BASE_URL}?model=DemoRealvirtualWeb.glb`;
+const PLANNER_DEMO_HREF = `${import.meta.env.BASE_URL}?scene=published:DemoPlanner&mode=planner`;
 
 interface WelcomeModalProps {
   open: boolean;
@@ -21,6 +37,10 @@ export function WelcomeModal({ open, onClose, onStartDemo }: WelcomeModalProps) 
     setWelcomeModalOpen(open);
     return () => { setWelcomeModalOpen(false); };
   }, [open]);
+
+  // Demo links only make sense on the public realvirtual demo. A customer deploy
+  // sets custom branding, so we hide the demo shortcuts there.
+  const custom = useCustomBranding();
 
   if (!open) return null;
 
@@ -61,17 +81,17 @@ export function WelcomeModal({ open, onClose, onStartDemo }: WelcomeModalProps) 
         </Typography>
 
         <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.7 }}>
-          <strong style={{ color: '#fff' }}>3D HMI</strong> &middot;{' '}
-          <strong style={{ color: '#fff' }}>Machine & Maintenance Information</strong> &middot;{' '}
-          <strong style={{ color: '#fff' }}>Product Configuration</strong> &middot;{' '}
-          <strong style={{ color: '#fff' }}>Sales</strong> &middot;{' '}
-          <strong style={{ color: '#fff' }}>Training</strong>
+          A browser-based 3D HMI and digital-twin viewer for industrial automation —
+          everything from a single GLB export, live in the browser. Use it for:
         </Typography>
 
-        <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.7 }}>
-          This demo showcases a glimpse into the many possibilities — from live PLC connectivity
-          and interactive 3D components to maintenance documents, KPI dashboards, and more.
-        </Typography>
+        <Box component="ul" sx={{ m: 0, pl: 2.5, display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+          {USE_CASES.map(([label, desc]) => (
+            <Typography key={label} component="li" variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.5 }}>
+              <strong style={{ color: '#fff' }}>{label}</strong> &mdash; {desc}
+            </Typography>
+          ))}
+        </Box>
 
         <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.7 }}>
           One link is all it takes. Share interactive 3D digital twins with operators,
@@ -85,6 +105,46 @@ export function WelcomeModal({ open, onClose, onStartDemo }: WelcomeModalProps) 
           and technical drawings directly to 3D components. Build product configurators,
           KPI dashboards, and training environments — all from a single GLB export.
         </Typography>
+
+        {!custom && (
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+            <Typography variant="body2" sx={{ color: '#fff', fontWeight: 600 }}>
+              Two demos to explore
+            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap' }}>
+              <Button
+                component="a"
+                href={HMI_DEMO_HREF}
+                variant="outlined"
+                size="small"
+                startIcon={<ViewQuiltOutlinedIcon />}
+                data-testid="welcome-demo-hmi"
+                sx={{ textTransform: 'none', fontWeight: 600, minWidth: 150, justifyContent: 'flex-start' }}
+              >
+                HMI Demo
+              </Button>
+              <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                Operate &amp; monitor a running line
+              </Typography>
+            </Box>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap' }}>
+              <Button
+                component="a"
+                href={PLANNER_DEMO_HREF}
+                variant="outlined"
+                size="small"
+                startIcon={<GridViewOutlinedIcon />}
+                data-testid="welcome-demo-planner"
+                sx={{ textTransform: 'none', fontWeight: 600, minWidth: 150, justifyContent: 'flex-start' }}
+              >
+                Planner Demo
+              </Button>
+              <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                Build a layout from reusable library objects
+              </Typography>
+            </Box>
+          </Box>
+        )}
 
         <Typography variant="body2" sx={{ color: 'text.secondary', lineHeight: 1.7 }}>
           Open source under the <strong style={{ color: '#fff' }}>AGPL-3.0 license</strong>.

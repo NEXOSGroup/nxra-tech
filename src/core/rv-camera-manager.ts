@@ -247,7 +247,8 @@ export class CameraManager {
     if (seatLocalOffset) {
       this._seatLocalOffset.copy(seatLocalOffset);
     } else {
-      this._defaultSeatOffset(this._tmpBox, this._seatLocalOffset);
+      src.getWorldPosition(this._tmpPos); // node origin (world) → top-relative seat
+      this._defaultSeatOffset(this._tmpBox, this._tmpPos, this._seatLocalOffset);
     }
   }
 
@@ -310,17 +311,22 @@ export class CameraManager {
   }
 
   /**
-   * Default Sit-On seat offset from the target's world bounds: a little above
-   * the box top, centered. Falls back to (0, 1, 0) for an empty/degenerate box.
+   * Default Sit-On seat offset: place the camera clearly ABOVE the top of the
+   * target's world bounding box, measured from the node ORIGIN (so it is correct
+   * regardless of whether the origin sits at the part's base or center). The
+   * margin above the top scales with the part height. Falls back for an
+   * empty/degenerate box.
    */
-  private _defaultSeatOffset(box: Box3, out: Vector3): void {
-    if (box.isEmpty() || !isFinite(box.min.x) || !isFinite(box.max.x)) {
-      out.set(0, 1, 0);
+  private _defaultSeatOffset(box: Box3, originWorld: Vector3, out: Vector3): void {
+    if (box.isEmpty() || !isFinite(box.min.y) || !isFinite(box.max.y)) {
+      out.set(0, 1.5, 0);
       return;
     }
     const sizeY = box.max.y - box.min.y;
-    // Eye height a bit above the top of the part.
-    out.set(0, sizeY * 0.5 + Math.max(sizeY * 0.25, 0.2), 0);
+    // Top of the bbox relative to the node origin, plus an eye-height margin
+    // above the top so you sit clearly above the part and can look around.
+    const aboveTop = Math.max(sizeY * 0.6, 0.4);
+    out.set(0, (box.max.y - originWorld.y) + aboveTop, 0);
   }
 
   // ─── Projection Animation ─────────────────────────────────────────

@@ -250,6 +250,35 @@ function abortToIdle(self: TurntableSelf): void {
   enter(self, 'idle');
 }
 
+/**
+ * Restore the turntable to its freshly-loaded start — used by BOTH the
+ * `'simulation-reset'` hook and the rotary-drive context-menu "Reset". Stops the
+ * drive + belt, re-blocks every input port, clears the FSM, part counter,
+ * timers and routing bookkeeping, then returns to `idle`. The rotary Drive
+ * itself snaps back to its StartPosition via `RVDrive.reset()`; we zero
+ * `lastCommandedAngle` / `driveTarget` to match so the next `moveTo` computes a
+ * correct delta from neutral.
+ */
+function resetTurntable(self: TurntableSelf): void {
+  const l = self.local;
+  l.drive?.stop();
+  setBelt(l, false);
+  blockAllInputs(self);
+  l.selectedInputPort = null;
+  l.sensorOccupied = false;
+  l.partCount = 0;
+  l.clearTimer = 0;
+  l.emptyFor = 0;
+  l.refreshTimer = CONFIG.neighborRefreshSec;
+  l.lastCommandedAngle = 0;
+  self.prop['alignedPort'] = null;
+  self.prop['selectedOutput'] = null;
+  self.prop['heldMU'] = null;
+  self.prop['driveTarget'] = 0;
+  self.sig.PartCount.set(0);
+  enter(self, 'idle');
+}
+
 // ── DES router timing (Plan 194 §2.4) ─────────────────────────────────────
 //
 // The DES adapter has NO physical drive — it only consumes TIME. A rotation to
@@ -294,6 +323,13 @@ function desSelectOutput(self: TurntableSelf): RV.Port | null {
 const def = {
   type: 'Turntable' as const,
   kind: 'router' as const,
+  description: 'Rotating platform that re-routes parts 90° between conveyor sides.',
+  mcpDocs:
+    'Multi-port router / corner piece. 4 snaps Snap-{ZN,ZP,XN,XP}-convroll (all bidi, typeId ' +
+    'convroll) — connect a conveyor on any side. A part arrives, the table rotates to a free ' +
+    'output, then discharges. Use it for 90° corners and junctions: snap-attach it to a ' +
+    'conveyor output, then continue the next run off a perpendicular snap (Snap-XP = left, ' +
+    'Snap-XN = right). RotationSpeed (deg/s) and MaxCapacity are DES params.',
   models: ['*Turntable*'],
   // DES router params (Plan 194 §2.4). RotationSpeed drives the rotate-time
   // schedule (|Δang|/RotationSpeed); MaxCapacity gates acceptance. BOTH are read
@@ -378,17 +414,17 @@ const def = {
     self.setState('idle');
 
     self.contextMenu(rotaryNode, [
-      {
-        id: 'reset', label: 'Reset',
-        action: () => {
-          l.drive!.stop();
-          setBelt(l, false);
-          blockAllInputs(self);
-          l.selectedInputPort = null;
-          enter(self, 'idle');
-        },
-      },
+      { id: 'reset', label: 'Reset', action: () => resetTurntable(self) },
     ]);
+  },
+
+  // Lifecycle: restore the FSM/counters to the start on reset, and re-assert the
+  // Run signal on start (so the table resumes routing after a reset).
+  reset(self: TurntableSelf): void {
+    resetTurntable(self);
+  },
+  start(self: TurntableSelf): void {
+    self.sig.Run.set(true);
   },
 
   continuous: {

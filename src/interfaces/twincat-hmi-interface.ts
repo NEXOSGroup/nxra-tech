@@ -108,13 +108,13 @@ export function mapTcHmiType(tcType: string | undefined): SignalType {
 }
 
 /**
- * Maps TcHmi access rights to SignalDirection.
- * 'read' -> input, 'write' -> output, default -> input.
+ * Maps TcHmi access rights to SignalDirection (PLC perspective, same nomenclature as Unity).
+ * A 'write' symbol is written by the HMI/viewer and read by the PLC → a PLC input → 'input' (viewer sends it).
+ * A 'read' (or readwrite/unknown) symbol is read by the viewer → a PLC output → 'output' (display only).
  */
 export function mapTcHmiAccess(access: string | undefined): SignalDirection {
-  if (!access) return 'input';
-  if (access.toLowerCase() === 'write') return 'output';
-  return 'input';
+  if (access && access.toLowerCase() === 'write') return 'input';
+  return 'output';
 }
 
 function isStringType(tcType: string | undefined): boolean {

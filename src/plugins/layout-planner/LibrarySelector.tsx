@@ -37,6 +37,7 @@ import {
   FolderOpen,
   Link as LinkIcon,
   CollectionsBookmark,
+  MoreVert,
 } from '@mui/icons-material';
 
 export type LibraryKind = 'url' | 'github' | 'local' | 'cloud';
@@ -61,6 +62,10 @@ export interface LibrarySelectorProps {
   /** Refresh a local-folder library (re-scan files). */
   onRefresh?: (id: string) => void;
   onAdd: () => void;
+  /** Compact mode (mobile): collapse the inline refresh/remove/add buttons into
+   *  a single "⋮" overflow menu and tighten padding, so the header row stays
+   *  small. Default false keeps the desktop inline-actions layout. */
+  compact?: boolean;
 }
 
 function kindIcon(kind: LibraryKind, status: LibraryItem['cloudStatus'], error?: boolean): ReactNode {
@@ -76,9 +81,12 @@ function kindIcon(kind: LibraryKind, status: LibraryItem['cloudStatus'], error?:
   }
 }
 
-export function LibrarySelector({ items, activeId, onSelect, onRemove, onRefresh, onAdd }: LibrarySelectorProps) {
+export function LibrarySelector({ items, activeId, onSelect, onRemove, onRefresh, onAdd, compact = false }: LibrarySelectorProps) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const close = () => setAnchor(null);
+  // Compact-mode overflow ("⋮") menu anchor — separate from the library dropdown.
+  const [actionAnchor, setActionAnchor] = useState<HTMLElement | null>(null);
+  const closeActions = () => setActionAnchor(null);
 
   const active = items.find(i => i.id === activeId) ?? null;
   const triggerLabel = active?.label ?? (items.length === 0 ? 'Add a library…' : 'Select library');
@@ -89,7 +97,7 @@ export function LibrarySelector({ items, activeId, onSelect, onRemove, onRefresh
   };
 
   return (
-    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, px: 1, py: 0.75, flexShrink: 0 }}>
+    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, px: compact ? 0.5 : 1, py: compact ? 0 : 0.75, flexShrink: 0 }}>
       <Button
         onClick={handleTriggerClick}
         variant="outlined"
@@ -105,6 +113,14 @@ export function LibrarySelector({ items, activeId, onSelect, onRemove, onRefresh
           borderColor: 'rgba(255,255,255,0.15)',
           '& .MuiButton-startIcon': { mr: 0.75 },
           '&:hover': { borderColor: 'rgba(255,255,255,0.3)' },
+          ...(compact && {
+            py: 0,
+            minHeight: 24,
+            lineHeight: 1.2,
+            // Shrink the (otherwise 24px) chevron + start icon so they don't
+            // inflate the row height on mobile.
+            '& .MuiSvgIcon-root': { fontSize: 16 },
+          }),
         }}
       >
         <Box component="span" sx={{ flex: 1, textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -112,34 +128,60 @@ export function LibrarySelector({ items, activeId, onSelect, onRemove, onRefresh
         </Box>
       </Button>
 
-      {/* Actions for the ACTIVE library live here in the header (not in the
-          dropdown rows): refresh (local folders only) + remove. */}
-      {active?.kind === 'local' && onRefresh && (
-        <Tooltip title="Refresh folder">
-          <IconButton size="small" onClick={() => onRefresh(active.id)} sx={{ p: 0.5 }} aria-label="Refresh folder">
-            <Refresh sx={{ fontSize: 16 }} />
+      {/* Actions for the ACTIVE library. Desktop: inline refresh/remove/add.
+          Compact (mobile): a single "⋮" overflow menu to keep the row small. */}
+      {compact ? (
+        <>
+          <IconButton size="small" onClick={(e) => setActionAnchor(e.currentTarget)} sx={{ p: 0.25, flexShrink: 0 }} aria-label="Library actions">
+            <MoreVert sx={{ fontSize: 18 }} />
           </IconButton>
-        </Tooltip>
+          <Menu anchorEl={actionAnchor} open={!!actionAnchor} onClose={closeActions}>
+            {active?.kind === 'local' && onRefresh && (
+              <MenuItem onClick={() => { onRefresh(active.id); closeActions(); }} sx={{ fontSize: 12 }}>
+                <ListItemIcon sx={{ minWidth: 26 }}><Refresh sx={{ fontSize: 16 }} /></ListItemIcon>
+                Refresh folder
+              </MenuItem>
+            )}
+            <MenuItem disabled={!active} onClick={() => { if (active) onRemove(active.id); closeActions(); }} sx={{ fontSize: 12 }}>
+              <ListItemIcon sx={{ minWidth: 26 }}><Delete sx={{ fontSize: 16 }} /></ListItemIcon>
+              Remove library
+            </MenuItem>
+            <MenuItem onClick={() => { onAdd(); closeActions(); }} sx={{ fontSize: 12 }}>
+              <ListItemIcon sx={{ minWidth: 26 }}><Add sx={{ fontSize: 16 }} /></ListItemIcon>
+              Add library…
+            </MenuItem>
+          </Menu>
+        </>
+      ) : (
+        <>
+          {active?.kind === 'local' && onRefresh && (
+            <Tooltip title="Refresh folder">
+              <IconButton size="small" onClick={() => onRefresh(active.id)} sx={{ p: 0.5 }} aria-label="Refresh folder">
+                <Refresh sx={{ fontSize: 16 }} />
+              </IconButton>
+            </Tooltip>
+          )}
+          <Tooltip title={active ? 'Remove this library' : 'No library to remove'}>
+            {/* span wrapper so the tooltip works while the button is disabled */}
+            <span>
+              <IconButton
+                size="small"
+                disabled={!active}
+                onClick={() => { if (active) onRemove(active.id); }}
+                sx={{ p: 0.5, color: active ? 'text.secondary' : 'text.disabled', '&:hover': { color: '#ef5350' } }}
+                aria-label="Remove library"
+              >
+                <Delete sx={{ fontSize: 16 }} />
+              </IconButton>
+            </span>
+          </Tooltip>
+          <Tooltip title="Add library">
+            <IconButton size="small" onClick={onAdd} sx={{ p: 0.5 }} aria-label="Add library">
+              <Add sx={{ fontSize: 16 }} />
+            </IconButton>
+          </Tooltip>
+        </>
       )}
-      <Tooltip title={active ? 'Remove this library' : 'No library to remove'}>
-        {/* span wrapper so the tooltip works while the button is disabled */}
-        <span>
-          <IconButton
-            size="small"
-            disabled={!active}
-            onClick={() => { if (active) onRemove(active.id); }}
-            sx={{ p: 0.5, color: active ? 'text.secondary' : 'text.disabled', '&:hover': { color: '#ef5350' } }}
-            aria-label="Remove library"
-          >
-            <Delete sx={{ fontSize: 16 }} />
-          </IconButton>
-        </span>
-      </Tooltip>
-      <Tooltip title="Add library">
-        <IconButton size="small" onClick={onAdd} sx={{ p: 0.5 }} aria-label="Add library">
-          <Add sx={{ fontSize: 16 }} />
-        </IconButton>
-      </Tooltip>
 
       <Menu
         anchorEl={anchor}

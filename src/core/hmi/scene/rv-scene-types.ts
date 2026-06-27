@@ -92,6 +92,23 @@ export function newSceneId(): string {
   return 'scn_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
 }
 
+/**
+ * Validate that an unknown value is a well-formed schemaVersion-2 RvScene.
+ * Single source of truth for the checks duplicated across importSceneJSON,
+ * openPublished and the published-scene fetch — including `edits.settings`,
+ * which the planner reads directly (`edits.settings.catalogUrls` /
+ * `gridSizeMm`) when materialising placements, so a missing settings object
+ * must be rejected up front rather than crashing the scene load.
+ */
+export function isValidSceneV2(s: unknown): s is RvScene {
+  if (!s || typeof s !== 'object') return false;
+  const scene = s as Partial<RvScene>;
+  return scene.schemaVersion === 2
+    && !!scene.base
+    && !!scene.edits
+    && !!scene.edits.settings;
+}
+
 /** Produce a meta record from a full scene. */
 export function metaOf(scene: RvScene): RvSceneMeta {
   return {

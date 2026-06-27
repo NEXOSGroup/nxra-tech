@@ -9,20 +9,43 @@
  */
 
 import { useViewerEvent } from './use-viewer-event';
-import type { McpBridgeSnapshot } from '../plugins/mcp-bridge-plugin';
+import { useViewer } from './use-viewer';
+import type { McpBridgePluginAPI } from '../core/types/plugin-types';
+import type { McpBridgeSnapshot, McpServerLogLine } from '../plugins/mcp-bridge-plugin';
 
 /** Default state when MCP plugin is not loaded or model not yet available. */
 const INITIAL: McpBridgeSnapshot = {
   connected: false,
-  port: '18712',
+  port: '18714',
   toolCount: 0,
   toolNames: [],
   enabled: false,
   reconnectAttempt: 0,
   reconnectDelay: 0,
+  serverStatus: null,
 };
 
-/** Subscribe to mcp-bridge-changed events. Returns current snapshot. */
+/**
+ * Subscribe to mcp-bridge-changed events. Returns the current snapshot.
+ *
+ * Seeds from the plugin's live snapshot on mount so a persisted (restored)
+ * enabled/port state is shown immediately — the plugin's `init()` emit happens
+ * before this component subscribes, so without seeding the UI would briefly
+ * show the disabled default after a page reload.
+ */
 export function useMcpBridge(): McpBridgeSnapshot {
-  return useViewerEvent('mcp-bridge-changed', INITIAL, (data) => data);
+  const viewer = useViewer();
+  const plugin = viewer.getPlugin<McpBridgePluginAPI & { getSnapshot?: () => McpBridgeSnapshot }>('mcp-bridge');
+  const initial = plugin?.getSnapshot?.() ?? INITIAL;
+  return useViewerEvent('mcp-bridge-changed', initial, (data) => data);
+}
+
+const NO_LOG: McpServerLogLine[] = [];
+
+/** Subscribe to mcp-bridge-log events. Returns the buffered server log lines (seeded from the plugin on mount). */
+export function useMcpBridgeLog(): McpServerLogLine[] {
+  const viewer = useViewer();
+  const plugin = viewer.getPlugin<McpBridgePluginAPI & { serverLog?: McpServerLogLine[] }>('mcp-bridge');
+  const initial = plugin?.serverLog ?? NO_LOG;
+  return useViewerEvent('mcp-bridge-log', initial, (data) => data);
 }

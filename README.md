@@ -63,7 +63,7 @@ Share virtual commissioning models with customers for review and sign-off — wo
 ## Quick Start
 
 ```bash
-# Requirements: Node.js >= 20.19 or >= 22.12
+# Requirements: Node.js >= 18
 # Clone the repository (increase buffer for large GLB model files)
 git config --global http.postBuffer 524288000
 git clone https://github.com/game4automation/realvirtual-WEB.git
@@ -90,7 +90,7 @@ npm run lint         # ESLint (flat-config, boundaries rule)
 | Mode | Description |
 |------|-------------|
 | **Standalone** | Pure browser simulation — no Unity, no PLC. Fixed-timestep simulation loop runs the full digital twin offline. |
-| **Live** | Connected via WebSocket — a bridge application translates non-WebSocket-capable industrial protocols (OPC UA, S7, ADS, etc.) to the browser. *(Upcoming)* |
+| **Live** | Connected via WebSocket or MQTT — real-time PLC signal streaming with live signal visualization (WebSocket Realtime, MQTT, Bosch ctrlX, TwinCAT HMI; a bridge application covers OPC UA, S7, ADS, etc.). |
 | **Direct** | Direct REST/MQTT connection to PLC without Unity in the loop. |
 
 ## Deployment Options
@@ -164,7 +164,7 @@ import type { RVViewer } from './core/rv-viewer';
 class MyPlugin implements RVViewerPlugin {
   id = 'my-plugin';
 
-  install(viewer: RVViewer) {
+  init(viewer: RVViewer) {
     // Access drives, signals, scene — all from the viewer API
     viewer.on('model-loaded', () => {
       const drives = viewer.drives;          // all drives in the scene
@@ -196,16 +196,44 @@ For the full plugin API — UI slots, event bus, hooks, context menus, and toolt
 
 ## Documentation
 
+Start with **[Architecture](doc-webviewer.md)**. The full documentation set:
+
+**Getting started & architecture**
 | Document | Contents |
 |----------|----------|
-| [Unity Export Guide](https://doc.realvirtual.io/extensions/realvirtual-web) | GLB export from Unity, publish workflow, WebViewer Tools (Pro) |
-| [Architecture](doc-webviewer.md) | Full architecture, component reference, configuration |
-| [Building & Deploying](doc-deploy.md) | Local test build vs. publishing to public, private projects, credentials, CI |
-| [Layout Planner](doc-layout-planner.md) | Library objects, catalogs, GitHub libraries, snap points, pivots, deep-links |
+| [Architecture](doc-webviewer.md) | Full architecture, component reference, configuration, workspace modes |
+| [From Unity to the Web](doc-unity-to-web.md) | Porting patterns and the AI coding-agent workflow |
+| [Lifecycle](doc-lifecycle.md) | Runtime lifecycle: model load, fixed-step loop, pause, reset, dispose, events |
+
+**Building & extending**
+| Document | Contents |
+|----------|----------|
 | [Plugin Development](doc-extending-webviewer.md) | Plugin system, custom components, UI slots, hooks |
-| [Multiuser System](doc-multiuser-system.md) | Sessions, shared views, avatars *(Beta)* |
-| [Debugging Guide](doc-web-debugging.md) | Debugging tools and workflow |
-| [Industrial Interfaces](doc-webviewer-interface.md) | WebSocket Realtime, ctrlX, MQTT, signal flow, implementing new interfaces |
+| [Events & Hooks](doc-events-and-hooks.md) | Typed event bus and plugin/component lifecycle hooks |
+| [Component Behaviors](doc-behaviors.md) | Per-node TypeScript behaviors and naming conventions |
+| [Behavior Modelling](doc-behavior-modelling.md) | Continuous vs DES material-flow modelling (beginner's guide) |
+| [Signal Architecture](doc-signal-architecture.md) | Signal store: GLB import to React UI, PLC direction, batching |
+
+**Authoring & operations**
+| Document | Contents |
+|----------|----------|
+| [Layout Planner](doc-layout-planner.md) | Library objects, catalogs, snap points, pivots, deep-links |
+| [Persistence](doc-persistence.md) | Scene model, edit ops log, drafts, storage layout |
+| [Document Linking](doc-document-linking.md) | PDF/AASX datasheet linking and metadata |
+
+**Connectivity & collaboration**
+| Document | Contents |
+|----------|----------|
+| [Industrial Interfaces](doc-webviewer-interface.md) | WebSocket Realtime, ctrlX, MQTT, signal flow, new-interface guide |
+| [Multiuser System](doc-multiuser-system.md) | Sessions, shared views, avatars |
+| [AI Integration](doc-ai-integration.md) | AI integration and the MCP bridge |
+| [MCP Tools](webviewer.mcp.md) | MCP tools reference (read state, set signals, build layouts) |
+
+**Deploy & debug**
+| Document | Contents |
+|----------|----------|
+| [Building & Deploying](doc-deploy.md) | Local test build vs. publishing, private projects, credentials, CI |
+| [Debugging Guide](doc-web-debugging.md) | Debugging tools, debug API, E2E tests, workflow |
 
 ## AI-Enabled Development (MCP)
 

@@ -622,6 +622,15 @@ export interface RVBindContext {
   onPause(cb: (reason: string) => void): void;
   /** Fires whenever the simulation transitions from paused to running. */
   onResume(cb: () => void): void;
+  /** Fires on `resetSimulation()` phase 1 — restore internal state to the start
+   *  (FSM, counters, timers, bookkeeping). Auto-disposed on model-cleared. */
+  onReset(cb: () => void): void;
+  /** Fires on `resetSimulation()` phase 3 — (re)start from the clean state after
+   *  a reset (e.g. re-assert `Run = true`). Auto-disposed on model-cleared. */
+  onStart(cb: () => void): void;
+  /** Fires on a statistics reset (`'simulation-resetstat'`) — clear stat
+   *  accumulators only (DES). Auto-disposed on model-cleared. */
+  onResetStat(cb: () => void): void;
   /** Runs immediately before all subscriptions are auto-disposed (on model-cleared). Use for user-managed cleanup that isn't tracked by the context. */
   onDispose(cb: () => void): void;
 
@@ -825,6 +834,24 @@ export function createBindContext(
         if (p?.paused === false) cb();
       };
       const off = host.on('simulation-pause-changed', handler);
+      if (off) internals.unsubs.push(off);
+    },
+
+    onReset(cb: () => void): void {
+      if (internals.disposed) return;
+      const off = host.on('simulation-reset', () => cb());
+      if (off) internals.unsubs.push(off);
+    },
+
+    onStart(cb: () => void): void {
+      if (internals.disposed) return;
+      const off = host.on('simulation-start', () => cb());
+      if (off) internals.unsubs.push(off);
+    },
+
+    onResetStat(cb: () => void): void {
+      if (internals.disposed) return;
+      const off = host.on('simulation-resetstat', () => cb());
       if (off) internals.unsubs.push(off);
     },
 

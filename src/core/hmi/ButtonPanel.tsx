@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useRef, useEffect, useCallback } from 'react';
 import { Box, Paper } from '@mui/material';
+import { ChevronLeft, ChevronRight } from '@mui/icons-material';
 import { useViewer } from '../../hooks/use-viewer';
 import { useSlot } from '../../hooks/use-slot';
 import { ACTIVITY_BAR_WIDTH, FLOATING_TOP_MARGIN, LEFT_PANEL_ZINDEX } from './layout-constants';
@@ -99,7 +100,7 @@ function WelcomeModalHost({ open, onClose }: { open: boolean; onClose: () => voi
  *
  * NOT the activity bar — window-opener buttons live in ActivityBar.tsx.
  */
-export function ButtonPanel() {
+export function ButtonPanel({ dock = false }: { dock?: boolean } = {}) {
   const viewer = useViewer();
   const allEntries = useSlot('button-group');
 
@@ -133,7 +134,101 @@ export function ButtonPanel() {
   // Clear the optional top title bar when present.
   const topInset = useViewportInsets().top;
 
+  // Scroll affordance for the mobile tool row — left/right chevrons appear only
+  // when the row actually overflows in that direction.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [scrollHint, setScrollHint] = useState({ left: false, right: false });
+  const updateScrollHint = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const max = el.scrollWidth - el.clientWidth;
+    setScrollHint({ left: el.scrollLeft > 1, right: el.scrollLeft < max - 1 });
+  }, []);
+  useEffect(() => {
+    if (!isMobile) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    updateScrollHint();
+    el.addEventListener('scroll', updateScrollHint, { passive: true });
+    const ro = new ResizeObserver(updateScrollHint);
+    ro.observe(el);
+    return () => { el.removeEventListener('scroll', updateScrollHint); ro.disconnect(); };
+  }, [isMobile, updateScrollHint, entries.length]);
+
   if (entries.length === 0) return null;
+
+  const buttons = entries.map((entry, i) => {
+    const Comp = entry.component;
+    return <Comp key={`btn-${i}`} viewer={viewer} />;
+  });
+
+  const paper = (
+    <Paper
+      elevation={4}
+      data-ui-panel
+      sx={{
+        position: 'relative',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 0.25,
+        p: 0.5,
+        borderRadius: isMobile ? 0 : 2,
+        pointerEvents: 'auto',
+        ...(isMobile && { width: '100%' }),
+      }}
+    >
+      {isMobile ? (
+        <>
+          <Box
+            ref={scrollRef}
+            sx={{
+              display: 'flex', flexDirection: 'row', gap: 0.25,
+              justifyContent: 'safe center',
+              overflowX: 'auto', WebkitOverflowScrolling: 'touch',
+              scrollbarWidth: 'none', '&::-webkit-scrollbar': { display: 'none' },
+              '& > *': { flexShrink: 0 },
+              // Touch-friendly hit targets (~44px) + slightly larger icons.
+              '& .MuiIconButton-root': { minWidth: 44, minHeight: 44 },
+              '& .MuiSvgIcon-root': { fontSize: 22 },
+            }}
+          >
+            {buttons}
+          </Box>
+          {scrollHint.left && (
+            <Box
+              onClick={() => scrollRef.current?.scrollBy({ left: -120, behavior: 'smooth' })}
+              aria-label="Scroll tools left"
+              sx={{
+                position: 'absolute', left: 0, top: 0, bottom: 0, width: 40,
+                display: 'flex', alignItems: 'center', justifyContent: 'flex-start', pl: 0.25,
+                cursor: 'pointer', pointerEvents: 'auto',
+                background: 'linear-gradient(to right, rgba(18,18,18,0.97) 45%, rgba(18,18,18,0))',
+              }}
+            >
+              <ChevronLeft sx={{ fontSize: 28, color: '#fff' }} />
+            </Box>
+          )}
+          {scrollHint.right && (
+            <Box
+              onClick={() => scrollRef.current?.scrollBy({ left: 120, behavior: 'smooth' })}
+              aria-label="Scroll tools right"
+              sx={{
+                position: 'absolute', right: 0, top: 0, bottom: 0, width: 40,
+                display: 'flex', alignItems: 'center', justifyContent: 'flex-end', pr: 0.25,
+                cursor: 'pointer', pointerEvents: 'auto',
+                background: 'linear-gradient(to left, rgba(18,18,18,0.97) 45%, rgba(18,18,18,0))',
+              }}
+            >
+              <ChevronRight sx={{ fontSize: 28, color: '#fff' }} />
+            </Box>
+          )}
+        </>
+      ) : buttons}
+    </Paper>
+  );
+
+  // Inside the shared MobileBottomDock the dock owns positioning + safe-area.
+  if (isMobile && dock) return paper;
 
   return (
     <Box
@@ -144,7 +239,6 @@ export function ButtonPanel() {
         bottom: 0,
         zIndex: LEFT_PANEL_ZINDEX,
         display: 'flex',
-        justifyContent: 'center',
         pointerEvents: 'none',
         pb: 'env(safe-area-inset-bottom, 0px)',
       } : {
@@ -158,31 +252,7 @@ export function ButtonPanel() {
         pointerEvents: 'none',
       }}
     >
-      <Paper
-        elevation={4}
-        data-ui-panel
-        sx={{
-          display: 'flex',
-          flexDirection: isMobile ? 'row' : 'column',
-          gap: 0.25,
-          p: 0.5,
-          borderRadius: isMobile ? '12px 12px 0 0' : 2,
-          pointerEvents: 'auto',
-          ...(isMobile && {
-            maxWidth: '100vw',
-            overflowX: 'auto',
-            WebkitOverflowScrolling: 'touch',
-            scrollbarWidth: 'none',
-            '&::-webkit-scrollbar': { display: 'none' },
-            '& > *': { flexShrink: 0 },
-          }),
-        }}
-      >
-        {entries.map((entry, i) => {
-          const Comp = entry.component;
-          return <Comp key={`btn-${i}`} viewer={viewer} />;
-        })}
-      </Paper>
+      {paper}
     </Box>
   );
 }

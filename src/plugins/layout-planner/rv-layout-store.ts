@@ -110,6 +110,11 @@ export interface LayoutSnapshot {
    *  all transitively connected assets follow rigidly. Disable to drag each
    *  element solo (connections persist until detached/over-stretched). */
   chainModeEnabled: boolean;
+  /** Documentation mode: when on, component datasheets (AAS drive docs) are
+   *  shown on hover/selection in the planner. When off, the planner stays clean.
+   *  Only gates docs while the planner is active — other viewing modes always
+   *  show them. */
+  docMode: boolean;
   placementMode: string | null; // catalogEntry id for tap-to-place
   /** Entry ids whose preview thumbnail is currently being auto-generated.
    *  Cards render a spinner while their id is present. */
@@ -132,6 +137,7 @@ const LS_KEY_SHOW_NEIGHBOR_DIST = 'rv-layout-show-neighbor-distances';
 const LS_KEY_NEIGHBOR_DIST_MAX = 'rv-layout-neighbor-distance-max';
 const LS_KEY_SNAPPOINT_MAGNET = 'rv-layout-snappoint-magnet-enabled';
 const LS_KEY_CHAIN_MODE = 'rv-layout-chain-mode-enabled';
+const LS_KEY_DOC_MODE = 'rv-layout-doc-mode';
 const LS_KEY_ACTIVE_TAB = 'rv-layout-active-tab';
 
 /** Default magnetic-snap tolerance in millimetres (world space). */
@@ -338,6 +344,21 @@ export function isGitHubRepoScanUrl(url: string): boolean {
 }
 
 /**
+ * True for any github.com / raw.githubusercontent.com catalog URL.
+ *
+ * GitHub libraries are strictly OPT-IN: they may only be loaded by an explicit
+ * manual add this session (the GitHub tab, a constructor `catalogUrls` option,
+ * or a `?library=<url>` parameter). They are NEVER auto-restored from persisted
+ * storage or a restored scene's `catalogUrls`, and are NEVER written back to
+ * storage — otherwise a former-default GitHub library that leaked into a user's
+ * storage would re-scan GitHub (and 404) on every boot without the user ever
+ * adding it.
+ */
+export function isGitHubCatalogUrl(url: string): boolean {
+  return /^https?:\/\/(raw\.githubusercontent\.com|github\.com)\//i.test(url.trim());
+}
+
+/**
  * Scan a GitHub repository (optionally a subfolder) for `.glb` files via the
  * public GitHub API and build a `LibraryCatalog` from them — no `catalog.json`
  * required. Each `.glb` becomes an entry whose `glbUrl` is its raw URL; the
@@ -433,6 +454,7 @@ export class LayoutStore {
   private _neighborDistanceMaxMm = DEFAULT_NEIGHBOR_DIST_MAX_MM;
   private _snapPointMagnetEnabled = true;
   private _chainModeEnabled = true;
+  private _docMode = false;
   private _placementMode: string | null = null;
   private _listeners = new Set<() => void>();
   private _snapshot: LayoutSnapshot;
@@ -487,6 +509,8 @@ export class LayoutStore {
       if (spm !== null) this._snapPointMagnetEnabled = spm === 'true';
       const cm = localStorage.getItem(LS_KEY_CHAIN_MODE);
       if (cm !== null) this._chainModeEnabled = cm === 'true';
+      const dm = localStorage.getItem(LS_KEY_DOC_MODE);
+      if (dm !== null) this._docMode = dm === 'true';
       const at = localStorage.getItem(LS_KEY_ACTIVE_TAB);
       if (at) this._activeTabUrl = at;
     } catch { /* ignore */ }
@@ -1029,6 +1053,14 @@ export class LayoutStore {
     this._notify();
   }
 
+  /** Toggle documentation mode: when on, component datasheets are shown on
+   *  hover/selection while the planner is active. */
+  setDocMode(enabled: boolean): void {
+    this._docMode = enabled;
+    try { localStorage.setItem(LS_KEY_DOC_MODE, String(enabled)); } catch { /* ignore */ }
+    this._notify();
+  }
+
   setGridSize(mm: number): void {
     this._gridSizeMm = Math.max(0, mm); // 0 = translation snap off (grid not drawn)
     try { localStorage.setItem(LS_KEY_GRID_SIZE, String(this._gridSizeMm)); } catch { /* ignore */ }
@@ -1080,6 +1112,10 @@ export class LayoutStore {
       if (!urlsJson) return;
       const urls = (JSON.parse(urlsJson) as string[]).filter(u => u.trim() !== '');
       for (const url of urls) {
+        // GitHub libraries are opt-in only — never auto-restore a persisted
+        // GitHub catalog (it would re-scan GitHub on every boot without the
+        // user adding it this session). Only an explicit manual add loads it.
+        if (isGitHubCatalogUrl(url)) continue;
         await this.addCatalog(url);
       }
     } catch { /* ignore */ }
@@ -1112,13 +1148,19 @@ export class LayoutStore {
   get neighborDistanceMaxMm(): number { return this._neighborDistanceMaxMm; }
   get snapPointMagnetEnabled(): boolean { return this._snapPointMagnetEnabled; }
   get chainModeEnabled(): boolean { return this._chainModeEnabled; }
+  get docMode(): boolean { return this._docMode; }
 
   // ─── Internal ─────────────────────────────────────────────────────
 
   private _persistUrls(): void {
     try {
-      // Only persist user-added URLs, not bundled ones
-      const userUrls = this._catalogUrls.filter(u => u.trim() !== '' && !this._bundledUrls.has(u));
+      // Only persist user-added URLs, not bundled ones. GitHub catalogs are
+      // never persisted (opt-in per session only) — this also self-heals any
+      // former-default GitHub URL that leaked into storage: the next persist
+      // rewrites the list without it.
+      const userUrls = this._catalogUrls.filter(
+        u => u.trim() !== '' && !this._bundledUrls.has(u) && !isGitHubCatalogUrl(u),
+      );
       localStorage.setItem(LS_KEY_URLS, JSON.stringify(userUrls));
     } catch { /* ignore */ }
   }
@@ -1144,6 +1186,7 @@ export class LayoutStore {
       neighborDistanceMaxMm: this._neighborDistanceMaxMm,
       snapPointMagnetEnabled: this._snapPointMagnetEnabled,
       chainModeEnabled: this._chainModeEnabled,
+      docMode: this._docMode,
       placementMode: this._placementMode,
       thumbnailPending: new Set(this._thumbnailPending),
     };

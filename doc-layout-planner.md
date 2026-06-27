@@ -484,7 +484,7 @@ handled.
 
 ---
 
-## 6.5 Locked LayoutObjects
+## 6.10 Locked LayoutObjects
 
 Every placed catalog item carries `userData.realvirtual.LayoutObject` with
 a `Locked` boolean. When `Locked = true`:
@@ -515,8 +515,10 @@ model (see [`doc-persistence.md`](doc-persistence.md)). Specifically:
 
 - `catalogUrls` — list of catalog source URLs the user has loaded.
 - `placed` — list of `PlacedComponent` records.
-- `gridSizeMm`, `rotationSnapDeg`, `dropToSurface`, `gridEnabled` —
-  per-scene Planner settings.
+
+Library catalogs (`catalogUrls`) and `gridSizeMm` are persisted in the unified
+Scene model; `rotationSnapDeg`, `dropToSurface` and `gridEnabled` are stored in
+browser localStorage.
 
 GLB blobs themselves are cached separately by `ModelCache` in the browser
 Cache API (`rv-planner-glbs`), keyed by URL.

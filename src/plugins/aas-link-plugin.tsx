@@ -22,6 +22,9 @@ import type { RVViewer } from '../core/rv-viewer';
 import type { TooltipContentProps } from '../core/hmi/tooltip/tooltip-registry';
 import type { TooltipData } from '../core/hmi/tooltip/tooltip-store';
 import { tooltipRegistry } from '../core/hmi/tooltip/tooltip-registry';
+import { tooltipStore } from '../core/hmi/tooltip/tooltip-store';
+import { Box3, Vector3, type Object3D } from 'three';
+import type { ObjectHoverState } from '../hooks/use-hover';
 import { registerCapabilities } from '../core/engine/rv-component-registry';
 import { NodeRegistry } from '../core/engine/rv-node-registry';
 import { ChartPanel } from '../core/hmi/ChartPanel';
@@ -107,6 +110,85 @@ function AasButton({ viewer }: UISlotProps) {
   );
 }
 
+// ─── Documentation-mode motor hover (planner) ───────────────────────────
+// In the planner, hover resolves to the WHOLE placement (the ancestor override),
+// not to sub-drives, so a motor's datasheet can't be hit by normal resolution.
+// This finds the gated-AAS drive node whose WORLD bounding box contains the 3D
+// hit point — the motor actually under the cursor — using the GLB geometry's own
+// bounds. No raycast / selection / planner surgery: the datasheet targets the
+// motor and never appears for the whole-conveyor selection. Exported for tests.
+const _docHoverBox = new Box3();
+export function findGatedAasAtPoint(root: Object3D, point: Vector3): Object3D | null {
+  let found: Object3D | null = null;
+  root.traverse((n) => {
+    if (found) return;
+    const aas = n.userData?._rvAasLink as { gated?: boolean } | undefined;
+    if (!aas?.gated) return;
+    _docHoverBox.setFromObject(n);
+    if (!_docHoverBox.isEmpty() && _docHoverBox.containsPoint(point)) found = n;
+  });
+  return found;
+}
+
+const _docHoverPoint = new Vector3();
+/**
+ * Show (or hide) the gated drive datasheet for the motor under the cursor, given
+ * a hover event. Shared by the AasLinkPlugin (active in normal viewing modes) and
+ * the layout-planner plugin (active in the planner), since model plugins — and
+ * thus AasLinkPlugin — are NOT loaded while the planner is open.
+ *
+ * Gating: shown unless the planner is active AND documentation mode is off
+ * (`planner.hideDriveDocs`). So in other modes it always shows; in the planner
+ * only while documentation mode is on. Skips a hover whose node already carries a
+ * gated link directly — the normal 'aas' resolver path renders that one.
+ */
+export function showDocModeDatasheet(viewer: RVViewer, hover: ObjectHoverState | null, tipId: string): void {
+  const planner = viewer.getPlugin('layout-planner') as { hideDriveDocs?: boolean } | undefined;
+  if (planner?.hideDriveDocs || !hover?.hitPoint || hover.node.userData?._rvAasLink) {
+    tooltipStore.hide(tipId);
+    return;
+  }
+  _docHoverPoint.set(hover.hitPoint[0], hover.hitPoint[1], hover.hitPoint[2]);
+  // Search the WHOLE scene, not just hover.node's subtree: hover resolves to the
+  // nearest hoverable ancestor (often a Drive sibling of the gated TransportSurface
+  // node), which does not contain the gated node. The 3D hit point uniquely picks
+  // the motor by its world bounding box regardless of which node was resolved.
+  const node = findGatedAasAtPoint(viewer.scene, _docHoverPoint);
+  if (!node) {
+    tooltipStore.hide(tipId);
+    return;
+  }
+  const aas = node.userData._rvAasLink as { aasId: string; description: string };
+  const nodePath = NodeRegistry.computeNodePath(node);
+  tooltipStore.show({
+    id: tipId,
+    lifecycle: 'hover',
+    targetPath: nodePath,
+    data: { type: 'aas', aasId: aas.aasId, description: aas.description, nodePath } as AasTooltipData,
+    mode: 'cursor',
+    cursorPos: { x: hover.pointer.x, y: hover.pointer.y },
+    priority: 4,
+  });
+}
+
+/**
+ * Open the full AAS detail panel (nameplate + technical data + PDF documents) for
+ * the gated motor whose world bounding box contains a 3D click point. Used by the
+ * planner where hover/click resolve to the whole placement (not the motor) and the
+ * hover augmenter is hover-only — so a tap needs an explicit "open detail" path.
+ * Returns true when a motor was hit and the panel opened.
+ */
+export function openDocModeDetailAtPoint(viewer: RVViewer, hitPoint: [number, number, number] | null | undefined): boolean {
+  const planner = viewer.getPlugin('layout-planner') as { hideDriveDocs?: boolean } | undefined;
+  if (planner?.hideDriveDocs || !hitPoint) return false;
+  _docHoverPoint.set(hitPoint[0], hitPoint[1], hitPoint[2]);
+  const node = findGatedAasAtPoint(viewer.scene, _docHoverPoint);
+  if (!node) return false;
+  const aas = node.userData._rvAasLink as { aasId: string; description: string };
+  openAasDetail(aas.aasId, aas.description, node.name);
+  return true;
+}
+
 // ─── Plugin ─────────────────────────────────────────────────────────────
 
 export class AasLinkPlugin implements RVViewerPlugin {
@@ -117,9 +199,19 @@ export class AasLinkPlugin implements RVViewerPlugin {
   ];
 
   private viewer: RVViewer | null = null;
+  private hoverOff: (() => void) | null = null;
+  private unhoverOff: (() => void) | null = null;
+  private readonly docHoverTipId = 'tooltip-hover:aas-docmode';
 
   onModelLoaded(result: LoadResult, viewer: RVViewer): void {
     this.viewer = viewer;
+
+    // Motor datasheet on hover (normal viewing modes — this plugin is not loaded
+    // in the planner; the layout-planner plugin runs the same augmenter there).
+    this.hoverOff?.();
+    this.unhoverOff?.();
+    this.hoverOff = viewer.on('object-hover', (h: ObjectHoverState | null) => showDocModeDatasheet(viewer, h, this.docHoverTipId));
+    this.unhoverOff = viewer.on('object-unhover', () => tooltipStore.hide(this.docHoverTipId));
 
     // Read optional assetsBasePath from model config for project-specific AASX/PDF.
     // Falls back to viewer.projectAssetsPath (set via settings.json in private deploys).
@@ -202,6 +294,11 @@ export class AasLinkPlugin implements RVViewerPlugin {
   }
 
   dispose(): void {
+    this.hoverOff?.();
+    this.unhoverOff?.();
+    this.hoverOff = null;
+    this.unhoverOff = null;
+    tooltipStore.hide(this.docHoverTipId);
     disposePdfViewer();
     this.viewer = null;
   }
@@ -477,9 +574,16 @@ tooltipRegistry.register({
 });
 
 // ── Data resolver for GenericTooltipController ──
-tooltipRegistry.registerDataResolver('aas', (node) => {
-  const aas = node.userData?._rvAasLink as { aasId: string; description: string } | undefined;
+tooltipRegistry.registerDataResolver('aas', (node, viewer) => {
+  const aas = node.userData?._rvAasLink as { aasId: string; description: string; gated?: boolean } | undefined;
   if (!aas?.aasId) return null;
+  // Library-attached drive datasheets are gated: hidden while the layout planner
+  // is active and documentation mode is off. Authored AAS links (no `gated`
+  // flag) and all other viewing modes are always shown.
+  if (aas.gated) {
+    const planner = viewer?.getPlugin?.('layout-planner') as { hideDriveDocs?: boolean } | undefined;
+    if (planner?.hideDriveDocs) return null;
+  }
   return { type: 'aas', aasId: aas.aasId, description: aas.description, nodePath: NodeRegistry.computeNodePath(node) };
 });
 

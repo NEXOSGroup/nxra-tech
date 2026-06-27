@@ -44,11 +44,24 @@ The remote path comes from `BUNNY_REMOTE_PATH` (default empty = storage-zone roo
 What happens, in order:
 
 1. **Build** — `vite build` with `VITE_PUBLIC_BUILD=1` (the private project folder is excluded from a public build).
-2. **Diff** — the remote file list is fetched; unchanged files (same size) are skipped. `*.html`, `settings.json`, `models.json` and `manifest.json` are always re-uploaded. `*.map` files are never uploaded.
-3. **Upload** — changed files are uploaded; assets first, `index.html` last, so the live site never points at missing assets mid-deploy.
-4. **Purge** — the CDN cache is purged once (only if something was uploaded, and only when the account/pull-zone purge credentials are present).
+2. **Model allowlist** — the public CDN ships **only the official demo models**: top-level `models/*.glb` whose filename starts with `DemoRealvirtual` are kept, the planner library under `models/library/**` is always kept, and every other top-level GLB (test fixtures, helper/MU GLBs, stray models) is pruned together with its hashed `assets/` duplicate. `models.json` is rewritten to the kept models so the model selector lists exactly what is shipped. See [Public model allowlist](#public-model-allowlist).
+3. **Diff** — the remote file list is fetched; unchanged files (same size) are skipped. `*.html`, `settings.json`, `models.json` and `manifest.json` are always re-uploaded. `*.map` files are never uploaded.
+4. **Upload** — changed files are uploaded; assets first, `index.html` last, so the live site never points at missing assets mid-deploy.
+5. **Purge** — the CDN cache is purged once (only if something was uploaded, and only when the account/pull-zone purge credentials are present).
 
-> **Tip:** run `npm run deploy -- --dry-run` first when unsure. It prints the build mode, the target zone/path, and every file that would upload — without changing anything.
+> **Tip:** run `npm run deploy -- --dry-run` first when unsure. It prints the build mode, the target zone/path, the model allowlist report (kept / pruned), and every file that would upload — without changing anything.
+
+### Public model allowlist
+
+A public deploy publishes only the official demo models. `public/models/` in the dev tree may hold test fixtures, helper GLBs, and work-in-progress models; none of those should reach the public CDN.
+
+The rule, applied to the built `dist/` after the build and before upload:
+
+- **Kept** — top-level `models/*.glb` whose filename starts with `DemoRealvirtual` (case-insensitive), plus the entire planner standard library under `models/library/**`.
+- **Pruned** — every other top-level `models/*.glb` and the content-hashed copy Vite also emits under `assets/`. The hyphen-boundary match means pruning e.g. `EuropalletEmpty` never touches the library's `Europallet*` assets.
+- **`models.json`** — rewritten to the kept models so the model selector shows exactly what is shipped (the build-time glob otherwise bakes every dev GLB filename into the selector, leaving 404 ghost entries).
+
+The prune is logged (`keep` / `prune` lines); a `--dry-run` reports it without deleting anything. To ship a model on the public demo, name it `DemoRealvirtual<Something>.glb`. Override the prefix for one deploy with the `RV_PUBLIC_MODEL_PREFIX` environment variable. This applies to the **public** deploy only — private projects already stage their own models, and a plain `npm run build` for self-hosting keeps every model.
 
 ### Analytics
 
@@ -91,6 +104,7 @@ All credentials come from environment variables — there is no key stored in th
 | `BUNNY_REMOTE_PATH` | no | Public remote path prefix (default empty = storage-zone root) |
 | `BUNNY_PRIVATE_PROJECTS_DIR` | no | Private projects root (for `--private`) |
 | `GA_MEASUREMENT_ID` | no | GA4 id injected into the deployed `settings.json` (default empty = no analytics) |
+| `RV_PUBLIC_MODEL_PREFIX` | no | Public-deploy model allowlist prefix (default `DemoRealvirtual`). Only top-level `models/*.glb` starting with it are published |
 | `VITE_BASE` | no | Build-time base path (default `./`). Settable per-run via `--base` |
 
 These mirror the values configured in the Unity Editor under **Tools > realvirtual > Export > WebViewer Tools** (Publish tab, stored there as EditorPrefs). If you rotate a key, update both places so the two deploy paths stay in sync.

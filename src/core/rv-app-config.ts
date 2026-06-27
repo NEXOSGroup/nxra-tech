@@ -174,7 +174,13 @@ export function initAnalytics(): void {
   // Initialize dataLayer and config
   const w = window as unknown as Record<string, unknown>;
   w.dataLayer = w.dataLayer || [];
-  function gtag(...args: unknown[]) { (w.dataLayer as unknown[]).push(args); }
+  // gtag.js ONLY consumes dataLayer entries that are the raw `arguments` object,
+  // exactly like Google's canonical snippet. Pushing a plain array (`[...args]`)
+  // makes gtag silently ignore every command — neither `config` nor events ever
+  // transmit, so no `/g/collect` hit is sent and GA receives nothing. Keep the
+  // `arguments` push verbatim.
+  // eslint-disable-next-line prefer-rest-params
+  const gtag = function () { (w.dataLayer as unknown[]).push(arguments); } as (...args: unknown[]) => void;
   // Expose gtag globally so trackAnalyticsEvent() can fire GA4 custom events.
   w.gtag = gtag;
   gtag('js', new Date());

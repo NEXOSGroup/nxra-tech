@@ -7,11 +7,12 @@
  * Tests frame-based drive recording playback with accumulator,
  * looping, seeking, and drive binding.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { Object3D } from 'three';
 import { RVDrive, DriveDirection } from '../src/core/engine/rv-drive';
 import { RVDrivesPlayback, type CompactRecording } from '../src/core/engine/rv-drives-playback';
 import { NodeRegistry } from '../src/core/engine/rv-node-registry';
+import { setDriveSpeedOverride } from '../src/core/engine/rv-speed-override';
 
 function makeDrive(name: string): RVDrive {
   const node = new Object3D();
@@ -212,5 +213,49 @@ describe('RVDrivesPlayback', () => {
     pb.seekToPercent(0.5);
     // frame = floor(0.5 * 9) = 4, progress = 4/10 = 0.4
     expect(pb.progress).toBeCloseTo(0.4);
+  });
+});
+
+describe('RVDrivesPlayback — drive-speed override', () => {
+  // The override is a module-global singleton — reset after each test.
+  afterEach(() => { setDriveSpeedOverride(1); });
+
+  it('advances recordings faster when the drives are sped up (2×)', () => {
+    const d0 = makeDrive('d0');
+    const registry = makeRegistry([['drive0', d0]]);
+    const rec = makeRecording(10, 1, [0, 10, 20, 30, 40, 50, 60, 70, 80, 90]);
+    const pb = new RVDrivesPlayback(rec, registry);
+    pb.loop = false;
+    pb.play();
+
+    setDriveSpeedOverride(2);
+    pb.update(0.02);            // one fixed tick → 2× recording dt → two frames
+    expect(pb.frame).toBe(2);
+    expect(d0.currentPosition).toBe(20);
+  });
+
+  it('freezes the recording when drive speed is 0 (stopped)', () => {
+    const d0 = makeDrive('d0');
+    const registry = makeRegistry([['drive0', d0]]);
+    const rec = makeRecording(5, 1, [0, 10, 20, 30, 40]);
+    const pb = new RVDrivesPlayback(rec, registry);
+    pb.play();
+
+    setDriveSpeedOverride(0);
+    pb.update(0.02);
+    pb.update(0.02);
+    expect(pb.frame).toBe(0);   // no advance while drives are stopped
+  });
+
+  it('plays at the recorded rate at 1× (default — no regression)', () => {
+    const d0 = makeDrive('d0');
+    const registry = makeRegistry([['drive0', d0]]);
+    const rec = makeRecording(3, 1, [0, 50, 100]);
+    const pb = new RVDrivesPlayback(rec, registry);
+    pb.play();
+
+    pb.update(0.02);            // exactly one frame at 1×
+    expect(pb.frame).toBe(1);
+    expect(d0.currentPosition).toBe(50);
   });
 });

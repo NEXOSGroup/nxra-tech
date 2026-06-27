@@ -18,6 +18,7 @@ import type { RVViewerPlugin } from '../core/rv-plugin';
 import type { LoadResult } from '../core/engine/rv-scene-loader';
 import type { RVViewer } from '../core/rv-viewer';
 import { getAppConfig } from '../core/rv-app-config';
+import { isCompactWidth } from '../hooks/use-mobile-layout';
 
 // ─── Public types ────────────────────────────────────────────────────
 
@@ -281,6 +282,11 @@ export class OrientationGizmoPlugin implements RVViewerPlugin {
    *  missing. */
   private _refreshPosition(): void {
     if (!this._container) return;
+    // Compact (phone-width) layout: the gizmo is a desktop mouse tool and would
+    // sit on top of the fullscreen panel headers (covering their close button),
+    // so hide it on narrow viewports. Driven from the same ResizeObserver as the
+    // positioning, so it toggles live when the window crosses the breakpoint.
+    this._container.style.display = isCompactWidth(window.innerWidth) ? 'none' : '';
     const vp = document.getElementById('rv-viewport');
     if (vp) {
       const rect = vp.getBoundingClientRect();

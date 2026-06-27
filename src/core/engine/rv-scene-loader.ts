@@ -50,19 +50,23 @@ import { mergeStaticUberMeshes, type StaticUberMergeResult } from './rv-static-m
 import { mergeKinematicGroupMeshes, type KinematicMergeResult } from './rv-kinematic-merge-uber';
 import { freezeStaticMatrices } from './rv-freeze-static';
 import { buildRaycastGeometries, type RaycastGeometrySet } from './rv-raycast-geometry';
+import { attachAasLink, SEW_DRIVE_AAS, isDriveDatasheetNode } from '../../behaviors/_shared/aas-link';
 import { applyOverlayToNode, type RVExtrasOverlay } from './rv-extras-overlay-store';
 import { applyKinematicsSpec } from '../behavior-runtime';
 import { scanLibraryComponent } from '../library-component-loader';
 
 // Singleton loader instances
 const dracoLoader = new DRACOLoader();
-dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
+// Serve the Draco decoder from our own bundle (copied into `<base>draco/` by the
+// vite `rv-copy-draco` plugin) instead of the gstatic CDN. The CDN is an external
+// dependency that intermittently fails on mobile networks / behind corporate
+// proxies — when it does, DRACO-compressed meshes never decode and the user is
+// left with a blank scene. Local serving removes that failure mode and works
+// offline. BASE_URL respects the deploy sub-path (e.g. `/demo/`).
+dracoLoader.setDecoderPath(`${import.meta.env.BASE_URL}draco/`);
 
 const gltfLoader = new GLTFLoader();
 gltfLoader.setDRACOLoader(dracoLoader);
-// Warm up the Draco WASM decoder worker before the first model load so the
-// first DRACO-compressed mesh does not pay the worker spin-up cost inline.
-dracoLoader.preload();
 
 // ─── Register capabilities for types without factories ────────────
 
@@ -193,6 +197,12 @@ export interface LoadGLBOptions {
    * window the post-load re-application path used to have.
    */
   overlay?: RVExtrasOverlay;
+  /**
+   * Pre-downloaded GLB bytes. When provided, the loader parses these directly
+   * instead of fetching `url` itself — used by the progress/retry-aware download
+   * path in main.ts. Omit to let the loader fetch the URL (direct callers/tests).
+   */
+  data?: ArrayBuffer;
 }
 
 /** Pending component awaiting resolveComponentRefs + init() in Step 2 */
@@ -218,11 +228,19 @@ interface PreparedGLTF {
 /**
  * Load and parse a GLTF/GLB file, add root to scene.
  * Returns the root Object3D and parser metadata for renamed-node detection.
+ *
+ * When `data` is supplied the bytes are parsed directly (no internal fetch) —
+ * the caller already downloaded the GLB (e.g. main.ts streams it with progress,
+ * a timeout and retries). This avoids the GLTFLoader re-fetching the file and,
+ * crucially, avoids the blob-URL double-buffering that doubled peak memory and
+ * caused out-of-memory blank scenes for large models on mobile.
  */
-export async function loadAndPrepareGLTF(url: string, scene: Scene): Promise<PreparedGLTF> {
+export async function loadAndPrepareGLTF(url: string, scene: Scene, data?: ArrayBuffer): Promise<PreparedGLTF> {
   debug('loader', `Loading ${url}...`);
   resetParityValidator(); // Clear any previous load's parity data
-  const gltf = await gltfLoader.loadAsync(url);
+  // Self-contained GLB (textures + buffers embedded) → empty resource path is
+  // correct; external-resource glTF is not produced by the Unity exporter.
+  const gltf = data ? await gltfLoader.parseAsync(data, '') : await gltfLoader.loadAsync(url);
   debug('loader', `GLTF parsed, adding to scene`);
   const root = gltf.scene;
   scene.add(root);
@@ -401,6 +419,19 @@ export function traverseAndRegister(
     // this step regardless of whether the node already has rv-extras.
     if (overlay) applyOverlayToNode(node, path, overlay);
 
+    // Drive datasheet (GLB-First, runs BEFORE the rv-extras guard so pure-geometry
+    // nodes are covered, and BEFORE the raycast BVH so findContentAncestor makes
+    // them interactive). Nodes whose name marks them as motor/drive GEOMETRY get
+    // the standard SEW gearmotor AAS → the motor itself becomes a hover/click
+    // datasheet target (highlight renders through walls via OutlinePass). Matches
+    // "Motor"/"Antrieb" and library drive meshes (DriveMesh/DriveRotate/DriveRolls)
+    // but NOT the Drive-Lin/Rot-* logic nodes, which contain the belt/transport.
+    // attachAasLink no-ops on an authored AASLink; the guard on the AASLink block
+    // below preserves this gated link from being overwritten as non-gated.
+    if (isDriveDatasheetNode(node.name || '')) {
+      attachAasLink(node, SEW_DRIVE_AAS.aasId, SEW_DRIVE_AAS.description);
+    }
+
     const rv = node.userData?.realvirtual as Record<string, unknown> | undefined;
     if (!rv) return;
 
@@ -512,7 +543,9 @@ export function traverseAndRegister(
 
     // AASLink — Asset Administration Shell link.
     // Can coexist with Drive/Pipe/etc. — only sets _rvType if no other type is present.
-    if (rv['AASLink']) {
+    // The `!_rvAasLink` guard skips a gated drive-datasheet link already attached
+    // by name above, so its `gated` flag survives (authored links have no link yet).
+    if (rv['AASLink'] && !node.userData._rvAasLink) {
       const aas = rv['AASLink'] as Record<string, unknown>;
       validateExtras('AASLink', aas);
       node.userData._rvAasLink = {
@@ -1129,7 +1162,7 @@ export async function loadGLB(url: string, scene: Scene, options?: LoadGLBOption
   const prof = createLoadProfiler('loadGLB');
 
   // Phase 1: Load and parse GLTF
-  const { root, gltfParser } = await loadAndPrepareGLTF(url, scene);
+  const { root, gltfParser } = await loadAndPrepareGLTF(url, scene, options?.data);
   prof.mark('gltf-parse');
 
   // Phase 2: Process meshes (shadow classification, triangle counting, drive/transport node sets)

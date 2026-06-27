@@ -11,11 +11,13 @@
  * remove), not every render frame.
  */
 
-import { useSyncExternalStore, useCallback, useMemo } from 'react';
-import { PlayArrow, Pause, Replay } from '@mui/icons-material';
+import { useSyncExternalStore, useCallback, useMemo, useState, type MouseEvent } from 'react';
+import { PlayArrow, Pause, Replay, Speed } from '@mui/icons-material';
+import { Menu, MenuItem } from '@mui/material';
 import type { UISlotProps } from '../../core/rv-ui-plugin';
 import { ActionSegment, ActionDivider } from '../../core/hmi/action-group';
 import { SIM_CONTROLLER_PAUSE_REASON } from './index';
+import { getDriveSpeedOverride, setDriveSpeedOverride, subscribeDriveSpeedOverride } from '../../core/engine/rv-speed-override';
 
 /** Snapshot shape returned by `getPauseSnapshot`. Compared by reference so
  *  `useSyncExternalStore` re-renders only when the underlying state changes. */
@@ -82,6 +84,53 @@ export function SimControllerToolbar({ viewer }: UISlotProps) {
         icon={<Replay />}
         buttonProps={{ 'data-testid': 'sim-controller-reset' }}
       />
+      <ActionDivider />
+      <SpeedSelector />
+    </>
+  );
+}
+
+// ── Drive-speed selector ────────────────────────────────────────────────────
+// A central master speed override for continuous simulation: one factor that
+// scales the effective speed of ALL drives (1 = normal). Sits next to Reset.
+
+// Engine cap is 100× (see setDriveSpeedOverride). Above ~10–20× fast/small parts
+// can tunnel past sensors in the fixed 60 Hz step — fine for large parts / big zones.
+const SPEED_OPTIONS = [0.25, 0.5, 1, 2, 5, 10, 25, 50, 100];
+
+function SpeedSelector() {
+  const factor = useSyncExternalStore(subscribeDriveSpeedOverride, getDriveSpeedOverride, getDriveSpeedOverride);
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  return (
+    <>
+      <ActionSegment
+        title="Drive speed override — scales all drive speeds (1× = normal)"
+        icon={<Speed />}
+        label={`${factor}×`}
+        buttonProps={{
+          'data-testid': 'sim-speed-selector',
+          onClick: (e: MouseEvent<HTMLElement>) => setAnchor(e.currentTarget),
+        }}
+      />
+      <Menu
+        anchorEl={anchor}
+        open={!!anchor}
+        onClose={() => setAnchor(null)}
+        MenuListProps={{ dense: true }}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        transformOrigin={{ vertical: 'top', horizontal: 'center' }}
+      >
+        {SPEED_OPTIONS.map(o => (
+          <MenuItem
+            key={o}
+            selected={o === factor}
+            onClick={() => { setDriveSpeedOverride(o); setAnchor(null); }}
+            sx={{ fontSize: 13, minHeight: 0, py: 0.5, justifyContent: 'center' }}
+          >
+            {o}×
+          </MenuItem>
+        ))}
+      </Menu>
     </>
   );
 }

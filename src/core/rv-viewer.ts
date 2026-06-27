@@ -73,6 +73,7 @@ import { DRAG_THRESHOLD_PX, DEFAULT_DPR_CAP, NO_AO_LAYER } from './engine/rv-con
 import { loadGLB, createRuntimeNode, removeRuntimeNode, type LoadResult, type RuntimeNodeSpec } from './engine/rv-scene-loader';
 import type { RVExtrasOverlay } from './engine/rv-extras-overlay-store';
 import type { RvScene } from './hmi/scene/rv-scene-types';
+import type { PublishedSceneEntry } from './hmi/scene/rv-published-scenes';
 import type { PlacementsSnapshot } from './rv-shared-types';
 import type { MultiuserSnapshot } from '../plugins/multiuser-plugin';
 import type { McpBridgeSnapshot } from '../plugins/mcp-bridge-plugin';
@@ -479,6 +480,9 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
 
   /** Available model entries for the model selector UI. */
   availableModels: Array<{ url: string; label: string }> = [];
+
+  /** Read-only "Example" scenes shipped under public/scenes/ (Examples section). */
+  availablePublishedScenes: PublishedSceneEntry[] = [];
 
   /** UI plugin registry for React slot rendering. */
   readonly uiRegistry = new UIPluginRegistry();
@@ -1391,29 +1395,46 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
   get simulationPauseReasons(): readonly string[] { return this.loop.pauseReasons; }
 
   /**
-   * Reset the simulation to a clean "start of new demo run" state without
-   * unloading the model.
+   * Reset the running model to its freshly-loaded "start" state — like a reload,
+   * but without re-fetching/re-parsing the GLB. Every component restores its
+   * internal variables and state to the start.
    *
-   * Effects:
-   * - Clears all live MUs and resets transport counters (`totalSpawned`,
-   *   `totalConsumed`).
-   * - Resets all LogicSteps to `Idle` (existing `logicEngine.reset()`).
+   * Three phases, surfaced as events so components (and plugins) can react:
+   *
+   * 1. **`'simulation-reset'`** — components restore their internal state to the
+   *    start: behaviors (Conveyor / Turntable / ChainTransfer) reset their FSM,
+   *    part counters, timers and routing bookkeeping; drives snap back to their
+   *    authored `StartPosition` (`RVDrive.reset()`); conveyor belt textures
+   *    rewind. Then the engine-level state is cleared: live MUs, sensor
+   *    occupancy, sources, grips and counters (`transportManager.reset()`),
+   *    LogicSteps to `Idle` (`logicEngine.reset()`), and the active DES executor.
+   * 2. **`'simulation-resetstat'`** — statistics accumulators are cleared
+   *    (registrations persist). Also fired standalone for DES stat-only resets.
+   * 3. **`'simulation-start'`** — components (re)start from the clean state
+   *    (e.g. conveyors re-assert `Run = true`).
    *
    * Intentionally leaves untouched:
-   * - **Drives**: stay at their current position. Conveyor textures do not
-   *   abruptly snap back — the user-visible model continues to look like it
-   *   did before the reset.
-   * - **Signals**: stay at their current values. This is essential for Live
-   *   mode (Unity / PLC stream) — resetting them would just be overwritten on
-   *   the next tick and would briefly visualise stale data.
+   * - **Signals** are NOT blanket-reset: that would fight Live mode (Unity / PLC
+   *   stream) where the next tick overwrites them anyway. Instead each component
+   *   re-establishes only the signals it OWNS in its `onReset` / `onStart`
+   *   handler (e.g. a conveyor zeroes `PartCount`, re-asserts `Run`).
    * - **Pause state**: untouched. Reset can be invoked while paused or running.
-   *
-   * Use case: starting a fresh demo loop on a model that has been running for
-   * a while and has accumulated MUs on conveyors.
    */
   resetSimulation(): void {
+    // ── Phase 1: RESET ──────────────────────────────────────────────────────
+    // Notify components FIRST so behavior FSMs / counters / bookkeeping are
+    // restored before the engine drops the live MUs they may reference.
+    this.emit('simulation-reset');
+
     this._simTime = 0; // Plan 201 (E2): restart the sim clock
-    this.statisticsManager.resetAll(); // Plan 201: reset accumulators (registrations persist)
+
+    // Drives back to their authored start pose (position/speed/jog/running).
+    // Conveyor (transport-surface) drives keep their belt jog so belts resume
+    // running like a freshly-loaded scene — see RVDrive.reset().
+    for (const drive of this.drives) drive.reset();
+
+    // Engine-level clear: live MUs, sensor occupancy, sources, grips, counters,
+    // plus per-surface texture/transform accumulators.
     if (this.transportManager) this.transportManager.reset();
     if (this.logicEngine) this.logicEngine.reset();
     // Plan 194 P1 (K3): when the unified kernel is active, also reset the active
@@ -1421,6 +1442,13 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     // continuous runner beyond the transportManager.reset() above (same target),
     // and entirely skipped when the flag is OFF.
     if (this._unifiedSim) this._kernel?.activeExecutor.reset();
+
+    // ── Phase 2: RESETSTAT ──────────────────────────────────────────────────
+    this.statisticsManager.resetAll(); // Plan 201: reset accumulators (registrations persist)
+    this.emit('simulation-resetstat');
+
+    // ── Phase 3: START ──────────────────────────────────────────────────────
+    this.emit('simulation-start');
   }
 
   /**
@@ -1831,6 +1859,32 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
     renderer.domElement.style.width = '100%';
     renderer.domElement.style.height = '100%';
     container.appendChild(renderer.domElement);
+
+    // --- WebGL context loss (mobile robustness) ---
+    // Mobile GPUs drop the drawing context under memory pressure or when the tab
+    // sits backgrounded. Without preventDefault the canvas stays permanently
+    // blank (an "empty scene" with no error). Calling preventDefault lets the
+    // browser attempt to restore the context; the emitted events let the UI show
+    // a message and offer a reload.
+    renderer.domElement.addEventListener(
+      'webglcontextlost',
+      (e) => {
+        e.preventDefault();
+        console.error('[RVViewer] WebGL context lost');
+        this.emit('renderer-context-lost', undefined);
+      },
+      false,
+    );
+    renderer.domElement.addEventListener(
+      'webglcontextrestored',
+      () => {
+        console.warn('[RVViewer] WebGL context restored');
+        this._renderDirty = true;
+        this._shadowsDirty = true;
+        this.emit('renderer-context-restored', undefined);
+      },
+      false,
+    );
 
     // --- Controls ---
     this.controls = new OrbitControls(this._activeCamera, renderer.domElement);
@@ -2269,7 +2323,7 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
    * @param url      GLB URL (file, blob:, or empty-glb URL)
    * @param options  Optional load options (e.g. an rv-extras overlay applied during traversal).
    */
-  async loadModel(url: string, options?: { overlay?: RVExtrasOverlay }): Promise<LoadResult> {
+  async loadModel(url: string, options?: { overlay?: RVExtrasOverlay; data?: ArrayBuffer }): Promise<LoadResult> {
     this.clearModel();
     this._currentModelUrl = url;
 
@@ -2305,6 +2359,7 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
       errorStore: this.errorStore,
       events: this,
       overlay: options?.overlay,
+      data: options?.data,
     });
 
     // Profile the expensive post-loadGLB steps separately (gated on ?debug=perf).
@@ -4525,7 +4580,10 @@ export class RVViewer extends EventEmitter<ViewerEvents> {
         const node = this.registry.getNode(hitPath);
         if (node) {
           this.emit('object-focus', { path: hitPath, node });
-          this.fitToNodes([node]);
+          // On the compact (mobile) layout a double-click only opens the inspector
+          // sheet — no camera zoom. Width gate kept in sync with MOBILE_BREAKPOINT
+          // (use-mobile-layout.ts) without importing the React/MUI hook into core.
+          if (window.innerWidth >= 900) this.fitToNodes([node]);
         }
       }
     });

@@ -41,12 +41,15 @@ viewer.use(myPlugin);
 
 | Callback | When | Typical Use |
 |---|---|---|
+| `init(viewer, context?)` | When the plugin is registered via `viewer.use(plugin)` (before any model load) | Initialize plugin state, store the viewer reference, establish connections |
 | `onModelLoaded(result, viewer)` | After GLB load, before the `'model-loaded'` event. Also called retroactively for plugins registered after a model is already loaded. | Find components, initialize custom managers |
 | `onModelCleared(viewer)` | At the start of `clearModel()`, **before** state reset | Clear own caches |
 | `onConnectionStateChanged(state, viewer)` | When `viewer.setConnectionState(...)` changes | Pause/resume polling |
 | `onFixedUpdatePre(dt)` | 60 Hz, **before** drive physics & transport | Drive targets, ErraticDriver, replay, CAM |
 | `onFixedUpdatePost(dt)` | 60 Hz, **after** drive physics & transport | DriveRecorder, SensorMonitor, KPIs |
 | `onRender(frameDt)` | Per render frame, **after** `renderer.render()` | Custom overlays, post effects |
+| `onModeActivate(mode, viewer)` | When entering a workspace mode this plugin participates in | Install mode-specific scene overlays, interaction handlers, raycast filters, gizmos |
+| `onModeDeactivate(mode, viewer)` | When leaving such a mode, before the plugin is disabled (scene/model still valid) | Tear down everything created in onModeActivate |
 | `dispose()` | Viewer is destroyed | Clean up listeners / DOM |
 
 ### Plugin Properties
@@ -57,6 +60,7 @@ viewer.use(myPlugin);
 | `order` | Sort order in pre/post/render lists (default `100`) |
 | `handlesTransport` | When `true`: kinematic transport manager is skipped |
 | `core` | When `true`: plugin always runs even in selective mode |
+| `modes` | Workspace modes this plugin participates in. `undefined` (default) = the plugin is shared and active in every mode. When set (e.g. `['planner']` or `['des','hmi']`) the plugin and its UI slots are active only while one of those modes is active. |
 | `slots` | Array of `UISlotEntry` — automatic registration in HMI slots |
 
 ---
@@ -192,6 +196,8 @@ Every 3D component (`RVDrive`, `RVSensor`, …) implements `RVComponent` from [r
 | `onHover?(hovered, event?)` | Raycast — node enters / leaves hover |
 | `onClick?(event)` | Click on the node |
 | `onSelect?(selected)` | Node enters / leaves selection |
+| `getLiveState?()` | Returns the component's authoritative current runtime values (source of truth for the inspector, hierarchy badges, tooltips) |
+| `setLiveField?(fieldName, value)` | Applies an inspector edit to live runtime state immediately; return true if handled, false to fall back to generic assignment |
 
 `ComponentContext` contains `viewer`, `signalStore`, `registry`, `componentEventDispatcher`, and `events` (typed as `EventEmitter<ViewerEvents>`). Everything a component normally needs is reachable.
 

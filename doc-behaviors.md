@@ -52,7 +52,8 @@ The scanner walks every loaded GLB and maps these node names to components autom
 |--------------------------|------------------------------------------|
 | `Drive-Lin-X/Y/Z`        | Linear drive, `Direction = Linear{X,Y,Z}` |
 | `Drive-Rot-X/Y/Z`        | Rotational drive                         |
-| `Transport-X/Y/Z`        | Transport surface, +axis. Parent `Drive-*` is auto-linked. |
+| `Transport-X/Y/Z`        | Transport surface, +axis. A co-located linear Drive is synthesized on the same node and auto-linked at runtime (findInParent fallback). |
+| `Sensor`, `Sensor-<id>`  | RVSensor (e.g. `Sensor`, `Sensor-1`, `Sensor-Infeed`). An optional exporter duplicate suffix like `_(1)` or `(1)` is tolerated. |
 | `DriveMesh`, `Base`      | Structural tags only (no component)      |
 | `Snap-<DIR>-<TYPEID>`    | Handled by the snap-point plugin (unchanged) |
 

@@ -35,18 +35,21 @@ import {
 } from '@mui/material';
 import {
   Add,
+  AutoAwesome,
   ContentCopy,
   Delete,
   DriveFileRenameOutline,
   FileDownload,
   FileUpload,
   Folder,
+  LibraryAdd,
   Movie,
   PrecisionManufacturing,
 } from '@mui/icons-material';
 import { LeftPanel } from '../LeftPanel';
 import { SCENE_PANEL_WIDTH } from '../layout-constants';
 import type { SceneStore } from './scene-store';
+import type { PublishedSceneEntry } from './rv-published-scenes';
 import { SceneConfirmDialog } from './rv-scene-confirm-dialog';
 import { SceneRow } from './rv-scene-row';
 import { SceneActiveCard } from './SceneActiveCard';
@@ -67,7 +70,7 @@ type NameDialogState =
 
 export function SceneWindow({ store, onClose }: SceneWindowProps) {
   const snap = useSyncExternalStore(store.subscribe, store.getSnapshot);
-  const { saved, draft, isDraft, dirty, scenes, builtins, busy } = snap;
+  const { saved, draft, isDraft, dirty, scenes, builtins, published, activePublishedName, busy } = snap;
 
   const currentName = draft?.name ?? '(no model)';
   const canSaveExisting = !isDraft && !!saved;
@@ -133,6 +136,28 @@ export function SceneWindow({ store, onClose }: SceneWindowProps) {
     tryDoSwitch(() => store.newEmpty());
   }, [tryDoSwitch, store]);
 
+  // ─── Example (published) clicks ────────────────────────────────────
+  // Surface failures (offline, 404, stale index.json, malformed JSON, full
+  // storage) instead of a silent no-op — mirrors onImportJSON's alert pattern.
+  const onOpenExample = useCallback((entry: PublishedSceneEntry) => {
+    tryDoSwitch(async () => {
+      try {
+        await store.openPublishedExample(entry);
+      } catch (e) {
+        alert(`Failed to open example: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    });
+  }, [tryDoSwitch, store]);
+  const onAddExample = useCallback((entry: PublishedSceneEntry) => {
+    tryDoSwitch(async () => {
+      try {
+        await store.addPublishedToMyScenes(entry);
+      } catch (e) {
+        alert(`Failed to add example to My Scenes: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    });
+  }, [tryDoSwitch, store]);
+
   // ─── Import JSON ───────────────────────────────────────────────────
   const onImportJSON = useCallback(() => {
     const input = document.createElement('input');
@@ -196,6 +221,37 @@ export function SceneWindow({ store, onClose }: SceneWindowProps) {
             </List>
           )}
         </Box>
+
+        {/* ─── Examples (read-only published demos) ─────────────── */}
+        {/* Intentionally hidden when empty: a curated section with nothing to show
+            adds noise for ordinary visitors (unlike Built-in, where empty signals
+            a real problem, or My Scenes, which the user populates). */}
+        {published.length > 0 && (
+          <Box>
+            <SectionHeader>Examples</SectionHeader>
+            <List dense disablePadding sx={{ mt: 0.5 }}>
+              {published.map(p => (
+                <SceneRow
+                  key={p.file}
+                  primary={p.label}
+                  selected={p.urlName === activePublishedName}
+                  icon={<AutoAwesome sx={{ fontSize: 14 }} />}
+                  selectedBg="rgba(186,104,200,0.16)"
+                  selectedIconColor="#ba68c8"
+                  disabled={busy}
+                  onClick={() => onOpenExample(p)}
+                  menuItems={[
+                    {
+                      label: 'Add to My Scenes',
+                      icon: <LibraryAdd sx={{ fontSize: 16 }} />,
+                      onClick: () => onAddExample(p),
+                    },
+                  ]}
+                />
+              ))}
+            </List>
+          </Box>
+        )}
 
         {/* ─── My Scenes ──────────────────────────────────────── */}
         <Box>

@@ -11,7 +11,7 @@
  * via snap-placement-validation + scene-mutations tests.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { Object3D } from 'three';
 import { SnapPointPickerPopup } from '../src/plugins/snap-point/SnapPointPickerPopup';
@@ -19,6 +19,18 @@ import {
   snapHoverStore,
 } from '../src/plugins/snap-point/snap-hover-store';
 import type { SnapPoint } from '../src/core/engine/rv-snap-point-registry';
+import { useMobileLayout } from '../src/hooks/use-mobile-layout';
+
+// The popup picks its layout from useMobileLayout(): desktop anchors next to the
+// snap point (left/top from the screen anchor); mobile docks it centre-bottom
+// (left:50%, transform). The headless test viewport is narrow, so without this
+// mock useMobileLayout() returns true and the anchored-position assertion would
+// be viewport-dependent. Mock it so each test pins the layout it exercises.
+vi.mock('../src/hooks/use-mobile-layout', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/hooks/use-mobile-layout')>()),
+  useMobileLayout: vi.fn(() => false),
+}));
+const mockUseMobileLayout = vi.mocked(useMobileLayout);
 
 function makeSnap(id: string): SnapPoint {
   const n = new Object3D();
@@ -46,6 +58,7 @@ describe('SnapPointPickerPopup', () => {
   beforeEach(() => {
     snapHoverStore.reset();
     cleanup();
+    mockUseMobileLayout.mockReturnValue(false); // default: desktop layout
   });
 
   it('renders nothing when picker is closed', () => {
@@ -77,14 +90,29 @@ describe('SnapPointPickerPopup', () => {
     expect(popup.textContent ?? '').toMatch(/no compatible/i);
   });
 
-  it('positions the popup near the screen anchor', () => {
+  it('positions the popup near the screen anchor (desktop)', () => {
+    mockUseMobileLayout.mockReturnValue(false);
     const sp = makeSnap('a');
     snapHoverStore.openPicker(sp, { x: 200, y: 150 });
     render(<SnapPointPickerPopup viewer={makeViewerStub() as never} />);
     const popup = screen.getByTestId('snap-picker-popup') as HTMLElement;
-    // MUI Paper computed style — 12 px offset hard-coded in the popup
+    // Desktop anchors the popup at screenPos + 12 px (hard-coded in the popup).
     const cs = window.getComputedStyle(popup);
     expect(cs.left).toBe('212px');
     expect(cs.top).toBe('162px');
+    expect(cs.transform).toBe('none'); // anchored, not centre-translated
+  });
+
+  it('docks the popup centre-bottom on mobile (not anchored)', () => {
+    mockUseMobileLayout.mockReturnValue(true);
+    const sp = makeSnap('a');
+    snapHoverStore.openPicker(sp, { x: 200, y: 150 });
+    render(<SnapPointPickerPopup viewer={makeViewerStub() as never} />);
+    const popup = screen.getByTestId('snap-picker-popup') as HTMLElement;
+    const cs = window.getComputedStyle(popup);
+    // Mobile centres horizontally (translateX(-50%)) and ignores the anchor —
+    // it must NOT sit at the desktop-anchored 212px / 162px.
+    expect(cs.transform).not.toBe('none');
+    expect(cs.top).not.toBe('162px');
   });
 });

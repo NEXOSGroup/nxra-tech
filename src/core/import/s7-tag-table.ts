@@ -28,9 +28,9 @@ export interface S7Tag {
   name: string;
   /** Siemens data type as written in the table: Bool/Byte/Word/Int/DWord/DInt/Real/LReal. */
   dataType: string;
-  /** Original symbolic address, e.g. "%IW13". */
+  /** Original symbolic address, e.g. "%IW13" or a bare "96.0". */
   address: string;
-  /** Memory area letter: I/Q/M/E/A. */
+  /** Memory area letter: I/Q/M/E/A, or empty for a bare process-image address (e.g. "96.0"). */
   area: string;
   comment?: string;
 }
@@ -45,8 +45,12 @@ export interface ParsedTagTable {
 
 // ── Address Parsing ─────────────────────────────────────────────────────────
 
-/** Siemens symbolic address: optional `%`, area letter, optional size letter, byte offset, optional bit. */
-const ADDRESS_RE = /^%?([IQMEA])([BWDX]?)(\d+)(?:\.([0-7]))?$/;
+/**
+ * Siemens symbolic address: optional `%`, optional area letter, optional size letter,
+ * byte offset, optional bit. The area letter is optional because the raw process image is
+ * flat (offset = index, area ignored), so bare addresses such as `96.0` or `96` are valid.
+ */
+const ADDRESS_RE = /^%?([IQMEA]?)([BWDX]?)(\d+)(?:\.([0-7]))?$/;
 
 /** Recognized Siemens data types and their byte length (Bool handled separately as 1 bit). */
 const TYPE_SIZE: Record<string, number> = {
@@ -131,17 +135,19 @@ export function parseAddress(
 // ── Wire-type derivation ────────────────────────────────────────────────────
 
 /**
- * Derive the rv PLC wire type (always an input) from a Siemens data type.
- *   Bool                         → PLCInputBool
- *   Byte/Word/Int/DWord/DInt     → PLCInputInt
- *   Real/LReal                   → PLCInputFloat
+ * Derive the rv PLC wire type from a Siemens data type. An imported process-image
+ * signal is always a PLC output (the PLC writes the process image, the viewer only
+ * reads/displays it — read-only, never sent back), matching the Unity nomenclature.
+ *   Bool                         → PLCOutputBool
+ *   Byte/Word/Int/DWord/DInt     → PLCOutputInt
+ *   Real/LReal                   → PLCOutputFloat
  */
 export function deriveWireType(dataType: string): string {
   const dt = dataType.trim().toLowerCase();
-  if (dt === 'bool') return 'PLCInputBool';
-  if (dt === 'real' || dt === 'lreal') return 'PLCInputFloat';
+  if (dt === 'bool') return 'PLCOutputBool';
+  if (dt === 'real' || dt === 'lreal') return 'PLCOutputFloat';
   // Byte, Word, Int, DWord, DInt and any other integral type.
-  return 'PLCInputInt';
+  return 'PLCOutputInt';
 }
 
 // ── Overlap check ───────────────────────────────────────────────────────────
@@ -193,8 +199,8 @@ function cellToString(cell: Cell): string {
   return String(cell).trim();
 }
 
-/** A cell looks like a Siemens address (used for header auto-detect). */
-const ADDRESS_LIKE_RE = /^%?[IQMEA][BWDX]?\d+(\.[0-7])?$/;
+/** A cell looks like a Siemens address — or a bare "96.0" — (used for header auto-detect). */
+const ADDRESS_LIKE_RE = /^%?[IQMEA]?[BWDX]?\d+(\.[0-7])?$/;
 
 /**
  * Build tags from a matrix of rows (header auto-detected). Each row is expected

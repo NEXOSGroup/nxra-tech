@@ -25,7 +25,6 @@ import { MaintenancePlugin } from '../../demo/maintenance-plugin';
 import { WebXRPlugin } from '../../webxr-plugin';
 import { MultiuserPlugin } from '../../multiuser-plugin';
 import { FpvPlugin } from '../../fpv-plugin';
-import { CameraFollowPlugin } from '../../camera-follow-plugin';
 import { AnnotationPlugin } from '../../annotation-plugin';
 import { AasLinkPlugin } from '../../aas-link-plugin';
 import { OrderManagerPlugin } from '../../order-manager-plugin';
@@ -87,7 +86,6 @@ export function registerModelPlugins(viewer: RVViewer): void {
     new WebXRPlugin(),
     new MultiuserPlugin(),
     new FpvPlugin(),
-    new CameraFollowPlugin(),
     new AnnotationPlugin(),
     new AasLinkPlugin(),
     new OrderManagerPlugin(),

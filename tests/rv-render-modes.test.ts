@@ -15,7 +15,8 @@ import { setAppConfig } from '../src/core/rv-app-config';
 describe('rv-render-modes registry', () => {
   it('exposes simple + default + toon modes in order', () => {
     expect(RENDER_MODE_IDS).toEqual(['simple', 'default', 'toon']);
-    expect(RENDER_MODES.map((m) => m.label)).toEqual(['Simple', 'Default', 'Toon']);
+    // Labels were renamed Simple→Unlit / Default→Shaded (the ids are unchanged).
+    expect(RENDER_MODES.map((m) => m.label)).toEqual(['Unlit', 'Shaded', 'Toon']);
   });
 
   it('looks up a mode by id', () => {

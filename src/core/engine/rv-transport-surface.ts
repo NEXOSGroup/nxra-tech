@@ -133,6 +133,17 @@ export class RVTransportSurface implements RVComponent {
    */
   private _localHalfExtents: Vector3 | null = null;
 
+  /**
+   * Whether this surface belongs to a placed library object (a `LayoutObject`
+   * rv-extra marker sits on the node or any ancestor). Only library belts
+   * (conveyor, turntable, chain transfer) pull their MUs onto the belt centre
+   * line; conveyors authored directly in the scene transport MUs without lateral
+   * correction. Captured once at `init()` — the planner stamps the `LayoutObject`
+   * marker before `processExtras` constructs this component, so it is reliably
+   * present by the time we look.
+   */
+  private _belongsToLibraryObject = false;
+
   /** Cloned textures for independent conveyor belt animation */
   private _texMaps: Texture[] = [];
   /** Raw Unity local direction X component for UV animation */
@@ -197,6 +208,12 @@ export class RVTransportSurface implements RVComponent {
       this._localHalfExtents = localBox.getSize(new Vector3()).multiplyScalar(0.5);
       localBox.getCenter(this.aabb.localCenter); // keep centre consistent with the local extents
     }
+
+    // Lateral belt-centering is LIBRARY-ONLY: a placed library object (conveyor,
+    // turntable, chain transfer) pulls its MUs onto the centre line; a conveyor
+    // authored directly in the scene must not. Resolve once here — the planner
+    // stamps the LayoutObject marker before this component is constructed.
+    this._belongsToLibraryObject = this._isUnderLibraryObject();
 
     // Initialize transport internals (radial, texture animation)
     this.initTransport();
@@ -299,6 +316,22 @@ export class RVTransportSurface implements RVComponent {
     let cur: Object3D | null = node;
     while (cur) {
       if (cur === ancestor) return true;
+      cur = cur.parent;
+    }
+    return false;
+  }
+
+  /**
+   * True when a `LayoutObject` rv-extra marker sits on this surface node or any
+   * ancestor — i.e. the surface is part of a placed library object. This is the
+   * same canonical marker `BehaviorManager.isLayoutObjectRoot` keys off; it lives
+   * only on the placed asset's root, so we walk the parent chain to find it.
+   */
+  private _isUnderLibraryObject(): boolean {
+    let cur: Object3D | null = this.node;
+    while (cur) {
+      const rv = cur.userData?.realvirtual as Record<string, unknown> | undefined;
+      if (rv && rv.LayoutObject) return true;
       cur = cur.parent;
     }
     return false;
@@ -612,6 +645,23 @@ export class RVTransportSurface implements RVComponent {
     }
   }
 
+  /**
+   * Restore the belt to its freshly-loaded look for a fresh run
+   * (`resetSimulation()` via `RVTransportManager.reset()`): rewind the scrolled
+   * conveyor textures + the radial accumulator to 0, and drop the per-tick
+   * world-matrix delta tracking so a platform that moved (turntable) doesn't
+   * carry MUs by a stale delta on the first tick after the reset. The associated
+   * Drive's speed/position is reset separately by `RVDrive.reset()`.
+   */
+  reset(): void {
+    for (const tex of this._texMaps) tex.offset.set(0, 0);
+    this._radialOffsetX = 0;
+    this._lastMatrixCaptured = false;
+    this._hasTransformDelta = false;
+    this._matrixDelta.identity();
+    this._deltaQuat.identity();
+  }
+
   /** Current transport speed in mm/s from the associated Drive */
   get speed(): number {
     if (!this.drive) return 0;
@@ -706,17 +756,22 @@ export class RVTransportSurface implements RVComponent {
       _scratchVecA.copy(mu.getPosition()).add(_movement);
 
       // Drag the MU toward the belt's center line (lateral only — keep height &
-      // forward progress). cross = horizontal axis ⟂ transport direction; the MU
-      // is eased back along it by CENTER_MU_LERP each tick so off-centre parts
-      // settle to the middle of the belt while moving. `this.aabb.center` is the
-      // world-space belt centre, refreshed by updateAABB() earlier this tick.
-      _crossAxis.copy(this.direction).cross(WORLD_UP);
-      const crossLen = _crossAxis.length();
-      if (crossLen > 1e-4) {
-        _crossAxis.multiplyScalar(1 / crossLen);
-        // Signed lateral offset of the MU from the centre line, then ease back.
-        const lateral = _scratchVecA.dot(_crossAxis) - this.aabb.center.dot(_crossAxis);
-        _scratchVecA.addScaledVector(_crossAxis, -lateral * CENTER_MU_LERP);
+      // forward progress) — LIBRARY OBJECTS ONLY. Placed library belts (conveyor,
+      // turntable, chain transfer) ease their MUs back onto the centre line;
+      // scene-authored conveyors leave the MU's lateral position untouched.
+      // cross = horizontal axis ⟂ transport direction; the MU is eased back along
+      // it by CENTER_MU_LERP each tick so off-centre parts settle to the middle of
+      // the belt while moving. `this.aabb.center` is the world-space belt centre,
+      // refreshed by updateAABB() earlier this tick.
+      if (this._belongsToLibraryObject) {
+        _crossAxis.copy(this.direction).cross(WORLD_UP);
+        const crossLen = _crossAxis.length();
+        if (crossLen > 1e-4) {
+          _crossAxis.multiplyScalar(1 / crossLen);
+          // Signed lateral offset of the MU from the centre line, then ease back.
+          const lateral = _scratchVecA.dot(_crossAxis) - this.aabb.center.dot(_crossAxis);
+          _scratchVecA.addScaledVector(_crossAxis, -lateral * CENTER_MU_LERP);
+        }
       }
 
       mu.setPosition(_scratchVecA);

@@ -24,6 +24,33 @@ import { MachineControlPanel } from './MachineControlPanel';
 import { SlotRenderer } from './HMIShell';
 import { useSlot } from '../../hooks/use-slot';
 
+/**
+ * Detect a left-panel slot that is "open" in the leftPanelManager but whose
+ * renderer is not actually present, so the panel never renders into the space
+ * the canvas inset + floating toolbar reserve for it (the empty grey strip).
+ *
+ * The lpm slot (`activePanel`) persists in localStorage and is restored on boot,
+ * but the gates that actually mount each panel do not all persist the same way:
+ * - `settings` / `hierarchy` render off the editor plugin's `settingsOpen` /
+ *   `panelOpen` flags; `settingsOpen` is NOT persisted, so after a reload the lpm
+ *   can claim settings is open while the flag is false.
+ * - `scene` (Models) renders only once the SceneStore singleton exists; if the
+ *   slot is restored before the store is built the panel can't mount yet.
+ *
+ * Returns the orphaned slot id to close, or null when slot and renderer agree.
+ * (Plugin-backed panels like machine-control gate on `viewer.getPlugin(...)` and
+ * drop their own slot from within the panel — they aren't reachable here.)
+ */
+export function orphanedLeftSlot(
+  active: string | null,
+  renderer: { settingsOpen: boolean; hierarchyOpen: boolean; sceneStoreReady: boolean },
+): 'settings' | 'hierarchy' | 'scene' | null {
+  if (active === 'settings' && !renderer.settingsOpen) return 'settings';
+  if (active === 'hierarchy' && !renderer.hierarchyOpen) return 'hierarchy';
+  if (active === 'scene' && !renderer.sceneStoreReady) return 'scene';
+  return null;
+}
+
 export function TopBar() {
   const viewer = useViewer();
   const [vrOpen, setVrOpen] = useState(false);
@@ -55,7 +82,16 @@ export function TopBar() {
     if (active !== 'hierarchy' && hierarchyOpenRef.current) {
       pluginRef.current?.togglePanel();
     }
-  }, [panelSnapshot.activePanel]);
+    // Reverse direction: drop a slot the lpm claims is open but whose renderer is
+    // absent (e.g. after a reload — see orphanedLeftSlot) so the canvas inset and
+    // floating toolbar don't reserve width for a panel that never renders.
+    const orphan = orphanedLeftSlot(active, {
+      settingsOpen: settingsOpenRef.current,
+      hierarchyOpen: hierarchyOpenRef.current,
+      sceneStoreReady: !!sceneStore,
+    });
+    if (orphan) lpm.close(orphan);
+  }, [panelSnapshot.activePanel, lpm, sceneStore]);
 
   const isMobile = useMobileLayout();
 

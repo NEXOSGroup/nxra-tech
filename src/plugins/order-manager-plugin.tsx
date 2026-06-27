@@ -654,6 +654,11 @@ export function OrderPanel() {
     _clear();
   }, []);
 
+  // The per-model order-manager plugin backs this slot; drop it if the slot was
+  // restored for a model that doesn't load the plugin (else its inset reserves
+  // an empty strip — see useDropOrphanedPanelSlot).
+  useDropOrphanedPanelSlot('order-manager', isOpen, !!plugin);
+
   if (!isOpen || !plugin) return null;
 
   const hasItems = snap.items.length > 0;
@@ -828,6 +833,7 @@ export function OrderPanel() {
 // The useViewer hook is used inside OrderPanel, so import at top-level of the module.
 import { useViewer } from '../hooks/use-viewer';
 import { useCustomBranding } from '../core/hmi/branding-store';
+import { useDropOrphanedPanelSlot } from '../hooks/use-drop-orphaned-panel-slot';
 
 // ── OrderItemCard Component ──────────────────────────────────────────
 

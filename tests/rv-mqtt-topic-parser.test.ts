@@ -75,12 +75,12 @@ describe('detectDirection', () => {
     expect(detectDirection('out/StartButton')).toBe('output');
   });
 
-  it('defaults to input for flat topics', () => {
-    expect(detectDirection('DriveSpeed')).toBe('input');
+  it('defaults to output (read-only) for flat topics', () => {
+    expect(detectDirection('DriveSpeed')).toBe('output');
   });
 
-  it('defaults to input for nested topics without in/out', () => {
-    expect(detectDirection('drives/DriveSpeed')).toBe('input');
+  it('defaults to output (read-only) for nested topics without in/out', () => {
+    expect(detectDirection('drives/DriveSpeed')).toBe('output');
   });
 });
 

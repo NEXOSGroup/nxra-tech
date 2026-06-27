@@ -6,6 +6,7 @@ import { DriveDirection, directionToGltfAxis, isRotation } from './rv-coordinate
 import type { ComponentSchema, ComponentContext, RVComponent } from './rv-component-registry';
 import { registerComponentSchema, registerCapabilities } from './rv-component-registry';
 import { MM_TO_METERS } from './rv-constants';
+import { getDriveSpeedOverride } from './rv-speed-override';
 
 // Re-export for backward compatibility
 export { DriveDirection } from './rv-coordinate-utils';
@@ -241,6 +242,10 @@ export class RVDrive implements RVComponent {
       behavior.update(dt);
     }
 
+    // Central master speed override (1 = normal). Scales every drive's effective
+    // speed at runtime, preserving relative speeds — see rv-speed-override.ts.
+    const speedOverride = getDriveSpeedOverride();
+
     // Jog mode: continuous motion at targetSpeed (used by Drive_Simple / conveyors)
     // We update currentSpeed for TransportSurface to use, but do NOT call applyToNode()
     // because conveyor drives should not physically translate the mesh — only belt texture
@@ -250,7 +255,7 @@ export class RVDrive implements RVComponent {
       // as its belt speed, so a negative value reverses the conveyor. Without the
       // sign, a Backward jog moved the belt forward (matches Unity Drive.cs which
       // sets CurrentSpeed = ±TargetSpeed). Forward wins if both bits are set.
-      this.currentSpeed = this.jogForward ? this.targetSpeed : -this.targetSpeed;
+      this.currentSpeed = (this.jogForward ? this.targetSpeed : -this.targetSpeed) * speedOverride;
       this.isRunning = true;
       return;
     }
@@ -268,7 +273,7 @@ export class RVDrive implements RVComponent {
     }
 
     const dir = Math.sign(dist);
-    const speed = this.targetSpeed;
+    const speed = this.targetSpeed * speedOverride;
 
     if (this.UseAcceleration && this.Acceleration > 0) {
       // Acceleration/deceleration
@@ -359,6 +364,34 @@ export class RVDrive implements RVComponent {
     this.axis.copy(rawAxis);
     if (this.ReverseDirection) this.axis.negate();
     this.targetSpeed = this.TargetSpeed;
+    this.applyToNode();
+  }
+
+  /**
+   * Restore the drive to its authored start pose for a fresh run
+   * (`resetSimulation()` / `web_sim_reset`). Mirrors `initDrive()`'s runtime
+   * seeding (currentPosition → StartPosition, targetSpeed → TargetSpeed) WITHOUT
+   * re-caching the base transform — the node may have been re-parented since
+   * load, so the cached `basePosition`/`baseQuaternion` stay authoritative.
+   *
+   * Positioning drives also drop any jog / running / overwrite so they sit still
+   * after reset. Transport-surface (belt) drives KEEP their jog flags, so a
+   * conveyor resumes running exactly like a freshly-loaded scene (behavior-driven
+   * conveyors re-drive the belt every tick regardless, but a plain authored
+   * auto-started belt would otherwise stop permanently).
+   */
+  reset(): void {
+    this.currentPosition = this.StartPosition;
+    this.targetPosition = this.StartPosition;
+    this.currentSpeed = 0;
+    this.isRunning = false;
+    this.targetSpeed = this.TargetSpeed;
+    this.positionOverwrite = false;
+    this._prevOverwritePos = this.StartPosition;
+    if (!this.isTransportSurface) {
+      this.jogForward = false;
+      this.jogBackward = false;
+    }
     this.applyToNode();
   }
 

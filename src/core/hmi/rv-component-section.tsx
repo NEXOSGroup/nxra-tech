@@ -35,6 +35,7 @@ import {
 } from './rv-inspector-helpers';
 import { flattenObjectFields } from './rv-field-editors';
 import { FieldRow } from './rv-field-row';
+import { InspectorRow } from './rv-inspector-row';
 import { fieldRendererRegistry } from './rv-field-renderer-registry';
 import { componentActionRegistry, type ComponentActionContext } from './rv-component-action-registry';
 
@@ -125,28 +126,28 @@ function ReadOnlyLiveRow({ fieldName, value }: { fieldName: string; value: unkno
   const text = spec ? spec.display : formatDisplayValue(value);
   const clickable = !!spec?.onClick;
   return (
-    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, px: 1, py: 0.15, minHeight: 22, '&:hover': { bgcolor: 'rgba(255,255,255,0.02)' } }}>
-      <Box sx={{ width: 10, flexShrink: 0 }} />
-      <Typography sx={{ fontSize: 11, color: 'text.disabled', minWidth: 80, maxWidth: 120, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={fieldName}>
-        {fieldName}
+    <InspectorRow
+      label={fieldName}
+      labelTitle={fieldName}
+      labelColor="text.disabled"
+      minHeight={22}
+      py={0.15}
+    >
+      <Typography
+        onClick={spec?.onClick}
+        sx={{
+          fontSize: 11,
+          color: spec?.color ?? 'text.primary',
+          fontWeight: spec?.color ? 600 : 500,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          ...(clickable ? { cursor: 'pointer', '&:hover': { textDecoration: 'underline' } } : {}),
+        }}
+      >
+        {text}
       </Typography>
-      <Box sx={{ flex: 1, display: 'flex', alignItems: 'center' }}>
-        <Typography
-          onClick={spec?.onClick}
-          sx={{
-            fontSize: 11,
-            color: spec?.color ?? 'text.primary',
-            fontWeight: spec?.color ? 600 : 500,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-            ...(clickable ? { cursor: 'pointer', '&:hover': { textDecoration: 'underline' } } : {}),
-          }}
-        >
-          {text}
-        </Typography>
-      </Box>
-    </Box>
+    </InspectorRow>
   );
 }
 

@@ -584,6 +584,23 @@ export class RVSource implements RVComponent {
   }
 
   /**
+   * Re-arm the source for a fresh simulation run (web_sim_reset / resetSimulation).
+   * Clears the per-run spawn state (timer, distance reference, id counter, held
+   * preview) so spawning restarts cleanly from the first part — but KEEPS the
+   * template and the visual (ghost / overlay shells / floor marker). Unlike
+   * dispose() (a model-unload teardown), this must NOT remove the source's
+   * appearance; calling dispose() on reset is what made web_sim_reset visually
+   * "delete" the source (and strip a self-template source's translucent shells).
+   */
+  reset(): void {
+    this.timer = 0;
+    this.lastSpawnedMU = null;
+    this.muIdCounter = 0;
+    this.spawnCount = 0;
+    this._disposePreview();
+  }
+
+  /**
    * Update source timer and spawn MU if ready.
    * Returns new MU (clone or instanced) or null.
    *

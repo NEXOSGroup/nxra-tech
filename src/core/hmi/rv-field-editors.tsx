@@ -13,12 +13,12 @@ import {
   Box,
   Typography,
   TextField,
-  Switch,
   Select,
   MenuItem,
+  Checkbox,
 } from '@mui/material';
-import { SwapHoriz } from '@mui/icons-material';
 import { DragNumberField } from './DragNumberField';
+import { InspectorRow } from './rv-inspector-row';
 import { type FieldType, ENUM_FIELDS } from './rv-inspector-helpers';
 
 // ── Direction fallback (used when ENUM_FIELDS lookup returns undefined) ───
@@ -86,7 +86,6 @@ export function NumberEditor({ value, onChange }: { value: number; onChange: (v:
   return (
     <DragNumberField
       compact
-      icon={<SwapHoriz sx={{ fontSize: 14 }} />}
       value={draft}
       onValueChange={setDraft}
       onCommit={commit}
@@ -103,12 +102,20 @@ export function NumberEditor({ value, onChange }: { value: number; onChange: (v:
 // ── BooleanEditor ────────────────────────────────────────────────────────
 
 export function BooleanEditor({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
+  // Minimal checkbox — the standard property-inspector boolean. Sits at the
+  // field column's left edge (alignField="stretch") so it lines up with where
+  // the number/enum input boxes begin. Compact padding; primary tint when on.
   return (
-    <Switch
+    <Checkbox
       size="small"
       checked={value}
       onChange={(_, checked) => onChange(checked)}
-      sx={{ ml: 'auto' }}
+      sx={{
+        p: 0.25,
+        color: 'rgba(255,255,255,0.35)',
+        '&.Mui-checked': { color: 'primary.main' },
+        '& .MuiSvgIcon-root': { fontSize: 18 },
+      }}
     />
   );
 }
@@ -343,21 +350,25 @@ export function flattenObjectFields(value: Record<string, unknown> | unknown[], 
 export function SubFieldRow({ label, value, onChange }: {
   label: string; value: unknown; onChange: (v: unknown) => void;
 }) {
+  const isBool = typeof value === 'boolean';
   return (
-    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, py: 0.125, minHeight: 22 }}>
-      <Typography sx={{ fontSize: 9, color: 'text.disabled', minWidth: 60, maxWidth: 90, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {label}
-      </Typography>
-      <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: typeof value === 'boolean' ? 'flex-end' : 'stretch' }}>
-        {typeof value === 'boolean' ? (
-          <Switch size="small" checked={value} onChange={(_, c) => onChange(c)} />
-        ) : typeof value === 'number' ? (
-          <NumberEditor value={value} onChange={(v) => onChange(v)} />
-        ) : (
-          <StringEditor value={String(value ?? '')} onChange={(v) => onChange(v)} />
-        )}
-      </Box>
-    </Box>
+    <InspectorRow
+      label={label}
+      labelTitle={label}
+      labelColor="text.disabled"
+      dense
+      minHeight={22}
+      py={0.125}
+      alignField="stretch"
+    >
+      {isBool ? (
+        <BooleanEditor value={value} onChange={(v) => onChange(v)} />
+      ) : typeof value === 'number' ? (
+        <NumberEditor value={value} onChange={(v) => onChange(v)} />
+      ) : (
+        <StringEditor value={String(value ?? '')} onChange={(v) => onChange(v)} />
+      )}
+    </InspectorRow>
   );
 }
 

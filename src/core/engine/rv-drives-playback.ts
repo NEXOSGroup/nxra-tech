@@ -5,6 +5,7 @@ import type { RVDrive } from './rv-drive';
 import type { NodeRegistry } from './rv-node-registry';
 import type { ActiveOnly } from './rv-active-only';
 import { debug, debugWarn } from './rv-debug';
+import { getDriveSpeedOverride } from './rv-speed-override';
 
 /**
  * Compact recording format matching the GLB export.
@@ -258,7 +259,12 @@ export class RVDrivesPlayback {
 
     if (!this._isPlaying || this.recording.numberFrames <= 0) return;
 
-    this.accumulator += dt;
+    // Advance in lockstep with the global drive-speed override so that speeding
+    // up the drives (e.g. 2×) also speeds up robot recordings / replays. During
+    // playback the bound drives run in positionOverwrite mode, which bypasses the
+    // per-drive speed override in RVDrive.update — so the override must be applied
+    // here, on the recording's frame advance. (factor 0 = stopped, like the drives.)
+    this.accumulator += dt * getDriveSpeedOverride();
 
     while (this.accumulator >= this.recording.fixedDeltaTime) {
       this.accumulator -= this.recording.fixedDeltaTime;

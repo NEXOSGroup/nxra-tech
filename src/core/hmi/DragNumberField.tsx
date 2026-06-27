@@ -4,11 +4,12 @@
 /**
  * DragNumberField — Unity-Inspector-style numeric input.
  *
- * Visual: a small drag handle (typically an icon) sits to the left of a
- * `TextField`. Horizontal click-drag on the handle scrubs the value with
- * ew-resize cursor; Shift slows the scrub by 10x for fine control. The
- * browser's default number spin buttons are hidden — drag and direct typing
- * are the only ways to change the value.
+ * Visual: a small drag handle sits to the left of a `TextField` — an icon in
+ * the default/inline layouts, or a minimal 1px vertical bar in `compact` mode
+ * (the Property Inspector). Horizontal click-drag on the handle scrubs the
+ * value (compact uses a col-resize cursor; others ew-resize); Shift slows the
+ * scrub by 10x for fine control. The browser's default number spin buttons are
+ * hidden — drag and direct typing are the only ways to change the value.
  *
  * The value is exposed as a string draft (caller owns the state) so callers
  * can let users type freely without each keystroke committing. The `onCommit`
@@ -22,8 +23,9 @@ import { Box, TextField, Typography } from '@mui/material';
 import type { SxProps, Theme } from '@mui/material/styles';
 
 export interface DragNumberFieldProps {
-  /** Drag handle content — usually a small MUI icon. */
-  icon: ReactNode;
+  /** Drag handle content — usually a small MUI icon. Ignored in `compact` mode,
+   *  where the handle renders as a minimal 1px vertical scrub bar instead. */
+  icon?: ReactNode;
   /** Current draft string (the caller owns this state). */
   value: string;
   /** Called on every keystroke and on every drag tick. */
@@ -147,12 +149,26 @@ export function DragNumberField({
           opacity: disabled ? 0.4 : 1,
           transition: 'color 120ms ease',
           '&:hover': disabled ? {} : { color: 'text.primary' },
+        } : compact ? {
+          // Minimal scrub handle — a thin 1px vertical bar (rendered below) in a
+          // narrow hit area. col-resize cursor signals horizontal drag; the bar
+          // brightens on hover. No box / border / icon.
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flex: '0 0 auto',
+          width: 10,
+          minHeight: 24,
+          cursor: disabled ? 'default' : 'col-resize',
+          userSelect: 'none',
+          opacity: disabled ? 0.4 : 1,
+          '& .rv-drag-bar': { bgcolor: 'rgba(255,255,255,0.25)' },
+          '&:hover .rv-drag-bar': disabled ? {} : { bgcolor: 'rgba(255,255,255,0.7)' },
         } : {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          width: compact ? 18 : 26,
-          minHeight: compact ? 24 : undefined,
+          width: 26,
           borderRadius: 1,
           cursor: disabled ? 'default' : 'ew-resize',
           userSelect: 'none',
@@ -167,7 +183,12 @@ export function DragNumberField({
           },
         }}
       >
-        {icon}
+        {compact && !inline ? (
+          <Box
+            className="rv-drag-bar"
+            sx={{ width: '1px', height: 14, borderRadius: '1px', transition: 'background-color 120ms ease' }}
+          />
+        ) : icon}
       </Box>
       {inline && (
         <Typography

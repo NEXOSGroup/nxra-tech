@@ -44,6 +44,7 @@ import { DriveOrderPlugin } from './plugins/drive-order-plugin';
 import { IKPathVisualizerPlugin } from './plugins/ik-path-visualizer-plugin';
 import { IKTargetEditPlugin } from './plugins/ik-target-edit-plugin';
 import { CameraStartPosPlugin } from './plugins/camera-startpos-plugin';
+import { CameraFollowPlugin } from './plugins/camera-follow-plugin';
 import { KioskPlugin } from './plugins/kiosk-plugin';
 import { AdaptiveNavPlugin } from './plugins/adaptive-nav-plugin';
 import { MeasurementPlugin } from './plugins/measurement-plugin';
@@ -67,6 +68,7 @@ import { DESWorkspacePlugin } from './plugins/des/des-workspace-plugin';
 // Scene window: multi-scene browser + layout registry
 import { initSceneStore } from './core/hmi/scene/scene-store-singleton';
 import { migrateLegacyAutosave } from './core/hmi/scene/layout-registry';
+import { parsePublishedIndex, publishedEntryFromFile, type PublishedSceneEntry } from './core/hmi/scene/rv-published-scenes';
 import { readActiveId } from './core/hmi/scene/rv-scene-storage';
 
 // CONNECT gateway plugin (NavButton + LeftPanel for interface management)
@@ -97,16 +99,52 @@ const useWebGPU = !isTouchDevice
 
 // --- Loading overlay ---
 const loadingOverlay = document.getElementById('loading-overlay')!;
+const loadingStatus = document.getElementById('loading-status')!;
+const loadingLabel = document.getElementById('loading-label')!;
 const loadingModelName = document.getElementById('loading-model-name')!;
 const loadingProgressBar = document.getElementById('loading-progress-bar')!;
 const loadingProgressPct = document.getElementById('loading-progress-pct')!;
+const loadingProgressWrap = loadingProgressBar.parentElement?.parentElement ?? null;
+const loadingError = document.getElementById('loading-error')!;
+const loadingErrorDetail = document.getElementById('loading-error-detail')!;
+const loadingRetryBtn = document.getElementById('loading-retry-btn') as HTMLButtonElement;
+const loadingReloadBtn = document.getElementById('loading-reload-btn') as HTMLButtonElement;
 
 function showLoadingOverlay(modelName: string) {
+  loadingLabel.textContent = 'Loading ';
   loadingModelName.textContent = modelName;
   loadingProgressBar.classList.add('indeterminate');
   loadingProgressBar.style.width = '';
   loadingProgressPct.textContent = '';
+  hideLoadingError();
   loadingOverlay.classList.remove('fade-out', 'hidden');
+}
+
+// Show the error card inside the loading overlay (download/parse failed after all
+// retries, or the WebGL context was lost). On mobile the console is invisible, so
+// surfacing the failure here — with a Retry — is the difference between a usable
+// error and a silent "empty scene". `detail` is a short, user-readable reason.
+function showLoadingError(detail: string) {
+  if (loadingProgressWrap) loadingProgressWrap.style.display = 'none';
+  loadingStatus.style.display = 'none';
+  loadingErrorDetail.textContent = detail;
+  loadingError.classList.remove('hidden');
+  loadingOverlay.classList.remove('fade-out', 'hidden');
+}
+
+function hideLoadingError() {
+  loadingError.classList.add('hidden');
+  loadingStatus.style.display = '';
+  if (loadingProgressWrap) loadingProgressWrap.style.display = '';
+}
+
+// Indeterminate "Retrying (n/total)…" status between failed download attempts.
+function setLoadingRetrying(attempt: number, total: number) {
+  loadingLabel.textContent = `Connection problem — retrying (${attempt}/${total})…`;
+  loadingModelName.textContent = '';
+  loadingProgressBar.classList.add('indeterminate');
+  loadingProgressBar.style.width = '';
+  loadingProgressPct.textContent = '';
 }
 
 function setLoadingProgress(loaded: number, total: number) {
@@ -139,6 +177,114 @@ function hideLoadingOverlay() {
     loadingOverlay.classList.add('hidden');
     loadingOverlay.classList.remove('fade-out');
   }, 600);
+}
+
+/**
+ * Download a GLB into a single ArrayBuffer with progress, a timeout and retries.
+ *
+ * Replaces the old fetch → chunks[] → Blob → object-URL path, which buffered the
+ * file TWICE (chunk array + Blob). For large CAD GLBs on memory-constrained
+ * mobile browsers that doubled peak memory and was a frequent out-of-memory →
+ * blank-scene cause. Here the body streams straight into one pre-sized buffer.
+ *
+ * Robustness (all mobile-only failure modes in practice):
+ * - `timeoutMs` aborts a stalled fetch — mobile networks silently drop requests.
+ * - Up to `attempts` tries with linear back-off recover transient drops.
+ * - A short stream (fewer bytes than content-length, i.e. a dropped connection)
+ *   is treated as a failed attempt, not a corrupt model handed to the parser.
+ * - A longer stream than content-length (gzip/br transfer-encoding) falls back
+ *   to a growable collector instead of truncating.
+ *
+ * Throws after the final attempt; the caller surfaces a visible error overlay.
+ */
+async function downloadGlb(
+  url: string,
+  opts: { attempts: number; timeoutMs: number; onRetry: (attempt: number, total: number) => void },
+): Promise<ArrayBuffer> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= opts.attempts; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+    try {
+      const resp = await fetch(url, { signal: controller.signal });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+      const len = parseInt(resp.headers.get('content-length') || '0', 10);
+
+      // Streamed path: single pre-sized buffer + byte-accurate progress.
+      if (resp.body && len > 0) {
+        const buf = new Uint8Array(len);
+        const reader = resp.body.getReader();
+        let offset = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (offset + value.byteLength > len) {
+            // Actual bytes exceed content-length (compressed transfer-encoding) —
+            // switch to a growable collector seeded with what we already have.
+            const parts: Uint8Array[] = [buf.slice(0, offset), value];
+            let extraLen = offset + value.byteLength;
+            for (;;) {
+              const r = await reader.read();
+              if (r.done) break;
+              parts.push(r.value);
+              extraLen += r.value.byteLength;
+            }
+            clearTimeout(timer);
+            const out = new Uint8Array(extraLen);
+            let o = 0;
+            for (const c of parts) { out.set(c, o); o += c.byteLength; }
+            return out.buffer;
+          }
+          buf.set(value, offset);
+          offset += value.byteLength;
+          setLoadingProgress(offset, len);
+        }
+        clearTimeout(timer);
+        if (offset === len) return buf.buffer;
+        throw new Error(`incomplete download (${offset}/${len} bytes)`);
+      }
+
+      // No content-length / no readable stream → single buffer, indeterminate bar.
+      setLoadingPreparing();
+      const data = await resp.arrayBuffer();
+      clearTimeout(timer);
+      return data;
+    } catch (e) {
+      clearTimeout(timer);
+      lastErr = controller.signal.aborted
+        ? new Error(`Timed out after ${Math.round(opts.timeoutMs / 1000)}s`)
+        : e;
+      if (attempt < opts.attempts) {
+        opts.onRetry(attempt, opts.attempts);
+        await new Promise(r => setTimeout(r, 700 * attempt));
+      }
+    }
+  }
+  throw lastErr ?? new Error('download failed');
+}
+
+/**
+ * Discover read-only "Example" scenes shipped under public/scenes/.
+ *
+ * Prefers a curated `public/scenes/index.json` (`[{ file, name, mode }]`) so the
+ * Examples list can carry display names and a per-scene preferred workspace
+ * mode. Falls back to a build-time glob of the folder (filename-derived labels,
+ * no mode) when the index is absent — e.g. during local dev before authoring it.
+ */
+async function discoverPublishedScenes(): Promise<PublishedSceneEntry[]> {
+  try {
+    const resp = await fetch(`${import.meta.env.BASE_URL}scenes/index.json`, { cache: 'no-store' });
+    if (resp.ok) {
+      const entries = parsePublishedIndex(await resp.json());
+      if (entries.length > 0) return entries;
+    }
+  } catch { /* no index — fall through to glob */ }
+
+  // The glob pattern only matches *.scene.json, so index.json is never included.
+  const files = import.meta.glob('/public/scenes/*.scene.json', { query: '?url', import: 'default', eager: true }) as Record<string, string>;
+  return Object.keys(files)
+    .map((k) => k.split('/').pop()!)
+    .map(publishedEntryFromFile);
 }
 
 async function init() {
@@ -292,6 +438,7 @@ async function init() {
     .use(new CameraEventsPlugin())
     .use(new AdaptiveNavPlugin())
     .use(new CameraStartPosPlugin())
+    .use(new CameraFollowPlugin())
     .use(new KioskPlugin())
     .use(new MeasurementPlugin())
     .use(new WebErrorPlugin())
@@ -344,16 +491,22 @@ async function init() {
     return { filename, url: `${import.meta.env.BASE_URL}models/${filename}` };
   });
 
-  // Discover private project models (served by privateModelsPlugin in dev)
-  try {
-    const resp = await fetch('/__api/private-models');
-    if (resp.ok) {
-      const privateModels: Array<{ project: string; filename: string; url: string }> = await resp.json();
-      for (const pm of privateModels) {
-        entries.push({ filename: pm.filename, url: pm.url });
+  // Discover private project models. `/__api/private-models` is served ONLY by
+  // the dev-time Vite middleware (privateModelsPlugin); no deployed build serves
+  // it, so the fetch is dev-only — gating it keeps the public/private builds from
+  // logging a guaranteed 404 on every page load. (Deployed private projects swap
+  // models in via the runtime `models.json` manifest below, not this endpoint.)
+  if (import.meta.env.DEV) {
+    try {
+      const resp = await fetch('/__api/private-models');
+      if (resp.ok) {
+        const privateModels: Array<{ project: string; filename: string; url: string }> = await resp.json();
+        for (const pm of privateModels) {
+          entries.push({ filename: pm.filename, url: pm.url });
+        }
       }
-    }
-  } catch { /* private models endpoint not available (production build) — ignore */ }
+    } catch { /* private models endpoint not available — ignore */ }
+  }
 
   // Runtime model manifest (generated during private project staging, replaces build-time glob).
   // If present, the manifest is AUTHORITATIVE — the build-time glob bundles
@@ -408,6 +561,16 @@ async function init() {
     ];
   });
 
+  // Discover read-only "Example" scenes (public/scenes/) BEFORE the scene store
+  // is built so its constructor mirrors them into the Examples section. Examples
+  // are an additive, non-essential feature — never let discovery brick boot.
+  try {
+    viewer.availablePublishedScenes = await discoverPublishedScenes();
+  } catch (e) {
+    console.warn('[main] published scene discovery failed', e);
+    viewer.availablePublishedScenes = [];
+  }
+
   // ── Scene window: register, migrate any legacy autosave, build store ──
   // Migration runs once: if `rv-layout-autosave` exists from a previous session,
   // import it as an "Untitled Layout" entry in the new registry so users don't
@@ -420,47 +583,38 @@ async function init() {
   // loadScene(); it MUST be forwarded to viewer.loadModel so overrides are
   // applied to the GLB during traversal. Dropping it here was why saved drafts
   // reloaded with the original GLB values instead of the edited ones.
+  // Remember the last requested model so the error overlay's Retry button can
+  // re-run it after a failure.
+  let lastLoadRequest: { url: string; options?: { overlay?: RVExtrasOverlay } } | null = null;
+
   async function loadModel(url: string, options?: { overlay?: RVExtrasOverlay }) {
     const modelName = (url.split('/').pop() ?? url).split('?')[0].replace(/\.glb$/i, '');
+    lastLoadRequest = { url, options };
     showLoadingOverlay(modelName);
     localStorage.setItem(LS_KEY_MODEL, url);
 
     try {
       const loadStart = performance.now();
 
-      // Fetch with streaming progress
-      const resp = await fetch(url);
-      const contentLength = resp.headers.get('content-length');
-      const totalBytes = contentLength ? parseInt(contentLength) : 0;
-      const sizeMB = totalBytes ? (totalBytes / (1024 * 1024)).toFixed(1) + ' MB' : '--';
+      // Download into a single buffer with progress, timeout and retries (see
+      // downloadGlb). The bytes are handed to the parser directly — no blob URL,
+      // no double-buffering. 90 s timeout suits large GLBs on slow mobile links.
+      const data = await downloadGlb(url, {
+        attempts: 3,
+        timeoutMs: 90_000,
+        onRetry: setLoadingRetrying,
+      });
+      const sizeMB = (data.byteLength / (1024 * 1024)).toFixed(1) + ' MB';
 
-      let modelUrl = url;
-      if (totalBytes && resp.body) {
-        // Stream the response to track download progress
-        const reader = resp.body.getReader();
-        const chunks: Uint8Array[] = [];
-        let loaded = 0;
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          chunks.push(value);
-          loaded += value.byteLength;
-          setLoadingProgress(loaded, totalBytes);
-        }
-        const blob = new Blob(chunks as BlobPart[]);
-        modelUrl = URL.createObjectURL(blob);
-      }
-
-      // Store original URL before loadModel (loadModel will set _currentModelUrl to blob URL)
       viewer.pendingModelUrl = url;
 
-      // Download done (or no content-length to stream) — the parse + scene build
-      // below is the long pole with no byte progress. Show the preparing state.
+      // Download done — the parse + scene build below is the long pole with no
+      // byte progress. Show the preparing state.
       setLoadingPreparing();
 
-      const result = await viewer.loadModel(modelUrl, options);
+      const result = await viewer.loadModel(url, { ...options, data });
 
-      // Restore original URL (not blob:) so model selector can match it
+      // Keep the original URL (model selector matches against it).
       viewer.currentModelUrl = url;
 
       // Mark GLB scene active in the scene store (for the Scene window).
@@ -472,23 +626,41 @@ async function init() {
       // viewer.currentScene is updated via that call.
       sceneStore.markGlbActive(url, label);
 
-      // Clean up blob URL after a delay — GLTFLoader may have pending async
-      // operations (DRACO decoder, texture loading) that still reference the
-      // blob URL after loadModel() resolves.
-      if (modelUrl !== url) setTimeout(() => URL.revokeObjectURL(modelUrl), 5000);
-
       const loadTime = ((performance.now() - loadStart) / 1000).toFixed(1) + 's';
       viewer.lastLoadInfo = { glbSize: sizeMB, loadTime };
       logInfo(`Model loaded: ${sizeMB}, ${loadTime}, ${result.drives.length} drives`);
       hideLoadingOverlay();
     } catch (e) {
+      // Surface the failure instead of leaving a silent empty scene. On mobile the
+      // console is invisible, so without this the user just sees a blank viewer.
       console.error(`[main] Failed to load model: ${url}`, e);
-      hideLoadingOverlay();
+      const reason = e instanceof Error ? e.message : String(e);
+      showLoadingError(`${reason}\n${url}`);
     }
   }
 
   // Expose loadModel with progress overlay so Settings > Model can use it
   viewer.loadModelWithProgress = loadModel;
+
+  // --- Error overlay actions ---
+  // Retry re-runs the last requested load; Reload is the hard fallback (also the
+  // recovery path for a lost WebGL context, which cannot be re-initialised in place).
+  loadingRetryBtn.onclick = () => {
+    if (lastLoadRequest) loadModel(lastLoadRequest.url, lastLoadRequest.options);
+  };
+  loadingReloadBtn.onclick = () => window.location.reload();
+
+  // A lost WebGL context (mobile GPU memory pressure, long-backgrounded tab)
+  // leaves a permanently blank canvas. Surface it with a reload prompt.
+  viewer.on('renderer-context-lost', () => {
+    showLoadingError('The 3D graphics context was lost (often low memory on mobile). Reload to recover.');
+  });
+
+  // Preferred workspace mode derived from an opened published example's catalogue
+  // entry — applied in the mode-boot block below (unless ?mode= overrides it). Lets
+  // a bare ?scene=published:<name> reload/share restore the right mode (e.g. planner)
+  // without relying on the URL carrying ?mode= or on localStorage persistence.
+  let publishedBootMode: string | null = null;
 
   // --- Firebase demo mode: /demo/webviewer/{demoName} ---
   const pathParts = window.location.pathname.split('/').filter(p => p);
@@ -541,6 +713,11 @@ async function init() {
           const resp = await fetch(`${import.meta.env.BASE_URL}scenes/${name}.scene.json`, { cache: 'no-store' });
           if (resp.ok) {
             await sceneStore.openPublished(await resp.json(), name);
+            // Restore the example's preferred workspace mode (e.g. planner) from the
+            // catalogue, so a shared/reloaded ?scene=published:<name> lands in the right
+            // mode even without ?mode= in the URL. An explicit ?mode= still wins.
+            const entry = viewer.availablePublishedScenes.find(e => e.urlName === name);
+            if (entry?.mode) publishedBootMode = entry.mode;
             hideLoadingOverlay();
             sceneRouted = true;
           }
@@ -654,13 +831,16 @@ async function init() {
   }
 
   // Workspace mode boot (plan-198). Precedence: ?mode= URL param (if a
-  // registered mode) > persisted localStorage > 'hmi'. Applied AFTER the model/
-  // scene has loaded so mode plugins (e.g. Planner) see live model state in
-  // their onModeActivate hook. The legacy ?mode=planner empty-scene routing
-  // above is unchanged; entering Planner mode now runs through the mode system.
+  // registered mode) > opened published example's catalogue mode > persisted
+  // localStorage > 'hmi'. Applied AFTER the model/scene has loaded so mode plugins
+  // (e.g. Planner) see live model state in their onModeActivate hook. The legacy
+  // ?mode=planner empty-scene routing above is unchanged; entering Planner mode
+  // now runs through the mode system.
   const urlMode = params.get('mode');
   if (urlMode && viewer.modes.has(urlMode)) {
     viewer.modes.setMode(urlMode);
+  } else if (publishedBootMode && viewer.modes.has(publishedBootMode)) {
+    viewer.modes.setMode(publishedBootMode);
   } else {
     viewer.modes.restore('hmi');
   }
@@ -684,8 +864,13 @@ async function init() {
     };
   }
 
-  // --- MCP bridge: DEV mode or ?mcp=1 URL param ---
-  if (import.meta.env.DEV || params.has('mcp')) {
+  // --- MCP bridge (AI integration) ---
+  // Always registered so the Settings -> AI tab is available everywhere,
+  // including the public demo. The bridge does NOT auto-connect: it stays
+  // disabled until the user enables it in the AI tab (loadSettings defaults
+  // enabled=false), so a normal page load makes no localhost connection
+  // attempts. DEV / ?mcp=1 are no longer required just to see the tab.
+  {
     const { McpBridgePlugin } = await import('./plugins/mcp-bridge-plugin');
     viewer.use(new McpBridgePlugin());
   }

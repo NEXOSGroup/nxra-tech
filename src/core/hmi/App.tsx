@@ -27,6 +27,7 @@ import { useUIVisible } from './ui-context-store';
 // Generic tooltip system (replaces former DriveTooltip)
 import { TooltipLayer } from './tooltip/TooltipLayer';
 import { AnchoredPopover } from './AnchoredPopover';
+import { MobileSelectionSheet } from './MobileSelectionSheet';
 import './IKTargetQuickEdit'; // self-registers the 'ik-target' popover content
 import { tooltipRegistry } from './tooltip/tooltip-registry';
 // Import tooltip content providers (triggers self-registration of content + data resolvers).
@@ -62,6 +63,7 @@ import { InstructionLayer } from './InstructionLayer';
 import { AnnotationPanel } from './AnnotationPanel';
 import { SharedViewBanner } from './SharedViewBanner';
 import { GPUWarningBanner } from './GPUWarningBanner';
+import { AiActivityOverlay } from './AiActivityOverlay';
 import { AnnotationEditModal } from './AnnotationEditModal';
 
 // Measurement panel
@@ -133,9 +135,15 @@ export function App() {
         <ContextMenuLayer />
         <InstructionLayer />
         <SetPositionDialog />
+        {/* Mobile-only: half-height selection sheet (breadcrumb + children +
+            inspector) shown on double-click instead of the fullscreen panels. */}
+        <MobileSelectionSheet />
         {hmiVisible && branding?.titleBar && <TitleBar />}
         {hmiVisible && showKpiBar && <KpiBar />}
         {hmiVisible && showTopBar && <TopBar />}
+        {/* ActivityBar: mobile = "⋮" window-opener menu top-right (self-positioned);
+            desktop = left vertical bar. ButtonPanel (contextual tools) docks at the
+            bottom on mobile — the only bottom bar there, so no stacking needed. */}
         {hmiVisible && showActivityBar && <ActivityBar />}
         {hmiVisible && showButtonPanel && <ButtonPanel />}
         {hmiVisible && showMessagePanel && <MessagePanel />}
@@ -143,6 +151,7 @@ export function App() {
         {hmiVisible && showViewsSlot && <SlotRenderer slot="views" />}
         <SharedViewBanner />
         <GPUWarningBanner />
+        <AiActivityOverlay />
         {hmiVisible && <AnnotationPanel />}
         {hmiVisible && <MeasurementPanel />}
         {hmiVisible && <OrderPanel />}

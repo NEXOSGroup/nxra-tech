@@ -26,6 +26,7 @@ import { processExtras, type ProcessExtrasResult } from '../../core/engine/rv-sc
 import { applyShadowFlags } from '../../core/engine/rv-mesh-classifier';
 import { scanLibraryComponent } from '../../core/library-component-loader';
 import { applyKinematicsSpec } from '../../core/behavior-runtime';
+import { attachDriveDatasheets } from '../../behaviors/_shared/aas-link';
 import type { SnapPoint, SnapPointRegistry } from '../../core/engine/rv-snap-point-registry';
 
 import { alignToFloor, pivotToFloorCenter } from './model-cache';
@@ -102,6 +103,10 @@ function _applyNamingConventionScan(clone: Object3D): void {
   if ((spec.drives?.length ?? 0) > 0 || (spec.transports?.length ?? 0) > 0 || (spec.sensors?.length ?? 0) > 0) {
     applyKinematicsSpec(clone, spec);
   }
+  // Drive datasheet: placed library items load via a separate GLTFLoader path
+  // (not the main scene loader), so attach the SEW gearmotor AAS to their motor
+  // geometry (DriveMesh / DriveRotate / DriveRolls) here as well.
+  attachDriveDatasheets(clone);
 }
 
 /**

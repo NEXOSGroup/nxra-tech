@@ -80,10 +80,11 @@ describe('RVHighlightManager — OutlinePass vs overlay routing', () => {
     expect(overlayCount(scene)).toBeGreaterThan(0); // overlay built from hidden geometry
   });
 
-  it('uses overlay when the subtree MIXES visible and hidden meshes (merged product)', () => {
-    // A promoted top-most-metadata product is typically a mix: some merged
-    // (hidden) child meshes + maybe some visible ones. OutlinePass would miss
-    // the hidden bulk, so the whole subtree must go through the overlay path.
+  it('uses OutlinePass when the subtree has ANY visible mesh (mixed merged product)', () => {
+    // Documented rule (rv-highlight-manager): OutlinePass is used whenever the
+    // subtree has AT LEAST ONE visible mesh; the overlay path is the fallback
+    // only when the subtree is FULLY invisible. A mixed product (some merged/
+    // hidden meshes + some visible ones) therefore stays on the OutlinePass path.
     const root = new Object3D();
     const visible = makeMesh(true);
     const hidden = makeMesh(false);
@@ -94,8 +95,8 @@ describe('RVHighlightManager — OutlinePass vs overlay routing', () => {
 
     mgr.highlight(root);
 
-    expect(outline.hoverOutlined).toEqual([]);      // NOT OutlinePass (would miss hidden)
-    expect(overlayCount(scene)).toBeGreaterThan(0); // overlay covers all meshes
+    expect(outline.hoverOutlined).toEqual([root]); // OutlinePass on the visible mesh
+    expect(overlayCount(scene)).toBe(0);           // no overlay built
   });
 
   it('selection: hidden-only subtree uses the overlay path too', () => {

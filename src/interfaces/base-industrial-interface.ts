@@ -33,7 +33,11 @@ import { debug } from '../core/engine/rv-debug';
 
 // ── Public Types ─────────────────────────────────────────────────────────
 
-/** Signal direction from the PLC's perspective. */
+/**
+ * Signal direction from the PLC's perspective (same nomenclature as Unity/realvirtual):
+ *   'input'  = a PLC input  → the PLC reads it  → the viewer WRITES it (sent to PLC).
+ *   'output' = a PLC output → the PLC writes it → the viewer READS it (display only).
+ */
 export type SignalDirection = 'input' | 'output';
 
 /** Signal type matching Unity PLC signal types. */
@@ -45,7 +49,7 @@ export interface SignalDescriptor {
   name: string;
   /** Data type. */
   type: SignalType;
-  /** Direction: 'input' = PLC writes (Viewer reads), 'output' = Viewer writes (PLC reads). */
+  /** Direction (PLC perspective): 'input' = PLC reads it (viewer writes/sends), 'output' = PLC writes it (viewer reads). */
   direction: SignalDirection;
   /** Initial value at discovery time. */
   initialValue: boolean | number;
@@ -103,8 +107,8 @@ export abstract class BaseIndustrialInterface implements RVViewerPlugin {
 
   /**
    * Buffer for outgoing signal values that have changed in the Viewer.
-   * Populated by SignalStore subscriptions on output signals.
-   * Drained and sent via sendSignals() in onFixedUpdatePost.
+   * Populated by SignalStore subscriptions on signals the viewer writes
+   * (direction 'input' = PLC inputs). Drained and sent via sendSignals() in onFixedUpdatePost.
    */
   protected readonly dirtyOutgoing = new Map<string, boolean | number>();
 
@@ -223,7 +227,7 @@ export abstract class BaseIndustrialInterface implements RVViewerPlugin {
         const signals = await this.doDiscoverSignals();
         this._discoveredSignals = signals;
         this.registerDiscoveredSignals(signals);
-        this.subscribeToOutputSignals(signals);
+        this.subscribeToOutgoingSignals(signals);
       } catch (discErr) {
         console.warn(`[${this.id}] Signal discovery failed:`, discErr);
         // Connection succeeded even if discovery failed — user can retry
@@ -241,7 +245,7 @@ export abstract class BaseIndustrialInterface implements RVViewerPlugin {
     // Fix 4: Set state first — prevents onConnectionLost from triggering reconnect
     this._connectionState = 'disconnected'; // direct assignment, skip event for now
 
-    this.unsubscribeFromOutputSignals();
+    this.unsubscribeFromOutgoingSignals();
     this.pendingIncoming.clear();
     this.dirtyOutgoing.clear();
     this._discoveredSignals = [];
@@ -265,11 +269,11 @@ export abstract class BaseIndustrialInterface implements RVViewerPlugin {
       throw new Error(`Cannot discover signals: ${this.id} is not connected`);
     }
 
-    this.unsubscribeFromOutputSignals();
+    this.unsubscribeFromOutgoingSignals();
     const signals = await this.doDiscoverSignals();
     this._discoveredSignals = signals;
     this.registerDiscoveredSignals(signals);
-    this.subscribeToOutputSignals(signals);
+    this.subscribeToOutgoingSignals(signals);
     return signals;
   }
 
@@ -365,16 +369,18 @@ export abstract class BaseIndustrialInterface implements RVViewerPlugin {
   }
 
   /**
-   * Subscribe to output signals (Viewer → PLC) in the SignalStore.
-   * When a UI element or logic changes an output signal, it gets queued
+   * Subscribe to the outgoing signals (Viewer → PLC) in the SignalStore.
+   * These are PLC inputs (direction 'input' = the PLC reads them, the viewer writes them).
+   * When a UI element or logic changes such a signal, it gets queued
    * in dirtyOutgoing for the next onFixedUpdatePost cycle.
    */
-  private subscribeToOutputSignals(signals: SignalDescriptor[]): void {
-    this.unsubscribeFromOutputSignals();
+  private subscribeToOutgoingSignals(signals: SignalDescriptor[]): void {
+    this.unsubscribeFromOutgoingSignals();
     if (!this.signalStore) return; // Fix 1: null guard
 
     for (const sig of signals) {
-      if (sig.direction !== 'output') continue;
+      // Only signals the viewer WRITES are sent to the PLC = PLC inputs ('input').
+      if (sig.direction !== 'input') continue;
 
       const unsub = this.signalStore.subscribe(sig.name, (value) => {
         // Fix 7: Don't echo back values we just received from the remote
@@ -385,7 +391,7 @@ export abstract class BaseIndustrialInterface implements RVViewerPlugin {
     }
   }
 
-  private unsubscribeFromOutputSignals(): void {
+  private unsubscribeFromOutgoingSignals(): void {
     for (const unsub of this._outgoingSubscriptions) unsub();
     this._outgoingSubscriptions = [];
   }
@@ -421,6 +427,8 @@ export abstract class BaseIndustrialInterface implements RVViewerPlugin {
 
 /**
  * Converts a C# PLC signal type string to SignalDescriptor fields.
+ * Same nomenclature as Unity: a "PLCOutput*" is a PLC output (PLC writes, viewer reads) → 'output';
+ * a "PLCInput*" is a PLC input (PLC reads, viewer writes) → 'input'.
  * @param plcType e.g. "PLCInputBool", "PLCOutputFloat", "PLCInputInt"
  */
 export function parseSignalType(plcType: string): { type: SignalType; direction: SignalDirection } {

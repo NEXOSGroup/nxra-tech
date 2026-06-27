@@ -52,7 +52,7 @@ membership via `plugin.modes`). The same model stays loaded across a switch.
 |---|---|---|
 | **HMI** (default) | Operate and monitor a running model — the delivery / 3D-HMI view. | Live PLC signals (WebSocket / MQTT / REST), KPI overlays, message panel, drive & sensor tooltips, camera presets, measurement. |
 | **Planner** | Assemble and edit layouts by dragging reusable library objects (conveyors, robots, fixtures) onto a grid, snapping and positioning them with gizmos. Authoring, not operation. | Library panel, grid + snap toolbar, translate / rotate gizmos, snap-point connections. See [doc-layout-planner.md](doc-layout-planner.md). |
-| **DES** *(coming soon)* | Discrete-event material-flow simulation for throughput and utilization analysis — fast, event-driven rather than per-frame. | DES workspace surface and material-flow statistics. |
+| **DES** | Discrete-event material-flow simulation for throughput and utilization analysis — fast, event-driven rather than per-frame. | DES workspace surface and material-flow statistics. |
 
 **HMI vs Planner vs DES in one line:** HMI *runs and shows* a model, Planner *builds and arranges* it, DES *analyses material flow through* it.
 
@@ -391,17 +391,12 @@ Pure UI marker authored in Unity (`Packages/io.realvirtual.professional/Runtime/
 - a **PLCOutputBool** (`SignalBool`) → `false=Low`, `true=High`, OR
 - a **PLCOutputInt** (`SignalInt`) → mapped via flexible `IntStateMap` string (default `0=Low, 1=High, 2=Warning, 3=Error`)
 
-ISA-101-aligned colors (grey / blue / amber / red), with amber blinking at 1 Hz and red at 2 Hz. The visualization is delegated to the generic `GizmoOverlayManager` and supports six shapes (box / transparent-shell / mesh-overlay / sphere / sprite / text). When `Label` is set, an additional camera-facing text gizmo renders the label above the node. See `Sensor Tool Panel` below for end-user controls. For developer-side customization (corporate-design overrides, custom int-mapping defaults), see [doc-extending-webviewer.md § 19](./doc-extending-webviewer.md#19-websensor--initwebsensor-configuration-api).
+ISA-101-aligned colors (grey / blue / amber / red), with amber blinking at 1 Hz and red at 2 Hz. The visualization is delegated to the generic `GizmoOverlayManager` and supports six shapes (box / transparent-shell / mesh-overlay / sphere / sprite / text). When `Label` is set, an additional camera-facing text gizmo renders the label above the node. See `Sensor isolation` below for the end-user control. For developer-side customization (corporate-design overrides, custom int-mapping defaults), see [doc-extending-webviewer.md § 19](./doc-extending-webviewer.md#19-websensor--initwebsensor-configuration-api).
 
-### Sensor Tool Panel (left toolbar)
-A dedicated left-side panel (`SensorToolPanel.tsx`, button registered via `WebSensorPlugin`) gives end-users runtime control over all `WebSensor` components in the scene:
+### Sensor isolation (toolbar button)
+A single **Isolate Sensors** toolbar button (in the `button-group` slot, registered via `web-sensor-plugin.tsx`) toggles sensor isolation mode. When active, non-sensor meshes are dimmed (opacity `0.55`) and desaturated so only the sensors stand out, and sensor labels are shown for identification. Click the button again to restore the normal view.
 
-- **Show sensor gizmos** toggle — globally hide/show all sensor overlays
-- **Gizmo shape selector** — override the default shape for all sensors (box / transparent-shell / mesh-overlay / sphere / sprite / text)
-- **Isolate sensors** toggle — hide all non-sensor root meshes so only sensors remain visible
-- **Live sensor list** — every `WebSensor` in the scene with label + current state badge; click an entry to focus the camera on that sensor
-
-State persists in `localStorage` under key `rv-sensor-view-state`.
+The isolation state persists in `localStorage` under key `rv-group-visibility` (field `isolatedAutoFilter`).
 
 ### Generic Gizmo Overlay System
 The `GizmoOverlayManager` (`viewer.gizmoManager`) is a reusable infrastructure for any component that needs to render a visual overlay over its node. WebSensor is the first consumer; future Drive direction arrows, Grip volumes, Station zones, etc. can all use the same API. Material sharing keyed by `(color, opacity, depthTest, blinkHz)` keeps memory low; one central `tick()` loop modulates all blinking gizmos in sync. Gizmos are tagged onto the on-top overlay layer by default so they never contaminate SSAO (bloom/glow gizmos stay in the composer via `keepInComposer`); see [doc-extending-webviewer.md § 17 — "Keeping 3D UI out of SSAO"](./doc-extending-webviewer.md#17-gizmo-overlay-system-viewergizmomanager).

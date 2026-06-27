@@ -37,7 +37,8 @@ describe('layout-constants', () => {
     // The top app bar was removed: left windows + the activity bar run full
     // height from the very top, flush against the activity bar.
     expect(LEFT_PANEL_TOP).toBe(0);
-    expect(ACTIVITY_BAR_WIDTH).toBe(30);
+    // Sized to match the floating ButtonPanel (38px IconButton + 2x4px Paper padding).
+    expect(ACTIVITY_BAR_WIDTH).toBe(46);
     expect(LEFT_PANEL_LEFT).toBe(ACTIVITY_BAR_WIDTH);
     expect(LEFT_PANEL_BOTTOM).toBe(0);
     expect(LEFT_PANEL_ZINDEX).toBe(1200);

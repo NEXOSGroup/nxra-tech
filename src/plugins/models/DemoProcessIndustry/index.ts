@@ -15,7 +15,6 @@ import { TankFillHistoryPlugin } from '../../tank-fill-history-plugin';
 import { PipeColoringPlugin } from '../../pipe-coloring-plugin';
 import { ProcessingUnitModePlugin } from '../../processing-unit-mode-plugin';
 import { FpvPlugin } from '../../fpv-plugin';
-import { CameraFollowPlugin } from '../../camera-follow-plugin';
 
 /** Model filenames (without .glb) that this module handles. */
 export const models = [
@@ -44,8 +43,6 @@ export function registerModelPlugins(viewer: RVViewer): void {
     new ProcessingUnitModePlugin(),
     // Walk-through exploration — lets users get inside the plant.
     new FpvPlugin(),
-    // Follow / Sit-On camera modes for the selected part.
-    new CameraFollowPlugin(),
   ];
   for (const p of instances) {
     viewer.use(p);

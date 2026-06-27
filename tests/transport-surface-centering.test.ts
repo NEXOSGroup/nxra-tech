@@ -22,10 +22,19 @@ function stubContext(): ComponentContext {
   };
 }
 
-/** Build a transport surface at world origin with a given local transport axis. */
-function makeSurface(transportDir: Vector3): RVTransportSurface {
+/**
+ * Build a transport surface at world origin with a given local transport axis.
+ * By default the node carries a `LayoutObject` marker so it counts as a placed
+ * library object — lateral centering is LIBRARY-ONLY (see
+ * `RVTransportSurface._isUnderLibraryObject`). Pass `{ library: false }` to
+ * exercise a scene-authored belt that must NOT center.
+ */
+function makeSurface(transportDir: Vector3, opts: { library?: boolean } = {}): RVTransportSurface {
   const node = new Object3D();
   node.name = 'Transport';
+  if (opts.library !== false) {
+    node.userData.realvirtual = { LayoutObject: { Label: 'Test', CatalogId: 'test', Locked: false } };
+  }
   node.updateMatrixWorld(true);
   const surface = new RVTransportSurface(node, AABB.fromNode(node));
   surface.TransportDirection.copy(transportDir);
@@ -82,6 +91,25 @@ describe('RVTransportSurface — lateral belt centering', () => {
     // Lateral offset has converged toward the centre line.
     expect(Math.abs(pos.x)).toBeCloseTo(0.5 * Math.pow(1 - CENTER_LERP, N), 6);
     expect(Math.abs(pos.x)).toBeLessThan(0.03);
+  });
+
+  it('does NOT center MUs on a scene-authored belt (no LayoutObject in parent)', () => {
+    // Same off-centre MU on a running belt, but the surface is not part of a
+    // placed library object — the lateral offset must be left untouched.
+    const surface = makeSurface(new Vector3(0, 0, 1), { library: false });
+    surface.drive = { currentSpeed: 1000 } as RVTransportSurface['drive']; // 1 m/s
+    const { mu, pos } = makeMU(new Vector3(0.5, 0.2, 0));
+
+    const N = 10;
+    for (let i = 0; i < N; i++) {
+      RVTransportSurface.beginTick(i + 1);
+      surface.transportMU(mu, FIXED_DT);
+    }
+
+    // Forward (Z) still advances; lateral (X) and height (Y) are unchanged.
+    expect(pos.z).toBeCloseTo(N * FIXED_DT, 6);
+    expect(pos.x).toBeCloseTo(0.5, 6); // no centering off-library
+    expect(pos.y).toBeCloseTo(0.2, 6);
   });
 
   it('does not drift the MU laterally when the belt is stopped (speed 0)', () => {

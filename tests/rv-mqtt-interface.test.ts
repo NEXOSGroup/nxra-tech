@@ -308,7 +308,8 @@ describe('MqttInterface', () => {
       expect(button).toBeDefined();
       expect(button!.direction).toBe('output');
       expect(flat).toBeDefined();
-      expect(flat!.direction).toBe('input');
+      // Flat topics (no in//out/ marker) default to a PLC output (read-only).
+      expect(flat!.direction).toBe('output');
     });
 
     it('handles empty prefix — subscribes to # ', async () => {

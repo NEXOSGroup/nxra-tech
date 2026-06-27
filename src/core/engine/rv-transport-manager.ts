@@ -645,7 +645,7 @@ export class RVTransportManager {
   }
 
   /** Reset all state */
-  reset(): void {
+  reset(disposeSources = false): void {
     // Reset grips before disposing MUs (so they release references cleanly)
     for (const grip of this.grips) {
       grip.reset();
@@ -663,17 +663,27 @@ export class RVTransportManager {
       sensor.occupied = false;
       sensor.occupiedMU = null;
     }
-    // Dispose each source — frees its pause-ghost (plan-180), floor marker
-    // (plan-181: ring/label geometry, material, CanvasTexture) and any other
-    // per-source GPU resources. Without this, every `clearModel()` leaks
-    // those resources for every source in the previous scene.
-    for (const source of this.sources) {
-      source.dispose?.();
+    // Belt surfaces: on a sim restart rewind the scrolled textures + the radial
+    // accumulator and drop stale world-matrix-delta tracking, so the conveyors
+    // look freshly loaded. Skipped on model unload (disposeSources) — the
+    // surfaces are about to be torn down with the scene.
+    if (!disposeSources) {
+      for (const surface of this.surfaces) surface.reset();
     }
-    // Dispose instance pools
+    // Sources: on a sim restart (resetSimulation → disposeSources=false) RE-ARM
+    // them — clear the spawn timer/counters/held preview but KEEP the visual.
+    // Calling dispose() here is what made web_sim_reset visually "delete" the
+    // source (and strip a self-template source's translucent shells). On model
+    // unload (clearModel passes disposeSources=true) DISPOSE them to free the
+    // per-source GPU resources (pause-ghost plan-180, floor marker plan-181) and
+    // the instance pool — otherwise every clearModel() leaks them.
     for (const source of this.sources) {
-      if (source.pool) {
-        source.pool.dispose();
+      if (disposeSources) source.dispose?.();
+      else source.reset();
+    }
+    if (disposeSources) {
+      for (const source of this.sources) {
+        if (source.pool) source.pool.dispose();
       }
     }
   }

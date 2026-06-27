@@ -504,6 +504,44 @@ function privateResolverPlugin() {
   };
 }
 
+/**
+ * Vite plugin: serve the Draco glTF decoder from our own origin.
+ *
+ * The scene loader points DRACOLoader at `<base>draco/` (see rv-scene-loader.ts)
+ * instead of the gstatic CDN — the CDN intermittently fails on mobile networks
+ * and behind corporate proxies, leaving DRACO-compressed models with a blank
+ * scene. In dev a middleware serves /draco/* from node_modules; for the
+ * production build the decoder files are emitted into dist/draco/.
+ */
+function dracoDecoderPlugin() {
+  const SRC = resolve(__dirname, 'node_modules/three/examples/jsm/libs/draco/gltf');
+  const FILES = ['draco_decoder.js', 'draco_decoder.wasm', 'draco_wasm_wrapper.js'];
+  return {
+    name: 'rv-draco-decoder',
+    configureServer(server: { middlewares: { use: Function } }) {
+      server.middlewares.use((req: { url?: string }, res: any, next: Function) => {
+        const u = req.url || '';
+        if (!u.startsWith('/draco/')) return next();
+        const name = u.slice('/draco/'.length).split('?')[0];
+        const file = join(SRC, name);
+        if (!FILES.includes(name) || !existsSync(file)) return next();
+        res.setHeader('Content-Type', name.endsWith('.wasm') ? 'application/wasm' : 'application/javascript');
+        createReadStream(file).pipe(res);
+      });
+    },
+    generateBundle(this: { emitFile: Function }) {
+      for (const name of FILES) {
+        const file = join(SRC, name);
+        if (existsSync(file)) {
+          this.emitFile({ type: 'asset', fileName: `draco/${name}`, source: readFileSync(file) });
+        } else {
+          console.warn(`[rv-draco-decoder] missing ${file} — DRACO-compressed models will not decode`);
+        }
+      }
+    },
+  };
+}
+
 export default defineConfig({
   base: process.env.VITE_BASE || './',
   plugins: [
@@ -515,6 +553,7 @@ export default defineConfig({
     debugApiPlugin(),
     thumbnailSavePlugin(),
     presetSavePlugin(),
+    dracoDecoderPlugin(),
   ].filter(Boolean),
   resolve: {
     dedupe: ['three'],

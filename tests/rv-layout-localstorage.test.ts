@@ -30,6 +30,48 @@ describe('Layout localStorage Persistence', () => {
     expect(store.getSnapshot().catalogUrls).toHaveLength(1);
   });
 
+  test('restoreFromStorage SKIPS a persisted GitHub catalog (opt-in only — no auto-load)', async () => {
+    // A former-default GitHub library that leaked into storage must not re-scan
+    // GitHub on boot. Only the non-GitHub catalog is restored.
+    localStorage.setItem('rv-layout-library-urls', JSON.stringify([
+      'https://github.com/game4automation/realvirtual-Library',
+      'https://example.com/catalog.json',
+    ]));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const u = String(input);
+      if (u.includes('example.com')) {
+        return new Response(JSON.stringify({ version: '1.0', name: 'Test', entries: [] }));
+      }
+      return new Response('not found', { status: 404 });
+    });
+    const store = new LayoutStore();
+    await store.restoreFromStorage();
+
+    const urls = store.getSnapshot().catalogUrls;
+    expect(urls).toEqual(['https://example.com/catalog.json']);
+    // GitHub API was never contacted.
+    expect(fetchSpy.mock.calls.every(c => !String(c[0]).includes('github'))).toBe(true);
+  });
+
+  test('manually added GitHub catalog is session-only — never persisted to localStorage', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const u = String(input);
+      if (/\/repos\/[^/]+\/[^/]+$/.test(u)) {
+        return new Response(JSON.stringify({ default_branch: 'main' }), { status: 200 });
+      }
+      if (/\/git\/trees\//.test(u)) {
+        return new Response(JSON.stringify({ tree: [{ path: 'A.glb', type: 'blob' }], truncated: false }), { status: 200 });
+      }
+      return new Response('not found', { status: 404 });
+    });
+    const store = new LayoutStore();
+    await store.addCatalog('https://github.com/acme/assets'); // explicit manual add → loads this session
+    expect(store.getSnapshot().catalogUrls).toContain('https://github.com/acme/assets');
+    // ...but it is NOT written to storage, so it won't auto-load next boot.
+    const stored = JSON.parse(localStorage.getItem('rv-layout-library-urls') ?? '[]');
+    expect(stored).not.toContain('https://github.com/acme/assets');
+  });
+
   test('removeCatalog removes URL from localStorage', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(JSON.stringify({ version: '1.0', name: 'Test', entries: [] })),

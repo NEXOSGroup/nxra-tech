@@ -21,6 +21,7 @@ import { findCompatibleLibraryAssets } from './library-snap-index';
 import { oppositeDirection } from './snap-name-parser';
 import type { SnapPointPlugin } from './index';
 import { t } from './strings';
+import { useMobileLayout } from '../../hooks/use-mobile-layout';
 
 interface CompatibleEntry {
   entry: LibraryCatalogEntry;
@@ -29,6 +30,7 @@ interface CompatibleEntry {
 
 export function SnapPointPickerPopup({ viewer }: UISlotProps): ReactElement | null {
   const hover = useSnapHoverState();
+  const isMobile = useMobileLayout();
   const popupRef = useRef<HTMLDivElement | null>(null);
 
   // Library entries (subscribed)
@@ -157,15 +159,29 @@ export function SnapPointPickerPopup({ viewer }: UISlotProps): ReactElement | nu
       data-testid="snap-picker-popup"
       sx={{
         position: 'fixed',
-        left,
-        top,
         zIndex: 2500,
-        minWidth: 280,
-        maxWidth: 360,
-        maxHeight: 360,
         overflow: 'auto',
         p: 1.25,
         pointerEvents: 'auto',
+        // Desktop: anchored next to the clicked snap point. Mobile: docked above
+        // the bottom toolbars, horizontally centered, height-capped so the whole
+        // list stays visible (scrolls internally) instead of being clipped.
+        ...(isMobile
+          ? {
+              left: '50%',
+              transform: 'translateX(-50%)',
+              bottom: 'calc(56px + env(safe-area-inset-bottom, 0px))',
+              width: 'calc(100vw - 16px)',
+              maxWidth: 360,
+              maxHeight: 'calc(100dvh - 130px)',
+            }
+          : {
+              left,
+              top,
+              minWidth: 280,
+              maxWidth: 360,
+              maxHeight: 360,
+            }),
       }}
     >
       <Box sx={{ pb: 0.5, mb: 0.5, borderBottom: '1px solid rgba(255,255,255,0.08)' }}>

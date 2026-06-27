@@ -13,6 +13,7 @@
 import { useState, useCallback, useSyncExternalStore, memo, useRef, type ReactNode } from 'react';
 import {
   Box,
+  Paper,
   Typography,
   IconButton,
   TextField,
@@ -20,6 +21,8 @@ import {
   Tooltip,
   Switch,
   MenuItem,
+  ListItemIcon,
+  Divider,
   CircularProgress,
   Dialog,
   DialogTitle,
@@ -38,17 +41,38 @@ import {
   FolderOpen,
   Landscape,
   ErrorOutline,
+  Close,
+  ViewSidebar,
+  KeyboardArrowUp,
+  MoreVert,
+  Check,
+  Refresh,
+  Delete,
+  Link as LinkIcon,
 } from '@mui/icons-material';
 import { useViewer } from '../../hooks/use-viewer';
 import { useMobileLayout } from '../../hooks/use-mobile-layout';
-import { LeftPanel } from '../../core/hmi/LeftPanel';
+import { useActiveContexts } from '../../core/hmi/ui-context-store';
+import { LeftPanel, WINDOW_DARK_BG } from '../../core/hmi/LeftPanel';
 import { RV_SCROLL_CLASS } from '../../core/hmi/shared-sx';
-import { LAYOUT_PANEL_WIDTH } from '../../core/hmi/layout-constants';
+import { LAYOUT_PANEL_WIDTH, LEFT_PANEL_ZINDEX } from '../../core/hmi/layout-constants';
 import { showInfoOverlay } from '../../core/hmi/info-overlay-store';
 import type { LayoutPlannerPlugin } from './index';
 import type { LibraryCatalogEntry, LayoutSnapshot } from './rv-layout-store';
 import { LOCAL_NEEDS_PERMISSION, isGitHubRepoScanUrl } from './rv-layout-store';
 import { setLayoutDragData, suppressDragImage } from './drag-types';
+import { matchMaterialFlows } from '../../core/material-flow/registry';
+
+/** Short, general behavior description for a library entry (hover tooltip). Resolves
+ *  the entry to its behavior def by name (+ de-spaced variant + id), so e.g. "Chain
+ *  Transfer Left" → ChainTransfer (model glob `*ChainTransfer*`). Null when none. */
+function behaviorDescription(entry: LibraryCatalogEntry): string | null {
+  for (const c of [entry.name, entry.name.replace(/\s+/g, ''), entry.id]) {
+    const m = matchMaterialFlows(c);
+    if (m.length && m[0].description) return m[0].description;
+  }
+  return null;
+}
 import { CatalogBrowser } from './CatalogBrowser';
 import { LibrarySelector, type LibraryItem } from './LibrarySelector';
 import { deriveChips, filterByChip } from './library-chips';
@@ -57,6 +81,13 @@ import { deriveChips, filterByChip } from './library-chips';
 // ─── Constants ──────────────────────────────────────────────────────────
 
 const PANEL_ID = 'layout-planner';
+
+/** Width (px) of one thumbnail card inside the mobile horizontal strip. */
+const MOBILE_CARD_WIDTH = 84;
+/** Height (px) of the bottom nav strips (ActivityBar / ButtonPanel) the mobile
+ *  strip/tab sits flush on top of — no gap below it. The bars add the safe-area
+ *  inset as bottom padding, so the strip adds the same inset on top of this. */
+const MOBILE_NAV_CLEARANCE = 48;
 
 // ─── Panel Component ────────────────────────────────────────────────────
 
@@ -70,6 +101,7 @@ const EMPTY_CLOUD_SNAPSHOT = { connections: [], activeConnectionId: null };
 export function LayoutLibraryPanel() {
   const viewer = useViewer();
   const isMobile = useMobileLayout();
+  const activeContexts = useActiveContexts();
   const lpm = viewer.leftPanelManager;
   const lpmSnapshot = useSyncExternalStore(lpm.subscribe, lpm.getSnapshot);
   // Planner docks to the right slot — read its state directly so it stays
@@ -217,7 +249,15 @@ export function LayoutLibraryPanel() {
   if (!plugin || !store || !snapshot) return null;
 
   // The panel itself:
-  if (!isOpen) return null;
+  if (!isOpen) {
+    // Compact layout: the library doesn't auto-open on phones, so while the
+    // planner is active show a small bottom tab to reveal the horizontal strip.
+    // Desktop (or planner inactive): render nothing.
+    if (isMobile && activeContexts.has('planner')) {
+      return <MobileLibraryTab onOpen={() => lpm.open(PANEL_ID, LAYOUT_PANEL_WIDTH, 'right')} />;
+    }
+    return null;
+  }
 
   // Build unified tab list: [catalog URLs...] + [AM connections...]
   const visibleCatalogUrls = snapshot.catalogUrls.filter(u => u !== 'bundled://unity-cloud');
@@ -369,7 +409,24 @@ export function LayoutLibraryPanel() {
 
   return (
     <>
-      {/* Right-docked library window (toggled from the toolbar Library button). */}
+      {isMobile ? (
+        /* Compact layout: a horizontal thumbnail strip docked above the bottom
+           nav instead of the fullscreen panel — keeps the scene visible. */
+        <MobileLibraryStrip
+          entries={displayedEntries}
+          plugin={plugin}
+          snapshot={snapshot}
+          isAmTab={isAmTab}
+          libraryItems={libraryItems}
+          activeId={resolvedActiveTabId}
+          onSelect={handleSelectLibrary}
+          onRemove={handleRemoveLibrary}
+          onRefreshLocal={handleRefreshLocalFolder}
+          onAdd={() => setAddUrlOpen(true)}
+          onClose={handleClose}
+        />
+      ) : (
+      /* Right-docked library window (toggled from the toolbar Library button). */
       <LeftPanel
         title="Library"
         anchor="right"
@@ -437,6 +494,7 @@ export function LayoutLibraryPanel() {
           </CatalogBrowser>
         )}
       </LeftPanel>
+      )}
 
       {/* Add Library Dialog (URL or Asset Manager) */}
       <Dialog open={addUrlOpen} onClose={() => setAddUrlOpen(false)} maxWidth="sm" fullWidth>
@@ -577,6 +635,189 @@ export function LayoutLibraryPanel() {
   );
 }
 
+// ─── Mobile: collapsed tab ──────────────────────────────────────────────
+
+/** Small bottom tab shown on the compact layout while the planner is active
+ *  and the library is closed. Tapping it opens the horizontal strip. Sits above
+ *  the bottom nav strips (ActivityBar / ButtonPanel). */
+function MobileLibraryTab({ onOpen }: { onOpen: () => void }) {
+  return (
+    <Box
+      sx={{
+        position: 'fixed', left: 0, right: 0,
+        bottom: `calc(${MOBILE_NAV_CLEARANCE}px + env(safe-area-inset-bottom, 0px))`,
+        zIndex: LEFT_PANEL_ZINDEX,
+        display: 'flex', justifyContent: 'center', pointerEvents: 'none',
+      }}
+    >
+      <Paper
+        elevation={6}
+        data-ui-panel
+        onClick={onOpen}
+        sx={{
+          pointerEvents: 'auto', cursor: 'pointer',
+          display: 'flex', alignItems: 'center', gap: 0.75,
+          px: 1.5, py: 0.75, borderRadius: 1,
+          backgroundColor: `${WINDOW_DARK_BG} !important`,
+        }}
+      >
+        <ViewSidebar sx={{ fontSize: 18, color: 'primary.main' }} />
+        <Typography variant="caption" sx={{ fontWeight: 600, fontSize: 12 }}>Library</Typography>
+        <KeyboardArrowUp sx={{ fontSize: 16, color: 'text.secondary' }} />
+      </Paper>
+    </Box>
+  );
+}
+
+// ─── Mobile: horizontal strip ───────────────────────────────────────────
+
+interface MobileLibraryStripProps {
+  entries: LibraryCatalogEntry[];
+  plugin: LayoutPlannerPlugin;
+  snapshot: LayoutSnapshot;
+  isAmTab: boolean;
+  libraryItems: LibraryItem[];
+  activeId: string | null;
+  onSelect: (id: string) => void;
+  onRemove: (id: string) => void;
+  onRefreshLocal: () => void | Promise<void>;
+  onAdd: () => void;
+  onClose: () => void;
+}
+
+/** Compact-layout library: a one-row, horizontally scrollable thumbnail strip
+ *  docked above the bottom nav. Keeps the 3D scene visible (unlike the
+ *  fullscreen panel) — tap a card to enter placement mode, then tap the scene. */
+function MobileLibraryStrip({
+  entries, plugin, snapshot, isAmTab, libraryItems, activeId,
+  onSelect, onRemove, onRefreshLocal, onAdd, onClose,
+}: MobileLibraryStripProps) {
+  // Single combined menu (library switch + manage) opened from the floating ⋮.
+  const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
+  const closeMenu = () => setMenuAnchor(null);
+  const activeItem = libraryItems.find((i) => i.id === activeId) ?? null;
+
+  return (
+    <Box
+      sx={{
+        position: 'fixed', left: 0, right: 0,
+        bottom: `calc(${MOBILE_NAV_CLEARANCE}px + env(safe-area-inset-bottom, 0px))`,
+        zIndex: LEFT_PANEL_ZINDEX, pointerEvents: 'none',
+      }}
+    >
+      <Paper
+        elevation={6}
+        data-ui-panel
+        sx={{
+          position: 'relative',
+          pointerEvents: 'auto',
+          backgroundColor: `${WINDOW_DARK_BG} !important`,
+          borderRadius: 0, overflow: 'hidden',
+          display: 'flex', flexDirection: 'column',
+        }}
+      >
+        {/* No header row — just the scrollable thumbnail row. Right padding clears
+            the floating controls so the last card isn't hidden behind them. */}
+        <Box
+          className={RV_SCROLL_CLASS}
+          sx={{
+            display: 'flex', flexDirection: 'row', gap: 0.5, p: 0.75, pr: 8,
+            overflowX: 'auto', overflowY: 'hidden', WebkitOverflowScrolling: 'touch',
+            '& > *': { flexShrink: 0 },
+          }}
+        >
+          {entries.length === 0 ? (
+            <Typography variant="caption" sx={{ color: 'text.secondary', px: 1, py: 1.5 }}>
+              {isAmTab ? 'Asset Manager not available on mobile' : 'No components'}
+            </Typography>
+          ) : (
+            entries.map((entry) => (
+              <Box key={entry.id} sx={{ width: MOBILE_CARD_WIDTH }}>
+                <ThumbnailCard
+                  entry={entry}
+                  isPlacing={snapshot.placementMode === entry.id}
+                  isPending={snapshot.thumbnailPending.has(entry.id)}
+                  plugin={plugin}
+                />
+              </Box>
+            ))
+          )}
+        </Box>
+
+        {/* Tap-to-place hint (no drag-and-drop on touch). Reflects the current
+            placement state so the user knows what to tap next. */}
+        {entries.length > 0 && (
+          <Box sx={{ px: 1, pb: 0.5, pt: 0.25 }}>
+            <Typography
+              sx={{
+                fontSize: 9.5, textAlign: 'center',
+                color: snapshot.placementMode ? 'primary.light' : 'text.disabled',
+              }}
+            >
+              {snapshot.placementMode ? 'Tap in the scene to place · tap part again to cancel' : 'Tap a part, then tap the scene to place'}
+            </Typography>
+          </Box>
+        )}
+
+        {/* Floating controls (top-right): combined library/actions menu + close.
+            No header row keeps the strip as low as possible. */}
+        <Box sx={{ position: 'absolute', top: 2, right: 2, display: 'flex', gap: 0.25 }}>
+          <IconButton
+            size="small"
+            onClick={(e) => setMenuAnchor(e.currentTarget)}
+            sx={{ color: 'text.secondary', bgcolor: 'rgba(0,0,0,0.45)', '&:hover': { bgcolor: 'rgba(0,0,0,0.65)' }, p: 0, width: 22, height: 22 }}
+            aria-label="Library menu"
+          >
+            <MoreVert sx={{ fontSize: 15 }} />
+          </IconButton>
+          <IconButton
+            size="small"
+            onClick={onClose}
+            sx={{ color: 'text.secondary', bgcolor: 'rgba(0,0,0,0.45)', '&:hover': { bgcolor: 'rgba(0,0,0,0.65)' }, p: 0, width: 22, height: 22 }}
+            aria-label="Close library"
+          >
+            <Close sx={{ fontSize: 15 }} />
+          </IconButton>
+        </Box>
+
+        {/* Combined menu: switch active library + manage (refresh/remove/add). */}
+        <Menu anchorEl={menuAnchor} open={!!menuAnchor} onClose={closeMenu}>
+          {libraryItems.map((item) => (
+            <MenuItem
+              key={item.id}
+              selected={item.id === activeId}
+              onClick={() => { onSelect(item.id); closeMenu(); }}
+              sx={{ fontSize: 12 }}
+            >
+              <ListItemIcon sx={{ minWidth: 26 }}>
+                {item.id === activeId
+                  ? <Check sx={{ fontSize: 16, color: 'primary.main' }} />
+                  : <LinkIcon sx={{ fontSize: 16 }} />}
+              </ListItemIcon>
+              {item.label}
+            </MenuItem>
+          ))}
+          {libraryItems.length > 0 && <Divider />}
+          {activeItem?.kind === 'local' && (
+            <MenuItem onClick={() => { onRefreshLocal(); closeMenu(); }} sx={{ fontSize: 12 }}>
+              <ListItemIcon sx={{ minWidth: 26 }}><Refresh sx={{ fontSize: 16 }} /></ListItemIcon>
+              Refresh folder
+            </MenuItem>
+          )}
+          <MenuItem disabled={!activeItem} onClick={() => { if (activeItem) onRemove(activeItem.id); closeMenu(); }} sx={{ fontSize: 12 }}>
+            <ListItemIcon sx={{ minWidth: 26 }}><Delete sx={{ fontSize: 16 }} /></ListItemIcon>
+            Remove library
+          </MenuItem>
+          <MenuItem onClick={() => { onAdd(); closeMenu(); }} sx={{ fontSize: 12 }}>
+            <ListItemIcon sx={{ minWidth: 26 }}><Add sx={{ fontSize: 16 }} /></ListItemIcon>
+            Add library…
+          </MenuItem>
+        </Menu>
+      </Paper>
+    </Box>
+  );
+}
+
 // ─── Thumbnail Card (draggable) ─────────────────────────────────────────
 
 interface ThumbnailCardProps {
@@ -595,6 +836,11 @@ const ThumbnailCard = memo(function ThumbnailCard({ entry, isPlacing, isPending,
   const [genError, setGenError] = useState<string | null>(null);
   const errorClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [ctxPos, setCtxPos] = useState<{ x: number; y: number } | null>(null);
+  // Hover tooltip showing the component's general behavior description. Suppressed
+  // while dragging (controlled `open`) so it doesn't float over the drag ghost.
+  const [dragging, setDragging] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const description = behaviorDescription(entry);
 
   const handleClick = () => {
     // Splat entries: place directly at origin (no drag/placement mode — splats are too large).
@@ -657,6 +903,8 @@ const ThumbnailCard = memo(function ThumbnailCard({ entry, isPlacing, isPending,
   }, [runGeneratePreview]);
 
   const handleDragStart = (e: React.DragEvent) => {
+    setDragging(true);
+    setHovered(false);
     setLayoutDragData(e.dataTransfer, entry);
     e.dataTransfer.effectAllowed = 'copy';
 
@@ -674,6 +922,7 @@ const ThumbnailCard = memo(function ThumbnailCard({ entry, isPlacing, isPending,
   };
 
   const handleDragEnd = () => {
+    setDragging(false);
     plugin.setDragEntry(null);
   };
 
@@ -681,12 +930,21 @@ const ThumbnailCard = memo(function ThumbnailCard({ entry, isPlacing, isPending,
 
   return (
     <>
+    <Tooltip
+      title={description ?? ''}
+      open={!!description && hovered && !dragging}
+      placement="right"
+      arrow
+      disableInteractive
+    >
     <Box
       draggable={!isSplat}
       onDragStart={isSplat ? undefined : handleDragStart}
       onDragEnd={isSplat ? undefined : handleDragEnd}
       onClick={handleClick}
       onContextMenu={handleContextMenu}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       sx={{
         display: 'flex',
         flexDirection: 'column',
@@ -836,6 +1094,7 @@ const ThumbnailCard = memo(function ThumbnailCard({ entry, isPlacing, isPending,
         </Box>
       )}
     </Box>
+    </Tooltip>
     <Menu
       open={ctxPos !== null}
       onClose={() => setCtxPos(null)}

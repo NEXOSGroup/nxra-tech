@@ -89,7 +89,25 @@ function createSourceWithTemplate(opts: {
 // ─── Pre-Phase: TransportManager.reset() disposes sources ──────────
 
 describe('TransportManager.reset() — source disposal (plan-180 patch)', () => {
-  it('calls dispose on every registered source', () => {
+  // reset() has two modes: a plain sim-restart RE-ARMS sources (keeps their
+  // visual — calling dispose() here is what made web_sim_reset visually delete
+  // the source); only the model-unload path (reset(true), used by clearModel)
+  // DISPOSES them to free the per-source GPU resources.
+  it('re-arms (does NOT dispose) sources on a plain reset', () => {
+    const tm = new RVTransportManager();
+    const { source: a } = createSourceWithTemplate({ sourceName: 'A' });
+    tm.sources.push(a);
+
+    const disposeSpy = vi.spyOn(a, 'dispose');
+    const resetSpy = vi.spyOn(a, 'reset');
+
+    tm.reset();
+
+    expect(disposeSpy).not.toHaveBeenCalled();
+    expect(resetSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('calls dispose on every registered source on model unload (reset(true))', () => {
     const tm = new RVTransportManager();
     const { source: a } = createSourceWithTemplate({ sourceName: 'A' });
     const { source: b } = createSourceWithTemplate({ sourceName: 'B' });
@@ -98,13 +116,13 @@ describe('TransportManager.reset() — source disposal (plan-180 patch)', () => 
     const aSpy = vi.spyOn(a, 'dispose');
     const bSpy = vi.spyOn(b, 'dispose');
 
-    tm.reset();
+    tm.reset(true);
 
     expect(aSpy).toHaveBeenCalledTimes(1);
     expect(bSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('disposes marker GPU resources (no leak)', () => {
+  it('disposes marker GPU resources on model unload (no leak)', () => {
     const tm = new RVTransportManager();
     const { source } = createSourceWithTemplate();
     tm.sources.push(source);
@@ -115,7 +133,7 @@ describe('TransportManager.reset() — source disposal (plan-180 patch)', () => 
     const ringMatSpy = vi.spyOn(ring!.material as Material, 'dispose');
     const texSpy = vi.spyOn(texture!, 'dispose');
 
-    tm.reset();
+    tm.reset(true);
 
     expect(ringMatSpy).toHaveBeenCalled();
     expect(texSpy).toHaveBeenCalled();

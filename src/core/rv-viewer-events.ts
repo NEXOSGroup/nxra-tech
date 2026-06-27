@@ -42,6 +42,16 @@ export interface ViewerEvents {
   // ── Connection state ──
   'connection-state-changed': { state: 'Connected' | 'Disconnected'; previous: 'Connected' | 'Disconnected' };
 
+  // ── WebGL context lifecycle ──
+  /** Fired when the WebGL/WebGPU drawing context is lost (common on mobile
+   *  under GPU-memory pressure or after a long background tab). The default
+   *  browser behaviour (a permanently blank canvas) is suppressed via
+   *  preventDefault so the browser attempts a restore; UI listens to surface a
+   *  message and offer a reload. */
+  'renderer-context-lost': void;
+  /** Fired when a previously lost context is restored by the browser. */
+  'renderer-context-restored': void;
+
   /** Fired whenever the active render mode changes (dropdown, settings apply, or
    *  programmatic `viewer.renderMode = …`). UI that gates controls by mode
    *  capabilities (e.g. the Environment tab hiding Reflection in toon) listens
@@ -172,4 +182,24 @@ export interface ViewerEvents {
     /** The specific reason that triggered this transition. */
     reason: string;
   };
+
+  // ── Simulation reset lifecycle events ──
+  //
+  // Emitted by `RVViewer.resetSimulation()` (the single reset chokepoint — UI
+  // reset button + `web_sim_reset` MCP). Together they restore the running
+  // model to its freshly-loaded "start" state WITHOUT a reload. Components
+  // subscribe through the bind-context hooks `onReset` / `onStart` /
+  // `onResetStat` (behavior-runtime.ts) — or directly via `viewer.on(...)`.
+  /** Phase 1 — RESET. Every component restores its internal variables and state
+   *  to the start (like a reload): behaviors clear their FSM/counters/timers,
+   *  drives snap back to their authored StartPosition, conveyor textures rewind.
+   *  Fired FIRST, before the engine-level MU/sensor clear. */
+  'simulation-reset': void;
+  /** Phase 3 — START. Fired LAST, after the reset + engine clear, so components
+   *  (re)start from the clean state (e.g. a conveyor re-asserts `Run = true`). */
+  'simulation-start': void;
+  /** RESETSTAT. Clears statistics accumulators only (throughput, state times,
+   *  cycle times) — registrations persist. Primarily a DES concern (reset the
+   *  numbers without re-running the model); also fired as part of a full reset. */
+  'simulation-resetstat': void;
 }

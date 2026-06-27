@@ -108,6 +108,18 @@ export interface MaterialFlowDefinition<
   readonly type: string;
   readonly kind: MaterialFlowKind;
   /**
+   * Short, human-facing one-liner — what this component IS and does. Shown as the
+   * library hover tooltip and returned by the `web_library_list` MCP tool. Keep it
+   * general (no per-instance detail).
+   */
+  readonly description?: string;
+  /**
+   * Richer, MCP-facing notes for an AI agent building layouts: material-flow
+   * direction, how to connect it (snaps), key config. Returned by the
+   * `web_library_describe` MCP tool. Multi-line OK. Not shown in the UI tooltip.
+   */
+  readonly mcpDocs?: string;
+  /**
    * Signal-name namespace for the `signals` block (Plan 197 §2.4b-A). The factory
    * auto-declares each signal as `${signalNamespace ?? type}.${key}` and the
    * `self.sig.<key>` accessors read/write the same scoped name. Defaults to
@@ -164,6 +176,28 @@ export interface MaterialFlowDefinition<
    * `self.local` nodes.
    */
   setup?(self: S): void;
+  /**
+   * Mode-agnostic RESET hook — fired on `resetSimulation()` phase 1
+   * (`'simulation-reset'`). Restore the component's internal state to the
+   * freshly-loaded start: FSM back to its initial state, part counters to 0,
+   * timers/routing bookkeeping cleared. Do NOT re-resolve nodes (setup already
+   * did). The factory wires this to the bind-context `onReset` hook; a
+   * definition that omits it simply doesn't react to reset.
+   */
+  reset?(self: S): void;
+  /**
+   * Mode-agnostic START hook — fired on `resetSimulation()` phase 3
+   * (`'simulation-start'`), after the reset + engine clear. (Re)start the
+   * component from the clean state, e.g. re-assert `Run = true`. Wired to the
+   * bind-context `onStart` hook.
+   */
+  start?(self: S): void;
+  /**
+   * Mode-agnostic RESETSTAT hook — fired on `'simulation-resetstat'`. Reset the
+   * component's statistics accumulators only (no simulation-state change).
+   * Primarily a DES concern. Wired to the bind-context `onResetStat` hook.
+   */
+  resetStat?(self: S): void;
   /** Shared state-machine + routing (mode-agnostic). */
   readonly logic?: LogicBlock<S>;
   /** Continuous adapter — public default path. */
@@ -233,6 +267,12 @@ export function toBehavior<S = Record<string, never>>(
           if (late) late(self, dt);
         });
       }
+      // Reset lifecycle hooks — parity with defineLibraryComponent so a
+      // definition driven through the low-level shim still reacts to
+      // reset/start/resetstat.
+      if (def.reset) rv.onReset(() => def.reset!(self));
+      if (def.start) rv.onStart(() => def.start!(self));
+      if (def.resetStat) rv.onResetStat(() => def.resetStat!(self));
       // teardown runs via the bind context's onDispose (model-cleared).
       if (c.teardown) {
         rv.onDispose(() => c.teardown!(self));

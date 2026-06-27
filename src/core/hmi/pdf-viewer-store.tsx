@@ -15,7 +15,7 @@
  */
 
 import { useSyncExternalStore } from 'react';
-import { Box, Typography, CircularProgress } from '@mui/material';
+import { Box, Typography, CircularProgress, Modal } from '@mui/material';
 import { extractFileBlob } from '../../plugins/aas-link-parser';
 import { tooltipRegistry } from './tooltip/tooltip-registry';
 import { DocViewerOverlay } from './DocViewerOverlay';
@@ -127,8 +127,9 @@ function PdfViewerBridge() {
   const state = usePdfViewerState();
   if (!state.open) return null;
 
+  let content: React.ReactNode;
   if (state.loading) {
-    return (
+    content = (
       <Box sx={{
         position: 'fixed', inset: 0, zIndex: 9000,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -137,10 +138,8 @@ function PdfViewerBridge() {
         <CircularProgress />
       </Box>
     );
-  }
-
-  if (state.error) {
-    return (
+  } else if (state.error) {
+    content = (
       <Box
         onClick={closePdfViewer}
         sx={{
@@ -158,9 +157,33 @@ function PdfViewerBridge() {
         </Typography>
       </Box>
     );
+  } else {
+    content = <DocViewerOverlay url={state.url} title={state.title} initialPage={state.initialPage} onClose={closePdfViewer} />;
   }
 
-  return <DocViewerOverlay url={state.url} title={state.title} initialPage={state.initialPage} onClose={closePdfViewer} />;
+  // Render through a MUI Modal so the overlay is portaled to document.body.
+  // The HMI lives inside #react-root, a fixed element with z-index:1000 that
+  // forms its own stacking context — so the overlay's own z-index:9000 only
+  // ranks WITHIN that context and stays below any open MUI Dialog, which
+  // portals to body at z-index 1300 (theme.zIndex.modal). Portaling the PDF to
+  // body lets its 9000 win against the 1300 dialog. Registering with MUI's
+  // shared ModalManager also makes an underlying Dialog (e.g. the Ask-AI
+  // dialog) non-top, releasing its focus trap so the PDF search box keeps focus.
+  // disableEscapeKeyDown: DocViewerOverlay owns Escape (two-stage: close search
+  // first, then the overlay) via its own window listener — don't double-handle.
+  return (
+    <Modal
+      open
+      onClose={closePdfViewer}
+      hideBackdrop
+      disableAutoFocus
+      disableEnforceFocus
+      disableEscapeKeyDown
+      sx={{ zIndex: 9000 }}
+    >
+      <div>{content}</div>
+    </Modal>
+  );
 }
 
 // Register the PdfViewerBridge as a controller (rendered by App.tsx getControllers() loop)

@@ -27,8 +27,9 @@ import type {
   RvScene, RvSceneMeta, SceneBase, BuiltinSceneEntry,
 } from './rv-scene-types';
 import {
-  baseLabelOf, metaOf, newSceneId, makeDraftScene, scenesEqual,
+  baseLabelOf, metaOf, newSceneId, makeDraftScene, scenesEqual, isValidSceneV2,
 } from './rv-scene-types';
+import type { PublishedSceneEntry } from './rv-published-scenes';
 import {
   type EditOp, type PrimitiveEditOp, type SceneEditsSettings,
   MAX_OP_HISTORY, COALESCE_WINDOW_MS,
@@ -60,6 +61,10 @@ export interface SceneSnapshot {
   dirty: boolean;
   scenes: RvSceneMeta[];
   builtins: BuiltinSceneEntry[];
+  /** Read-only "Example" scenes shipped under public/scenes/. */
+  published: PublishedSceneEntry[];
+  /** urlName of the open published example, for Examples-row highlight; null otherwise. */
+  activePublishedName: string | null;
   busy: boolean;
   canUndo: boolean;
   canRedo: boolean;
@@ -100,6 +105,9 @@ export class SceneStore {
   // Catalogue
   private _builtins: BuiltinSceneEntry[] = [];
   private _scenes: RvSceneMeta[] = [];
+  private _published: PublishedSceneEntry[] = [];
+  /** urlName of the currently-open published example (for row highlight); null otherwise. */
+  private _activePublishedName: string | null = null;
 
   // UI state flags
   private _busy = false;
@@ -124,6 +132,7 @@ export class SceneStore {
     this._viewer = viewer;
     this._refreshBuiltins();
     this._refreshScenes();
+    this._refreshPublished();
     this._snapshot = this._buildSnapshot();
   }
 
@@ -162,6 +171,7 @@ export class SceneStore {
     const base: SceneBase = { kind: 'builtin', url, label };
     if (this._workspace?.base.kind === 'builtin' && this._workspace.base.url === url) return;
     this._cancelAutosave();
+    this._activePublishedName = null;
     this._workspace = freshShell(base, label);
     this._settings = { ...DEFAULT_SETTINGS };
     this._baselineOps = [];
@@ -177,6 +187,7 @@ export class SceneStore {
 
   listScenes(): RvSceneMeta[] { return this._scenes; }
   listBuiltins(): BuiltinSceneEntry[] { return this._builtins; }
+  listPublished(): PublishedSceneEntry[] { return this._published; }
 
   // ─── Workspace lifecycle ────────────────────────────────────────────
 
@@ -216,11 +227,106 @@ export class SceneStore {
    * stored scenes. `name` is only used to keep the URL stable across reloads.
    */
   async openPublished(scene: RvScene, name: string): Promise<void> {
-    if (!scene || scene.schemaVersion !== 2 || !scene.base || !scene.edits) {
-      throw new Error('Invalid published scene JSON (missing schemaVersion 2 / base / edits)');
+    if (!isValidSceneV2(scene)) {
+      throw new Error('Invalid published scene JSON (missing schemaVersion 2 / base / edits / settings)');
     }
     await this._loadIntoWorkspace(scene, null);
+    // Mark which example is active so the Examples row can highlight (transient
+    // scenes have no saved id / non-builtin base to match against).
+    this._activePublishedName = name;
     updateUrlSceneParam(`published:${name}`);
+    this._notify();
+  }
+
+  /**
+   * Open an "Example" scene from the catalogue transiently (read-only — not
+   * written to localStorage), then switch to its preferred workspace mode if
+   * one is declared in the manifest.
+   *
+   * The preferred mode is applied here via the mode manager (which persists it);
+   * on reload the published boot path re-applies it from the catalogue entry, so
+   * the workspace is restored without the mode needing to live in the URL.
+   */
+  async openPublishedExample(entry: PublishedSceneEntry): Promise<void> {
+    if (this._busy) return;        // ignore re-clicks while a load is in flight
+    this._busy = true;
+    this._notify();                // disable the rows immediately (fetch precedes _loadIntoWorkspace)
+    try {
+      const scene = await this._fetchPublishedScene(entry);
+      await this.openPublished(scene, entry.urlName);
+      this._applyMode(entry.mode);
+    } finally {
+      this._busy = false;
+      this._notify();
+    }
+  }
+
+  /**
+   * Import an "Example" scene into "My Scenes" as a fresh, fully editable saved
+   * scene (localStorage), then open it. This is the "make the demo mine" path:
+   * the user gets an editable copy under their own name. Returns the new id.
+   */
+  async addPublishedToMyScenes(entry: PublishedSceneEntry): Promise<string> {
+    if (this._busy) throw new Error('A scene operation is already in progress.');
+    this._busy = true;
+    this._notify();
+    try {
+      const scene = await this._fetchPublishedScene(entry);
+      const now = new Date().toISOString();
+      const fresh: RvScene = {
+        ...scene,
+        id: newSceneId(),
+        // Disambiguate so repeated imports don't produce indistinguishable rows.
+        name: this._uniqueSceneName(entry.label),
+        createdAt: now,
+        modifiedAt: now,
+        // It's a brand-new user-owned scene, not a duplicate of a stored one.
+        parentId: undefined,
+      };
+      const persisted = writeScene(fresh);
+      // writeScene swallows quota errors (returns the object but stores nothing);
+      // detect that here so openScene doesn't throw an opaque "not found".
+      if (!readScene(persisted.id)) {
+        throw new Error('Could not save the example — browser storage is full.');
+      }
+      this._refreshScenes();
+      this._notify();
+      await this.openScene(persisted.id);
+      this._applyMode(entry.mode);
+      return persisted.id;
+    } finally {
+      this._busy = false;
+      this._notify();
+    }
+  }
+
+  /** Make a scene name unique among saved scenes by appending " (2)", " (3)", … */
+  private _uniqueSceneName(base: string): string {
+    const taken = new Set(this._scenes.map(m => m.name));
+    if (!taken.has(base)) return base;
+    let n = 2;
+    while (taken.has(`${base} (${n})`)) n++;
+    return `${base} (${n})`;
+  }
+
+  /** Fetch + validate a published scene JSON from public/scenes/. */
+  private async _fetchPublishedScene(entry: PublishedSceneEntry): Promise<RvScene> {
+    const resp = await fetch(`${import.meta.env.BASE_URL}scenes/${entry.file}`, { cache: 'no-store' });
+    if (!resp.ok) throw new Error(`Failed to fetch example scene ${entry.file}: HTTP ${resp.status}`);
+    const scene = await resp.json();
+    if (!isValidSceneV2(scene)) {
+      throw new Error(`Invalid example scene JSON: ${entry.file}`);
+    }
+    return scene;
+  }
+
+  /** Switch workspace mode if the id is a registered mode. No-op when absent. */
+  private _applyMode(mode?: string): void {
+    if (!mode) return;
+    try {
+      if (this._viewer.modes.has(mode)) this._viewer.modes.setMode(mode);
+      else console.warn(`[SceneStore] example declares unknown mode '${mode}' — not applied`);
+    } catch { /* mode system unavailable (e.g. tests) — ignore */ }
   }
 
   /**
@@ -276,6 +382,9 @@ export class SceneStore {
    */
   private async _loadIntoWorkspace(scene: RvScene, saved: RvScene | null): Promise<void> {
     this._cancelAutosave();
+    // Any normal open clears the "active example" marker; openPublished() re-sets
+    // it after this returns.
+    this._activePublishedName = null;
     this._loading = true;
     this._busy = true;
     this._workspace = workspaceShellOf(scene);
@@ -336,6 +445,7 @@ export class SceneStore {
     const persisted = writeScene(scene);
     this._workspace = workspaceShellOf(persisted);
     this._saved = persisted;
+    this._activePublishedName = null;  // now a saved My Scene, not the example
     this._baselineOps = persisted.edits.ops;
     // _ops stays as-is (now matches baseline)
     writeActiveId(persisted.id);
@@ -369,6 +479,7 @@ export class SceneStore {
     const persisted = writeScene(scene);
     this._workspace = workspaceShellOf(persisted);
     this._saved = persisted;
+    this._activePublishedName = null;  // now a saved My Scene, not the example
     this._baselineOps = persisted.edits.ops;
     writeActiveId(persisted.id);
     // See save() above for the dual-slot rationale.
@@ -467,9 +578,9 @@ export class SceneStore {
 
   async importSceneJSON(file: File): Promise<string> {
     const text = await file.text();
-    const parsed = JSON.parse(text) as RvScene;
-    if (!parsed || parsed.schemaVersion !== 2 || !parsed.base || !parsed.edits) {
-      throw new Error('Invalid scene JSON (missing schemaVersion 2 / base / edits)');
+    const parsed = JSON.parse(text);
+    if (!isValidSceneV2(parsed)) {
+      throw new Error('Invalid scene JSON (missing schemaVersion 2 / base / edits / settings)');
     }
     const now = new Date().toISOString();
     const fresh: RvScene = {
@@ -702,6 +813,10 @@ export class SceneStore {
     this._scenes = listMetas();
   }
 
+  private _refreshPublished(): void {
+    this._published = this._viewer.availablePublishedScenes ?? [];
+  }
+
   private _buildDraft(): RvScene | null {
     if (!this._workspace) return null;
     return {
@@ -728,6 +843,8 @@ export class SceneStore {
       dirty,
       scenes: this._scenes,
       builtins: this._builtins,
+      published: this._published,
+      activePublishedName: this._activePublishedName,
       busy: this._busy,
       canUndo: this.canUndo(),
       canRedo: this.canRedo(),

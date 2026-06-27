@@ -6,10 +6,12 @@ import { createTestViewer } from './helpers/test-viewer';
 import { SimControllerPlugin, SIM_CONTROLLER_PAUSE_REASON } from '../src/plugins/sim-controller';
 
 describe('SimControllerPlugin — lifecycle', () => {
-  test('registers the leading toolbar-button slots (controls + mode-toggle)', () => {
+  test('registers the leading toolbar-button slot (sim controls)', () => {
     const plugin = new SimControllerPlugin();
-    // Plan 194 P6 added a second leading slot for the Sim mode-toggle.
-    expect(plugin.slots.length).toBe(2);
+    // plan-198: the old Realtime/DES execution toggle (SimModeToggle) was removed
+    // from the toolbar (DES is now a workspace mode), so only the Play/Pause +
+    // Reset controls slot remains.
+    expect(plugin.slots.length).toBe(1);
     expect(plugin.slots.every(s => s.slot === 'toolbar-button-leading')).toBe(true);
   });
 

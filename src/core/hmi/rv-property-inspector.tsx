@@ -69,6 +69,7 @@ import { buildBehaviorVirtualComponent, type BehaviorViewerSnapshot } from './in
 import { findLayoutRoot } from './layout-root-utils';
 import { getCapabilities } from '../engine/rv-component-registry';
 import { Vector3Editor } from './rv-field-editors';
+import { InspectorRow } from './rv-inspector-row';
 import { StepState } from '../engine/rv-logic-step';
 import type { StepStateInfo } from '../engine/rv-logic-engine';
 import { STEP_STATE_COLORS, STEP_STATE_LABELS } from './rv-logic-step-colors';
@@ -109,14 +110,11 @@ interface RuntimeFieldRowProps {
 
 function RuntimeFieldRow({ label, value, color }: RuntimeFieldRowProps) {
   return (
-    <Box sx={{ display: 'flex', alignItems: 'center', px: 1, py: 0.15 }}>
-      <Typography sx={{ fontSize: 10, color: 'text.disabled', width: 100, flexShrink: 0 }}>
-        {label}
-      </Typography>
-      <Typography sx={{ fontSize: 10, color: color ?? 'text.primary', fontWeight: 500 }}>
+    <InspectorRow label={label} labelTitle={label} labelColor="text.disabled" dense minHeight={22} py={0.15}>
+      <Typography sx={{ fontSize: 10, color: color ?? 'text.primary', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {value}
       </Typography>
-    </Box>
+    </InspectorRow>
   );
 }
 
@@ -367,8 +365,7 @@ function LayoutTransformSection({ viewer, nodePath, locked, onToggleLock, onTogg
 
   if (!node) return null;
 
-  const fieldRowSx = { display: 'flex', alignItems: 'center', px: 1, py: 0.25 };
-  const labelSx = { fontSize: 10, color: locked ? 'text.disabled' : 'text.secondary', width: 52, flexShrink: 0, cursor: 'default' };
+  const labelColor = locked ? 'text.disabled' : 'text.secondary';
   const resetBtnSx = { p: 0.15, color: 'text.disabled', flexShrink: 0, '&:hover': { color: '#ffa726' } };
 
   return (
@@ -417,28 +414,40 @@ function LayoutTransformSection({ viewer, nodePath, locked, onToggleLock, onTogg
         </Tooltip>
       </Box>
       <Box sx={{ py: 0.5, opacity: locked ? 0.5 : 1, pointerEvents: locked ? 'none' : 'auto' }}>
-        <Box sx={fieldRowSx}>
-          <Typography sx={labelSx}>Position</Typography>
-          <Box sx={{ flex: 1 }}>
+        <InspectorRow
+          fullWidthField
+          label="Position"
+          labelColor={labelColor}
+          py={0.25}
+          trailing={
+            <Tooltip title="Reset position to 0,0,0">
+              <IconButton size="small" onClick={handleResetPosition} sx={resetBtnSx}>
+                <RestartAlt sx={{ fontSize: 12 }} />
+              </IconButton>
+            </Tooltip>
+          }
+        >
+          <Box sx={{ flex: 1, minWidth: 0 }}>
             <Vector3Editor value={pos} onChange={handlePositionChange} />
           </Box>
-          <Tooltip title="Reset position to 0,0,0">
-            <IconButton size="small" onClick={handleResetPosition} sx={resetBtnSx}>
-              <RestartAlt sx={{ fontSize: 12 }} />
-            </IconButton>
-          </Tooltip>
-        </Box>
-        <Box sx={fieldRowSx}>
-          <Typography sx={labelSx}>Rotation</Typography>
-          <Box sx={{ flex: 1 }}>
+        </InspectorRow>
+        <InspectorRow
+          fullWidthField
+          label="Rotation"
+          labelColor={labelColor}
+          py={0.25}
+          trailing={
+            <Tooltip title="Reset rotation to 0,0,0">
+              <IconButton size="small" onClick={handleResetRotation} sx={resetBtnSx}>
+                <RestartAlt sx={{ fontSize: 12 }} />
+              </IconButton>
+            </Tooltip>
+          }
+        >
+          <Box sx={{ flex: 1, minWidth: 0 }}>
             <Vector3Editor value={rot} onChange={handleRotationChange} />
           </Box>
-          <Tooltip title="Reset rotation to 0,0,0">
-            <IconButton size="small" onClick={handleResetRotation} sx={resetBtnSx}>
-              <RestartAlt sx={{ fontSize: 12 }} />
-            </IconButton>
-          </Tooltip>
-        </Box>
+        </InspectorRow>
       </Box>
     </Box>
   );
@@ -448,9 +457,12 @@ function LayoutTransformSection({ viewer, nodePath, locked, onToggleLock, onTogg
 
 export interface PropertyInspectorProps {
   viewer: RVViewer;
+  /** Mobile selection sheet: render only the inner scroll content (no LeftPanel
+   *  chrome). The host provides its own header / close / positioning. */
+  embedded?: boolean;
 }
 
-export function PropertyInspector({ viewer }: PropertyInspectorProps) {
+export function PropertyInspector({ viewer, embedded = false }: PropertyInspectorProps) {
   const { plugin, state } = useEditorPlugin();
   const selectedPath = state.selectedNodePath;
 
@@ -887,6 +899,12 @@ export function PropertyInspector({ viewer }: PropertyInspectorProps) {
       {detached && footerContent}
     </Box>
   );
+
+  // Embedded (mobile selection sheet): inner scroll content only, no panel
+  // chrome — the host sheet supplies its own header/close/positioning.
+  if (embedded) {
+    return scrollContent;
+  }
 
   // ── Detached: floating ChartPanel ─────────────────────────────────────
   if (detached) {

@@ -39,6 +39,8 @@ import {
   discoverPrivateProjects,
   loadProject,
   sanitizeDemoName,
+  applyPublicModelAllowlist,
+  PUBLIC_MODEL_PREFIX,
 } from './_bunny-lib.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -165,6 +167,21 @@ async function deployPublic(cfg, opts) {
   }
   if (!existsSync(distDir)) {
     throw new Error(`dist/ not found: ${distDir} (build first or drop --no-build)`);
+  }
+
+  // Model allowlist: the public CDN must ship ONLY the official demo models
+  // (prefix DemoRealvirtual*) plus the planner library — prune test/helper/stray
+  // GLBs (and their hashed assets/ duplicates) before upload, and rewrite
+  // models.json so the selector lists exactly what is shipped.
+  const modelPrefix = (process.env.RV_PUBLIC_MODEL_PREFIX || PUBLIC_MODEL_PREFIX).trim() || PUBLIC_MODEL_PREFIX;
+  const allow = applyPublicModelAllowlist(distDir, { prefix: modelPrefix, dryRun: opts.dryRun });
+  log(`${DIM}Public model allowlist (prefix "${modelPrefix}*"): `
+    + `${allow.kept.length} kept, ${allow.dropped.length} pruned`
+    + `${allow.droppedAssets.length ? ` (+${allow.droppedAssets.length} hashed)` : ''}${RESET}`);
+  for (const f of allow.kept) log(`  ${GREEN}keep${RESET} models/${f}`);
+  for (const f of allow.dropped) log(`  ${RED}prune${RESET} models/${f}`);
+  if (allow.kept.length === 0) {
+    log(`  ${RED}⚠ no model matches prefix "${modelPrefix}*" — the public selector will be empty${RESET}`);
   }
 
   // GA injection (R2): inject only into the deployed settings.json, never commit it.

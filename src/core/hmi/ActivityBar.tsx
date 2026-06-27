@@ -15,9 +15,12 @@
  * Desktop: flush vertical bar (width ACTIVITY_BAR_WIDTH). Mobile: bottom strip.
  */
 
-import { useSyncExternalStore, type ReactNode } from 'react';
-import { Box, Paper, IconButton, Tooltip, Divider } from '@mui/material';
-import { FolderOpen, AccountTree, PushPin, Settings, ViewInAr } from '@mui/icons-material';
+import { useState, useSyncExternalStore, type ReactNode } from 'react';
+import { Box, Paper, IconButton, Tooltip, Divider, Menu, MenuItem, ListItemIcon, ListItemText } from '@mui/material';
+import { FolderOpen, AccountTree, PushPin, Settings, ViewInAr, Memory, MoreVert } from '@mui/icons-material';
+import { useMcpBridge } from '../../hooks/use-mcp-bridge';
+import { useAiActivity } from './ai-activity-store';
+import { requestSettingsTab } from './settings-tab-store';
 import { useViewer } from '../../hooks/use-viewer';
 import { useSlot } from '../../hooks/use-slot';
 import { useEditorPlugin } from '../../hooks/use-editor-plugin';
@@ -60,6 +63,8 @@ export function ActivityBar() {
   const panelSnapshot = useSyncExternalStore(lpm.subscribe, lpm.getSnapshot);
   const sceneStore = getSceneStore();
   const placement = isMobile ? 'top' as const : 'right' as const;
+  // Mobile: anchor for the top-right "⋮" window-opener menu.
+  const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
 
   // Plugin-contributed window-opener buttons (Connect, Order Manager, …).
   const contexts = useActiveContexts();
@@ -80,6 +85,19 @@ export function ActivityBar() {
     plugin?.setSettingsOpen(!open);
     if (!open) lpm.open('settings', SETTINGS_PANEL_WIDTH);
     else lpm.close('settings');
+  };
+
+  // AI activity button (above Settings, only while the MCP bridge is connected).
+  // Click opens the Settings panel on the AI tab. The status text rides beside
+  // it over the 3D scene via AiActivityOverlay.
+  const mcp = useMcpBridge();
+  const aiActivity = useAiActivity();
+  const openAiSettings = () => {
+    if (!editorState.settingsOpen) {
+      plugin?.setSettingsOpen(true);
+      lpm.open('settings', SETTINGS_PANEL_WIDTH);
+    }
+    requestSettingsTab(5); // AI tab
   };
 
   // Hierarchy is desktop-only (no usable tree on phones).
@@ -118,31 +136,57 @@ export function ActivityBar() {
   );
 
   if (isMobile) {
-    // Mobile: horizontal bottom strip (rounded, scrollable). Settings rides at
-    // the end after the plugin buttons (no flex spacer in a row).
+    // Mobile: a single "⋮" menu in the top-right corner replaces the bottom nav
+    // strip. It holds the window openers (Models, Annotations, Settings). PLC
+    // Connect, the Hierarchy tree and the AI bridge are intentionally NOT exposed
+    // on mobile. Multiuser + AR ride as their own buttons beside the menu.
+    const closeMenu = () => setMenuAnchor(null);
+    const run = (fn: () => void) => () => { fn(); closeMenu(); };
     return (
-      <Box sx={{
-        position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: LEFT_PANEL_ZINDEX,
-        display: 'flex', justifyContent: 'center', pointerEvents: 'none',
-        pb: 'env(safe-area-inset-bottom, 0px)',
-      }}>
+      <Box
+        sx={{
+          position: 'fixed',
+          top: 'calc(8px + env(safe-area-inset-top, 0px))',
+          right: 8,
+          zIndex: LEFT_PANEL_ZINDEX,
+          display: 'flex', alignItems: 'center', pointerEvents: 'auto',
+        }}
+      >
+        {/* One pill holding Multiuser / AR / ⋮ at top-bar height (≈34px). */}
         <Paper
           elevation={4}
           data-ui-panel
           sx={{
-            display: 'flex', flexDirection: 'row', gap: 0.25, p: 0.5,
-            borderRadius: '12px 12px 0 0', pointerEvents: 'auto',
-            maxWidth: '100vw', overflowX: 'auto', WebkitOverflowScrolling: 'touch',
-            scrollbarWidth: 'none', '&::-webkit-scrollbar': { display: 'none' },
-            '& > *': { flexShrink: 0 },
+            borderRadius: 1, display: 'flex', alignItems: 'center',
+            bgcolor: 'rgba(38,38,38,0.95)', backdropFilter: 'blur(12px)',
+            '& .MuiIconButton-root': { width: 40, height: 34, borderRadius: 1, color: 'rgba(255,255,255,0.92)' },
+            '& .MuiSvgIcon-root': { fontSize: 20 },
           }}
         >
-          {coreTop}
-          {pluginButtons}
+          <MultiuserButton placement="top" />
           {arButton}
-          <MultiuserButton placement={placement} />
-          {settingsButton}
+          <IconButton onClick={(e) => setMenuAnchor(e.currentTarget)} aria-label="Menu">
+            <MoreVert />
+          </IconButton>
         </Paper>
+        <Menu anchorEl={menuAnchor} open={!!menuAnchor} onClose={closeMenu}>
+          {sceneStore && (
+            <MenuItem onClick={run(toggleScene)} sx={{ fontSize: 13 }}>
+              <ListItemIcon><FolderOpen fontSize="small" /></ListItemIcon>
+              <ListItemText>Models</ListItemText>
+            </MenuItem>
+          )}
+          <MenuItem onClick={run(toggleAnnotations)} sx={{ fontSize: 13 }}>
+            <ListItemIcon><PushPin fontSize="small" /></ListItemIcon>
+            <ListItemText>Annotations</ListItemText>
+          </MenuItem>
+          {settingsButton && (
+            <MenuItem onClick={run(toggleSettings)} sx={{ fontSize: 13 }}>
+              <ListItemIcon><Settings fontSize="small" /></ListItemIcon>
+              <ListItemText>Settings</ListItemText>
+            </MenuItem>
+          )}
+        </Menu>
       </Box>
     );
   }
@@ -171,6 +215,11 @@ export function ActivityBar() {
       {/* Spacer pushes the bottom group (Multiuser, Settings) down (VSCode convention). */}
       <Box sx={{ flex: 1 }} />
       <MultiuserButton placement={placement} />
+      {mcp.connected && (
+        <ActivityButton title="AI Bridge" active={!!aiActivity} onClick={openAiSettings} placement={placement}>
+          <Memory />
+        </ActivityButton>
+      )}
       {settingsButton}
     </Box>
   );

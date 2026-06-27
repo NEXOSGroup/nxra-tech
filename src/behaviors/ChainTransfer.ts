@@ -329,9 +329,40 @@ const onPartAtCenter = (self: ChainTransferSelf): void => {
   tryDispatch(self);
 };
 
+/**
+ * Restore the chain transfer to its freshly-loaded start — used by BOTH the
+ * `'simulation-reset'` hook and the context-menu "Reset". Stops both belts,
+ * lowers the lift to neutral (Z engaged), re-blocks every input, clears the FSM,
+ * part counter, timers and routing bookkeeping, then returns to `idle`. The lift
+ * Drive itself also snaps to its StartPosition via `RVDrive.reset()`.
+ */
+function resetChainTransfer(self: ChainTransferSelf): void {
+  const l = self.local;
+  stopBelts(self);
+  l.lift?.moveTo(0);
+  blockAllInputs(self);
+  l.selectedInputId = null;
+  l.inAxis = null;
+  l.outAxis = null;
+  l.sensorOccupied = false;
+  l.partCount = 0;
+  l.clearTimer = 0;
+  l.refreshTimer = CONFIG.topologyRefreshSec;
+  l.transitMUs.clear();
+  l.blockedMUs.length = 0;
+  self.sig.PartCount.set(0);
+  setState(self, 'idle');
+}
+
 const def = {
   type: 'ChainTransfer' as const,
   kind: 'router' as const,
+  description: 'Chain transfer that lifts parts and moves them 90° sideways to a parallel line.',
+  mcpDocs:
+    'Right-angle transfer / merge-diverge unit. A part arrives on the roller direction; chains ' +
+    'lift it and move it perpendicular (left or right) onto an adjacent conveyor. convroll snaps ' +
+    'on the through and the transfer sides. Use it to split or merge between two parallel ' +
+    'conveyor lines (lighter than a Turntable for a simple 90° hand-off). LiftHeight is config.',
   models: ['*ChainTransfer*'],
 
   schema: {
@@ -380,23 +411,20 @@ const def = {
       TransportZ: l.zNode.name, TransportX: l.xNode.name,
       Lift: l.liftNode.name, Sensor: l.sensorNode.name,
     });
-
     l.timer = createTransitTimer(self, l.zNode);
 
     self.contextMenu(l.zNode, [
-      {
-        id: 'reset', label: 'Reset',
-        action: () => {
-          stopBelts(self);
-          l.lift?.moveTo(0);
-          blockAllInputs(self);
-          l.selectedInputId = null;
-          l.inAxis = null;
-          l.outAxis = null;
-          setState(self, 'idle');
-        },
-      },
+      { id: 'reset', label: 'Reset', action: () => resetChainTransfer(self) },
     ]);
+  },
+
+  // Lifecycle: restore the FSM/lift/counters to the start on reset, and re-assert
+  // the Run signal on start so the unit resumes routing after a reset.
+  reset(self: ChainTransferSelf): void {
+    resetChainTransfer(self);
+  },
+  start(self: ChainTransferSelf): void {
+    self.sig.Run.set(true);
   },
 
   continuous: {

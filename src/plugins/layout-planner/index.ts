@@ -53,6 +53,7 @@ import {
   LayoutStore,
   serializeLayout,
   deserializeLayout,
+  isGitHubCatalogUrl,
   type PlacedComponent,
   type LibraryCatalogEntry,
 } from './rv-layout-store';
@@ -98,6 +99,7 @@ import {
 } from './planner-persistence';
 
 import { LAYOUT_PANEL_WIDTH } from '../../core/hmi/layout-constants';
+import { isCompactWidth } from '../../hooks/use-mobile-layout';
 import { disposeSubtree } from './three-utils';
 import { setContext } from '../../core/hmi/ui-context-store';
 import { CanvasInteractionManager, type CanvasInteractionDeps } from './canvas-interaction';
@@ -107,7 +109,7 @@ import { BoxSelectController } from './box-select-controller';
 
 // UI components for slot registration
 import { LayoutLibraryPanel } from './LayoutLibraryPanel';
-import { PlannerGridButton, PlannerDropToSurfaceButton, PlannerDeleteButton, PlannerSnapButton, PlannerChainModeButton, PlannerVanishMUsButton, PlannerUndoButton, PlannerRedoButton, PlannerLibraryButton } from './PlannerToolbarButtons';
+import { PlannerGridButton, PlannerDropToSurfaceButton, PlannerDeleteButton, PlannerSnapButton, PlannerChainModeButton, PlannerVanishMUsButton, PlannerDocModeButton, PlannerUndoButton, PlannerRedoButton, PlannerLibraryButton } from './PlannerToolbarButtons';
 import { BboxSnapController } from './bbox-snap';
 import { showInfoOverlay, hideInfoOverlay } from '../../core/hmi/info-overlay-store';
 import { freshOpId as opId } from '../../core/hmi/scene/rv-scene-edits';
@@ -387,6 +389,7 @@ export {
   deserializeLayout,
   resolveUrl,
   normalizeCatalogEntry,
+  isGitHubCatalogUrl,
 } from './rv-layout-store';
 export type {
   PlacedComponent,
@@ -405,6 +408,11 @@ import {
   isLayoutInstance, isLockedLayoutInstance,
   isMuSelectable, isPlannerSelectable, findPlannerSelectableAncestor,
 } from './layout-predicates';
+// Motor datasheet on hover (documentation mode). AasLinkPlugin is NOT loaded
+// while the planner is open, so the planner runs the same shared augmenter.
+import { showDocModeDatasheet, openDocModeDetailAtPoint } from '../aas-link-plugin';
+import type { ObjectHoverState } from '../../hooks/use-hover';
+import { tooltipStore } from '../../core/hmi/tooltip/tooltip-store';
 import type { RVMovingUnit } from '../../core/engine/rv-mu';
 
 // ─── Planner-mode highlight styles ─────────────────────────────────────
@@ -587,6 +595,13 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
       order: 280,
       visibilityRule: { shownOnlyIn: ['planner'] },
     },
+    // Documentation mode — pinned to the very bottom of the toolbar.
+    {
+      slot: 'button-group',
+      component: PlannerDocModeButton as ComponentType<UISlotProps>,
+      order: 300,
+      visibilityRule: { shownOnlyIn: ['planner'] },
+    },
   ];
 
   private _viewer: RVViewer | null = null;
@@ -636,6 +651,11 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
   private _priorAllowFilter: ((node: Object3D) => boolean) | null = null;
   /** Unsubscribe handle for the selection-changed listener (active only while planner is on). */
   private _selectionUnsub: (() => void) | null = null;
+  /** Documentation-mode motor-datasheet hover subscriptions (planner only). */
+  private _docHoverUnsub: (() => void) | null = null;
+  private _docUnhoverUnsub: (() => void) | null = null;
+  private _docClickUnsub: (() => void) | null = null;
+  private readonly _docHoverTipId = 'tooltip-hover:aas-docmode-planner';
   private _transformUpdateUnsub: (() => void) | null = null;
   /** Unsubscribe handle for the store listener (drives Y-axis bar visibility). */
   private _storeUnsub: (() => void) | null = null;
@@ -846,7 +866,13 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
    *  been (re-)enabled and any missed onModelLoaded replayed, so `_viewer` and
    *  the live model state are available. */
   onModeActivate(_mode: ModeId, viewer: RVViewer): void {
-    viewer.leftPanelManager.open('layout-planner', LAYOUT_PANEL_WIDTH, 'right');
+    // On the compact (phone-width) layout the library would open fullscreen and
+    // hide the scene on entry, so we don't auto-open it there — the user reveals
+    // it via the bottom library tab (see LayoutLibraryPanel mobile strip). On the
+    // standard layout it docks to the right as before.
+    if (!isCompactWidth(window.innerWidth)) {
+      viewer.leftPanelManager.open('layout-planner', LAYOUT_PANEL_WIDTH, 'right');
+    }
     this.setActive(true);
   }
 
@@ -1378,6 +1404,12 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     this._objectMap.clear();
     this._selectionUnsub?.();
     this._selectionUnsub = null;
+    this._docHoverUnsub?.();
+    this._docHoverUnsub = null;
+    this._docUnhoverUnsub?.();
+    this._docUnhoverUnsub = null;
+    this._docClickUnsub?.();
+    this._docClickUnsub = null;
     this._transformUpdateUnsub?.();
     this._transformUpdateUnsub = null;
     // Safety net: release any granular pause reasons we may still hold.
@@ -1510,6 +1542,17 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
       this._selectionUnsub = viewer.on('selection-changed',
         this._onSelectionChanged as (data: unknown) => void);
 
+      // 4b. Documentation-mode motor datasheet: in the planner, hover resolves to
+      //     the whole placement, so the shared augmenter finds the gated drive by
+      //     world bounding box under the hit point (gated to documentation mode).
+      this._docHoverUnsub = viewer.on('object-hover',
+        (h: ObjectHoverState | null) => showDocModeDatasheet(viewer, h, this._docHoverTipId));
+      this._docUnhoverUnsub = viewer.on('object-unhover', () => tooltipStore.hide(this._docHoverTipId));
+      // Tap/click on a motor opens the full AAS detail panel (nameplate + PDFs) —
+      // the hover augmenter is hover-only, and on touch there is no hover at all.
+      this._docClickUnsub = viewer.on('object-clicked',
+        (d: { hitPoint?: [number, number, number] }) => openDocModeDetailAtPoint(viewer, d?.hitPoint));
+
       // 5. Track dropToSurface toggle → show/hide the gizmo's Y-axis lift handle.
       //    The Y bar lets users place objects above the floor; when dropToSurface
       //    is on it would just be re-snapped, so we hide it.
@@ -1556,6 +1599,13 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
 
       this._selectionUnsub?.();
       this._selectionUnsub = null;
+      this._docHoverUnsub?.();
+      this._docHoverUnsub = null;
+      this._docUnhoverUnsub?.();
+      this._docUnhoverUnsub = null;
+      this._docClickUnsub?.();
+      this._docClickUnsub = null;
+      tooltipStore.hide(this._docHoverTipId);
       // _transformUpdateUnsub is now owned by onModelLoaded/onModelCleared
       // (always-on) — do NOT tear it down on planner deactivation.
       this._storeUnsub?.();
@@ -2711,8 +2761,12 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
     this._clearPlaced();
 
     // Add referenced catalogs to the planner — addCatalog is idempotent on
-    // the same URL so this is safe even if some are already loaded.
+    // the same URL so this is safe even if some are already loaded. GitHub
+    // catalogs are opt-in only: a restored scene must NOT auto-scan GitHub
+    // (placements that referenced it stay unresolved until the user re-adds
+    // the GitHub library manually via the GitHub tab).
     for (const url of snap.catalogUrls) {
+      if (isGitHubCatalogUrl(url)) continue;
       if (!this.store.getSnapshot().catalogUrls.includes(url)) {
         this.store.addCatalog(url).catch(() => {});
       }
@@ -2841,6 +2895,15 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
   }
 
   /** Toggle grid overlay visibility. */
+  /** True while the planner workspace is active (its raycast/selection overrides
+   *  are installed, so hover/selection resolve to whole placed components). */
+  get isActive(): boolean { return this._active; }
+
+  /** True when library-attached drive datasheets should be hidden: the planner
+   *  is active AND documentation mode is off. The AAS tooltip resolver reads this
+   *  to gate `gated` AAS links — outside the planner they are always shown. */
+  get hideDriveDocs(): boolean { return this._active && !this.store.docMode; }
+
   toggleGrid(): void {
     const next = !this.store.gridEnabled;
     this.store.setGridEnabled(next);
@@ -3259,6 +3322,12 @@ export class LayoutPlannerPlugin implements RVViewerPlugin {
   /** O(1) lookup: returns the placed-id whose root === `root`, or null. */
   findPlacedIdByRoot(root: Object3D): string | null {
     return this._idByObject.get(root) ?? null;
+  }
+
+  /** O(1) lookup: returns the placed root Object3D for a placement id, or null.
+   *  Used by MCP snap/bounds tools to resolve a placement id to its live node. */
+  getPlacedRootById(id: string): Object3D | null {
+    return this._objectMap.get(id) ?? null;
   }
 
   /** Walk up from `node` to the nearest placed root and return its id +

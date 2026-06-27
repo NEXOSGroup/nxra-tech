@@ -640,7 +640,52 @@ const DOC_BACKSLASH_XML = `<?xml version="1.0"?>
   </aas:submodels>
 </aas:aasenv>`;
 
+/** SEW-style XML: File elements listed FLAT under the Documentation submodel,
+ *  with NO per-document SubmodelElementCollection wrapper. */
+const DOC_FLAT_XML = `<?xml version="1.0"?>
+<aas:aasenv xmlns:aas="http://www.admin-shell.io/aas/1/0">
+  <aas:assetAdministrationShells>
+    <aas:assetAdministrationShell>
+      <aas:idShort>FlatDocs</aas:idShort>
+      <aas:identification idType="IRI">urn:test:flatdocs</aas:identification>
+    </aas:assetAdministrationShell>
+  </aas:assetAdministrationShells>
+  <aas:submodels>
+    <aas:submodel>
+      <aas:idShort>Documentation</aas:idShort>
+      <aas:submodelElements>
+        <aas:submodelElement>
+          <aas:file>
+            <aas:idShort>MotorBA</aas:idShort>
+            <aas:mimeType>application/pdf</aas:mimeType>
+            <aas:value>/aasx/Documentation/MotorBA_DRN_25957074.pdf</aas:value>
+          </aas:file>
+        </aas:submodelElement>
+        <aas:submodelElement>
+          <aas:file>
+            <aas:idShort>GearboxBA</aas:idShort>
+            <aas:mimeType>application/pdf</aas:mimeType>
+            <aas:value>/aasx/Documentation/GetriebeBA_K_31978088.pdf</aas:value>
+          </aas:file>
+        </aas:submodelElement>
+      </aas:submodelElements>
+    </aas:submodel>
+  </aas:submodels>
+</aas:aasenv>`;
+
 describe('parseDocuments', () => {
+  it('should extract flat File elements not wrapped in a collection (SEW style)', () => {
+    const data = parseAasXml(DOC_FLAT_XML);
+    expect(data.documents).toHaveLength(2);
+    // No VDI2770_Title present → filename fallback (without .pdf).
+    expect(data.documents[0]).toEqual({
+      title: 'MotorBA_DRN_25957074',
+      mimeType: 'application/pdf',
+      zipPath: 'aasx/Documentation/MotorBA_DRN_25957074.pdf',
+    });
+    expect(data.documents[1].zipPath).toBe('aasx/Documentation/GetriebeBA_K_31978088.pdf');
+  });
+
   it('should extract PDF documents from V2 Documentation submodel', () => {
     const data = parseAasXml(DOC_XML_V2);
     expect(data.documents).toHaveLength(2);

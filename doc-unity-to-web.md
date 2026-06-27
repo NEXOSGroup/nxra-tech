@@ -154,6 +154,7 @@ The relevant plugins for the Demo scene are registered in
 | `DemoHMIPlugin` | Messages, status badges, tiles |
 | `MachineControlPlugin` | Docked left "Machine Control" panel |
 | `MaintenancePlugin` | Maintenance dialog + step-by-step / flythrough procedures |
+| `TestAxesPlugin` | Manual axis tester — floating panel with sliders for A1–A6 robot axis control |
 | `OrderManagerPlugin` | Cart / order basket |
 | `AasLinkPlugin` | Asset-Administration-Shell tooltips & links |
 | `WebXRPlugin` | VR / AR entry |
@@ -196,10 +197,17 @@ contribute to one of the predefined UI slots:
 | Slot | Where it shows |
 |------|----------------|
 | `kpi-bar` | Top-center KPI badges |
-| `messages` | Right sidebar message list |
-| `button-group` | Left sidebar buttons |
+| `activity-bar` | Left sidebar window-opener buttons |
+| `button-group` | Floating left contextual tool toolbar |
 | `search-bar` | Bottom search/filter bar |
+| `messages` | Right sidebar message list |
 | `views` | Bottom-right floating views (charts, tables) |
+| `settings-tab` | Settings dialog tab |
+| `toolbar-button-leading` | TopBar primary sim controls before Hierarchy |
+| `toolbar-button` | TopBar extra action buttons |
+| `toolbar-button-center` | TopBar center region (reserved) |
+| `toolbar-button-trailing` | TopBar right region before camera group |
+| `overlay` | Full-screen overlays |
 
 Plugins also have lifecycle hooks (`onModelLoaded`, `onFixedUpdatePre`,
 `onRender`, ...) and a typed event bus (`viewer.on / viewer.emit`) for
@@ -282,7 +290,7 @@ export function registerModelPlugins(viewer: RVViewer): void {
 //     the model. Must remove everything you added in registerModelPlugins.
 export function unregisterModelPlugins(viewer: RVViewer): void {
   for (const id of registeredIds) {
-    viewer.unuse(id);
+    viewer.removePlugin(id);
   }
   registeredIds.length = 0;
 }

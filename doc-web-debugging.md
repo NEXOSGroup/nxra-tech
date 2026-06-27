@@ -22,6 +22,12 @@ realvirtual WEB uses a category-based structured logging system (`rv-debug.ts`) 
 | `erratic` | ErraticDriver |
 | `grip` | Grip pick/place |
 | `parity` | GLB extras parity validation |
+| `config` | App config loading |
+| `multiuser` | Multiuser synchronization |
+| `interface` | Industrial interface connections |
+| `render` | Render loop and performance metrics |
+| `perf` | Load-phase timings |
+| `plugins` | Model plugin loading/unloading |
 | `system` | Non-categorized system messages (always prints to console) |
 
 ### Enabling Console Output
@@ -288,6 +294,20 @@ The dev server starts automatically on port 5177 (configured in `playwright.conf
 - Reports min/avg/max FPS, frame times, draw calls, triangle count
 - Asserts rendering is active (FPS > 0)
 
+**`camera-startpos.spec.ts`** — Camera start-position persistence:
+- Save a camera view
+- Reload the page
+- Verify the camera view is restored
+
+**`sink-test.spec.ts`** — Sink MU consumption:
+- Source spawns MUs
+- MUs traverse transport surfaces
+- Sink consumes them
+
+**`webgpu-smoke.spec.ts`** — Rendering backend smoke test:
+- Boots the viewer in both WebGL and WebGPU rendering modes without JS errors
+- Headless Chromium falls back to WebGL
+
 ### Writing New E2E Tests
 
 Follow the existing pattern:
@@ -348,7 +368,7 @@ Context menus are managed by `ContextMenuStore` (`context-menu-store.ts`). When 
 
 1. **Check registrations** — In the browser console:
    ```js
-   import contextMenuStore from './core/hmi/context-menu-store';
+   import { contextMenuStore } from './core/hmi/context-menu-store';
    // The store's snapshot shows open state and resolved items
    console.log(contextMenuStore.getSnapshot());
    ```

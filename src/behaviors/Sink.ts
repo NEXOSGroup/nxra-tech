@@ -56,6 +56,10 @@ const def = {
   // Any placed asset whose name contains "Sink": Sink, PalletSink, …
   type: 'Sink' as const,
   kind: 'sink' as const,
+  description: 'Sink that removes parts (MUs) at the end of a line.',
+  mcpDocs:
+    'End of a material-flow line: consumes/destroys MUs that arrive and counts throughput. ' +
+    'Place it at the tail of a run (snap it to a conveyor output). Pair with a Source at the head.',
   models: ['*Sink*'],
   schema: {},
 

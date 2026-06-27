@@ -88,11 +88,12 @@ describe('connect-store.importTagTable', () => {
     expect(body.topics![0].topic).toBe('rv/plc/pi');
     expect(body.topics![0].mode).toBe('ProcessImage');
     expect(body.topics![0].signals).toHaveLength(3);
-    // Wire types derived correctly.
+    // Wire types derived correctly — imported process-image signals are PLC outputs
+    // (PLC writes, viewer reads — read-only), matching the Unity nomenclature.
     const sigByName = Object.fromEntries(body.topics![0].signals!.map(s => [s.name, s.type]));
-    expect(sigByName['Motor_Start']).toBe('PLCInputBool');
-    expect(sigByName['ActualTemp']).toBe('PLCInputInt');
-    expect(sigByName['Pressure']).toBe('PLCInputFloat');
+    expect(sigByName['Motor_Start']).toBe('PLCOutputBool');
+    expect(sigByName['ActualTemp']).toBe('PLCOutputInt');
+    expect(sigByName['Pressure']).toBe('PLCOutputFloat');
 
     // No PUT was issued.
     expect(calls.some(c => c.method === 'PUT')).toBe(false);

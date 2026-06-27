@@ -79,6 +79,16 @@ export default defineLibraryComponent(def);         // the runnable Behavior —
 | `setup(self)` | **mode-agnostic init**, run by BOTH simulations before their adapter: resolve nodes, set signal defaults, stamp the inspector badge, build the right-click menu | both |
 | `continuous` | the **physics adapter**: `setup` wires triggers (sensor subscription, drive handles); `fixedUpdate(self, dt)` reads triggers and applies physical effects (jog belt, move drive) | continuous only |
 | `des` | the **event adapter**: hooks (`onAccept`, `onArrival`, `onDownstreamReady`, …) react to scheduled events and schedule effects (`self.in(delay, 'Arrival', mu)`) | DES only |
+| `reset(self)` | **mode-agnostic** — fired when the simulation is reset: restore `self.local` / state-machine / counters / timers to the start (like a reload). Don't re-resolve nodes (`setup` already did). | both |
+| `start(self)` | **mode-agnostic** — fired right after a reset, to (re)start from the clean state (e.g. re-assert `Run = true`). | both |
+| `resetStat(self)` | **mode-agnostic** — fired on a statistics-only reset: clear stat accumulators without changing simulation state. Mostly a DES concern. | both |
+
+`reset` / `start` / `resetStat` are all optional. A definition that omits them simply doesn't react to
+the corresponding lifecycle event (the rotary Drive / belt still snap back via the engine's own
+`RVDrive.reset()`). A continuous component that owns a state machine (Conveyor, Turntable, ChainTransfer)
+should at least implement `reset` so a sim restart looks like a fresh load. The three blocks are wired
+to the viewer events `simulation-reset` / `simulation-start` / `simulation-resetstat`, which
+`resetSimulation()` emits in the order reset → resetstat → start.
 
 The golden rule: **decisions go in `logic`, init goes in `setup`, and the two adapters are as thin
 as possible.** If you find yourself writing the same decision in `continuous` and `des`, it belongs

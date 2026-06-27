@@ -281,62 +281,74 @@ export function cleanLabel(raw: string): string {
 /**
  * Parse PDF documents from the Documentation submodel.
  *
- * Looks for submodels with idShort matching /documentation/i,
- * finds <file> elements with mimeType containing 'pdf',
- * and extracts title + zipPath for each.
+ * Generic + AAS-metamodel-conformant: looks for submodels with idShort matching
+ * /document/i and collects EVERY File submodel element they contain, at any
+ * nesting depth. VDI 2770 wraps each File in a per-document
+ * SubmodelElementCollection (Festo / Bosch style), but the metamodel also allows
+ * File elements directly under the submodel's submodelElements (SEW style) —
+ * both layouts are handled. The document title comes from a VDI2770/Title
+ * property in the File's nearest enclosing collection, falling back to the
+ * filename when none is present.
  */
 export function parseDocuments(doc: Document): AasDocument[] {
   const results: AasDocument[] = [];
+  const seen = new Set<string>();
   const submodels = findAllByLocalName(doc, 'submodel');
 
   for (const sm of submodels) {
     const smIdShort = getFirstTextByLocalName(sm, 'idShort') || '';
     if (!/document/i.test(smIdShort)) continue;
 
-    // Find all submodelElementCollection children (each represents a document entry)
-    const collections = findAllByLocalName(sm, 'submodelElementCollection');
+    // All File elements anywhere in the submodel — nested in a VDI2770
+    // collection or listed flat directly under submodelElements.
+    const fileElements = findAllByLocalName(sm, 'file');
 
-    for (const coll of collections) {
-      const collIdShort = getFirstTextByLocalName(coll, 'idShort') || '';
+    for (const fileEl of fileElements) {
+      const mimeType = getFirstTextByLocalName(fileEl, 'mimeType') || '';
+      if (!mimeType.toLowerCase().includes('pdf')) continue;
 
-      // Find <file> elements within this collection
-      const fileElements = findAllByLocalName(coll, 'file');
+      const rawPath = getFirstTextByLocalName(fileEl, 'value') || '';
+      if (!rawPath) continue;
 
-      for (const fileEl of fileElements) {
-        const mimeType = getFirstTextByLocalName(fileEl, 'mimeType') || '';
-        if (!mimeType.toLowerCase().includes('pdf')) continue;
+      // Normalize zipPath: strip leading '/', replace '\' with '/'
+      const zipPath = rawPath.replace(/\\/g, '/').replace(/^\//, '');
+      if (seen.has(zipPath)) continue;
+      seen.add(zipPath);
 
-        const rawPath = getFirstTextByLocalName(fileEl, 'value') || '';
-        if (!rawPath) continue;
-
-        // Normalize zipPath: strip leading '/', replace '\' with '/'
-        const zipPath = rawPath.replace(/\\/g, '/').replace(/^\//, '');
-
-        // Determine title: look for VDI2770_Title sibling property
-        let title = '';
-
-        // Search for a sibling <property> with idShort containing 'VDI2770_Title' or 'Title'
-        const siblingProperties = findAllByLocalName(coll, 'property');
-        for (const prop of siblingProperties) {
-          const propIdShort = getFirstTextByLocalName(prop, 'idShort') || '';
-          if (/vdi2770.*title/i.test(propIdShort) || propIdShort === 'Title') {
-            title = getFirstTextByLocalName(prop, 'value') || '';
-            if (title) break;
-          }
-        }
-
-        // Fallback: filename from path
-        if (!title) {
-          const filename = zipPath.split('/').pop() || '';
-          title = filename.replace(/\.pdf$/i, '') || collIdShort || 'Document';
-        }
-
-        results.push({ title, mimeType, zipPath });
-      }
+      const title = findDocumentTitle(fileEl) || filenameTitle(zipPath);
+      results.push({ title, mimeType, zipPath });
     }
   }
 
   return results;
+}
+
+/**
+ * Resolve a human-readable title for a document File element: search the File's
+ * nearest enclosing SubmodelElementCollection (the VDI 2770 per-document group)
+ * for a VDI2770_Title / Title property. Returns '' when the File is not inside a
+ * collection (flat layout) or no title property exists — the caller then falls
+ * back to the filename.
+ */
+function findDocumentTitle(fileEl: Element): string {
+  let coll: Element | null = fileEl.parentElement;
+  while (coll && coll.localName !== 'submodelElementCollection') coll = coll.parentElement;
+  if (!coll) return '';
+
+  for (const prop of findAllByLocalName(coll, 'property')) {
+    const idShort = getFirstTextByLocalName(prop, 'idShort') || '';
+    if (/vdi2770.*title/i.test(idShort) || idShort === 'Title') {
+      const value = getFirstTextByLocalName(prop, 'value') || '';
+      if (value) return value;
+    }
+  }
+  return '';
+}
+
+/** Derive a title from a zip path: the filename without its .pdf extension. */
+function filenameTitle(zipPath: string): string {
+  const filename = zipPath.split('/').pop() || '';
+  return filename.replace(/\.pdf$/i, '') || 'Document';
 }
 
 // ─── Lazy PDF Extraction ───────────────────────────────────────────────

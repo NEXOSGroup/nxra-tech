@@ -102,6 +102,11 @@ export class BoxSelectController {
   start(e: PointerEvent): void {
     if (!this.deps.getActive() || !this._div) return;
     if (this._active) return;
+    // Box-select is a mouse-only rubber-band gesture. On touch/pen a drag on
+    // empty canvas must orbit/pan the camera (OrbitControls). Starting the
+    // marquee there disables the controls and captures the pointer, which is
+    // why touch interaction in the 3D scene appeared "dead" — so skip it.
+    if (e.pointerType !== 'mouse') return;
     this._active = true;
     this._startX = e.clientX;
     this._startY = e.clientY;

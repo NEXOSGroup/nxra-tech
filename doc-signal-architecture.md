@@ -365,7 +365,7 @@ For signals where the Viewer writes to the PLC:
 ```typescript
 // During discovery, subscribe to all 'output' direction signals:
 subscribeToOutputSignals(signals) {
-  for (const sig of signals.filter(s => s.direction === 'output')) {
+  for (const sig of signals.filter(s => s.direction === 'input')) {
     store.subscribe(sig.name, (value) => {
       // Don't echo back values we just received from the PLC
       if (this.pendingIncoming.has(sig.name)) return;
@@ -473,8 +473,8 @@ function useSignalTick(store: SignalStore, intervalMs = 200): number {
 | `useDrives()` | `viewer.drives` | `model-loaded` event | Drive list in TopBar |
 | `useSensorState(path)` | Viewer event | `sensor-changed` event | Sensor status indicator |
 | `useInterfaceStatus(id)` | Viewer events | `interface-connected/disconnected` | Connection badge |
-| `useDriveChart(drive)` | Drive polling | 60Hz sampling | Real-time position chart |
-| `useSensorChart(sensor)` | Signal polling | Configurable interval | Sensor history chart |
+| `useDriveChartOpen()` | Viewer event | `drive-chart-toggle` | Drive chart overlay open/close state |
+| `useSensorChartOpen()` | Viewer event | `sensor-chart-toggle` | Sensor chart overlay open/close state |
 | `useKpiData()` | SignalStore + timer | Periodic polling | KPI dashboard cards |
 
 ### 7.5 Pattern Selection Guide
@@ -485,7 +485,9 @@ function useSignalTick(store: SignalStore, intervalMs = 200): number {
 | Write a signal from UI | `useSignalWrite` | Stable callback ref, no re-render |
 | Dashboard with many values | `useSignalTick` | Polling avoids per-signal subscription overhead |
 | Drive/Sensor list | `useDrives` / `useSensorState` | Event-based, not signal-based |
-| Custom chart | `useDriveChart` / `useSensorChart` | Sampling with ring buffer |
+| Drive/Sensor chart overlay state | `useDriveChartOpen` / `useSensorChartOpen` | Toggle chart panel visibility |
+
+The actual chart data sampling / ring-buffer lives inside `DriveRecorderPlugin` / `SensorRecorderPlugin`, not in these hooks. `useDriveChartOpen()` / `useSensorChartOpen()` only return whether the chart overlay is open.
 
 ---
 

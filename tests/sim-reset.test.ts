@@ -44,6 +44,38 @@ describe('SimController — resetSimulation()', () => {
     expect(viewer.isSimulationPaused).toBe(true);
     expect(viewer.simulationPauseReasons).toContain('user');
   });
+
+  test('emits simulation-reset → simulation-resetstat → simulation-start in order', () => {
+    const viewer = createTestViewer();
+    const order: string[] = [];
+    viewer.on('simulation-reset', () => order.push('reset'));
+    viewer.on('simulation-resetstat', () => order.push('resetstat'));
+    viewer.on('simulation-start', () => order.push('start'));
+    viewer.resetSimulation();
+    expect(order).toEqual(['reset', 'resetstat', 'start']);
+  });
+
+  test('calls reset() on every drive', () => {
+    const viewer = createTestViewer();
+    const resetCalls: string[] = [];
+    viewer.drives = [
+      { name: 'A', reset() { resetCalls.push('A'); } },
+      { name: 'B', reset() { resetCalls.push('B'); } },
+    ];
+    viewer.resetSimulation();
+    expect(resetCalls).toEqual(['A', 'B']);
+  });
+
+  test('simulation-reset fires BEFORE the engine clears MUs', () => {
+    const viewer = createTestViewer({ initialMus: 3 });
+    let musAtReset = -1;
+    // The reset event must run while the live MUs are still present, so a
+    // behavior's onReset handler can reference them before the engine drops them.
+    viewer.on('simulation-reset', () => { musAtReset = viewer.transportManager.mus.length; });
+    viewer.resetSimulation();
+    expect(musAtReset).toBe(3);
+    expect(viewer.transportManager.mus.length).toBe(0); // cleared afterwards
+  });
 });
 
 describe('SimController — clearPauseReasons()', () => {

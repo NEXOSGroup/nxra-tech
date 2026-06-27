@@ -162,7 +162,7 @@ When the dev server is running (`npm run dev`), debug endpoints are available:
 
 realvirtual WEB includes a built-in MCP bridge (`src/plugins/mcp-bridge-plugin.ts`) that exposes the running Three.js scene to AI assistants. The MCP tools documentation is in `webviewer.mcp.md`.
 
-The recommended MCP server is [realvirtual-MCP](https://github.com/game4automation/realvirtual-MCP) — a Python bridge that connects AI agents (Claude Code, Claude Desktop, Cursor) to realvirtual WEB via the debug API. When also used with the Unity Editor, 80+ additional tools for scene authoring and simulation control become available.
+The MCP server is the local **Node bridge** in `mcp-bridge/` — a stdio MCP server that hosts a WebSocket server on `:18712` and connects AI assistants (Claude Desktop, Claude Code) to the running browser. Build it once with `npm run setup` inside `mcp-bridge/`, then register it in `.mcp.json` (the Unity menu *Tools ▸ realvirtual ▸ Settings ▸ Configure Claude Desktop MCP* does this automatically and points the Unity Python server at `--no-webviewer` so the Node bridge owns the port). When also used with the Unity Editor, 80+ additional tools for scene authoring and simulation control become available.
 
 ## Documentation Files
 
@@ -176,6 +176,7 @@ The recommended MCP server is [realvirtual-MCP](https://github.com/game4automati
 | `doc-web-debugging.md` | Debugging tools and workflow |
 | `doc-webviewer-interface.md` | Industrial interfaces (WebSocket Realtime, ctrlX, MQTT) — protocol, signal flow, new-interface guide |
 | `doc-persistence.md` | Persistence architecture: Scene model, ops log, drafts, localStorage / sessionStorage / IndexedDB layout |
+| `doc-ai-integration.md` | AI integration + MCP bridge: architecture, setup, the AI Bridge status panel, activity indicator, `web_screenshot` cropping, troubleshooting |
 | `webviewer.mcp.md` | MCP tools reference (imported at runtime) |
 
 ## Git Repository

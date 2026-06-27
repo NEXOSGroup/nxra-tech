@@ -22,6 +22,7 @@ import { isEphemeralField } from './rv-value-resolver';
 import { getFieldDescriptor, isFieldDisplayReadonly } from '../engine/rv-component-registry';
 import { openSetPositionDialog } from './SetPositionDialog';
 import { INSPECTOR_PANEL_WIDTH, INSPECTOR_MIN_WIDTH, INSPECTOR_MAX_WIDTH } from './layout-constants';
+import { isCompactWidth } from '../../hooks/use-mobile-layout';
 
 // ─── Layout Object Helpers (for context menu) ──────────────────────────
 
@@ -821,6 +822,13 @@ export class RvExtrasEditorPlugin implements RVViewerPlugin {
         // F-key "frame selected" sets openInspector=false — frame the camera but
         // do NOT open/reveal the hierarchy (the node is already selected).
         if (openInspector === false) return;
+        // Compact (mobile) layout: don't open the fullscreen hierarchy/inspector.
+        // Select silently — the mobile selection sheet renders the inspector and
+        // its own breadcrumb/children navigation.
+        if (isCompactWidth(window.innerWidth)) {
+          this.selectNode(path, true);
+          return;
+        }
         this.selectAndReveal(path, true);
       }),
     );

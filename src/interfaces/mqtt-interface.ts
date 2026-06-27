@@ -63,15 +63,16 @@ export function topicToSignalName(topic: string, prefix: string): string {
 }
 
 /**
- * Detect signal direction from topic structure.
- * Topics starting with '{prefix}in/' are inputs (PLC writes, Viewer reads).
- * Topics starting with '{prefix}out/' are outputs (Viewer writes, PLC reads).
- * All other topics default to 'input'.
+ * Detect signal direction from topic structure (PLC perspective, same nomenclature as Unity).
+ * The 'in/' and 'out/' subfolders are named from the PLC's perspective:
+ *   '{prefix}out/' = a PLC output (PLC writes, viewer reads)  → direction 'output' (viewer subscribes only).
+ *   '{prefix}in/'  = a PLC input  (PLC reads, viewer writes)  → direction 'input'  (viewer publishes).
+ * All other topics default to 'output' (display-only / read-only).
  */
 export function detectDirection(topicWithoutPrefix: string): SignalDirection {
   if (topicWithoutPrefix.startsWith('out/')) return 'output';
   if (topicWithoutPrefix.startsWith('in/')) return 'input';
-  return 'input';
+  return 'output';
 }
 
 /**

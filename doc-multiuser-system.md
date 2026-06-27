@@ -344,7 +344,7 @@ Sliding-window counter per WebSocket connection.
 | Data | Stored? | Purpose |
 |------|---------|---------|
 | Signal values | Yes | Bulk-applied on join via state_snapshot |
-| Drive jog/stop states | Yes | Drive control recovery |
+| Drive jog/stop states | No | Real-time commands only; not recovered on late join |
 | Avatar positions | No | Transient, continuous stream |
 | Drive positions | No | Continuous stream at 60 Hz |
 | MU positions | No | Continuous stream at 50 Hz |
@@ -383,17 +383,17 @@ The Unity-side component that acts as the multiuser host.
 | DrivesSyncRate | int | 60 | Hz for drive position broadcast |
 | MUSyncRate | int | 50 | Hz for MU position broadcast |
 | HandshakeTimeoutSeconds | float | 5 | Disconnect clients that don't send room_join |
-| MaxMessagesPerSecond | int | 100 | Per-client rate limit |
+| MaxMessagesPerSecond | int | 200 | Per-client rate limit |
 | UseDrivePathTable | bool | false | Enable indexed drive_sync (Opt 7) |
 
 ### Delta Detection Thresholds
 
 | Component | Threshold | Description |
 |-----------|-----------|-------------|
-| Avatar position | 0.01 mm (sqr 0.0001) | Skip broadcast if camera barely moved |
+| Avatar position | 10 mm (sqr 0.0001) | Skip broadcast if camera barely moved |
 | Avatar rotation | dot > 0.9999 | Skip broadcast if rotation barely changed |
 | Drive position | 0.001 (1 mm) | Skip drive if position change < 1mm |
-| MU position | 0.001 mm (sqr 0.000001) | Skip MU if position change < 0.001mm |
+| MU position | 1 mm (sqr 0.000001) | Skip MU if position change < 0.001mm |
 
 ### Coordinate Conversion (Unity -> glTF/Three.js)
 

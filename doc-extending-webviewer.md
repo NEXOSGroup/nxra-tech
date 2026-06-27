@@ -49,7 +49,8 @@ Three extension points:
     │   ├── PropertyInspector          //     Second left panel beside hierarchy
     │   ├── MachineControlPanel        //     Docked left panel (when open)
     │   └── Settings LeftPanel         //     Model / Visual / Interfaces / Dev / Tests
-    <ButtonPanel />                    //   Left sidebar — logo + slot: button-group
+    <ActivityBar />                    //   Left vertical icon strip — window openers (slot: activity-bar)
+    <ButtonPanel />                    //   Floating left tool toolbar — contextual mode tools (slot: button-group)
     <MessagePanel />                   //   Right sidebar — slot: messages
     <BottomBar />                      //   Bottom — search/filter bar (slot: search-bar)
     <SlotRenderer slot="views" />      //   Bottom-right — charts, tables (slot: views)
@@ -106,14 +107,14 @@ export class MyPlugin implements RVViewerPlugin {
 }
 ```
 
-### ButtonPanel — Left Sidebar
+### ActivityBar and ButtonPanel — Left Side
 
-The `ButtonPanel` renders two elements:
+The left side has two distinct components:
 
-1. **Logo + status indicator** — fixed at top-left (always visible)
-2. **Button group** — vertical column of icon buttons from the `button-group` slot
+- **`ActivityBar`** — the left vertical icon strip (slot: `activity-bar`). It holds window-opener buttons; clicking one opens a left-docked window via the `LeftPanelManager`.
+- **`ButtonPanel`** — a floating left tool toolbar (slot: `button-group`). It holds contextual mode tools (grid, snap, measurement) and floats over the 3D view. It also renders the logo + status indicator.
 
-The button group automatically shifts right when a left panel is open, reading `activePanelWidth` from the `LeftPanelManager`.
+The floating `ButtonPanel` automatically shifts right to clear the activity bar and any open left panel, reading `activePanelWidth` from the `LeftPanelManager`.
 
 ### Pointer Events Strategy
 
@@ -540,17 +541,22 @@ export class MyInterface extends BaseIndustrialInterface {
 }
 
 export class MyAnalyticsPlugin extends RVBehavior {
-  readonly order = PLUGIN_ORDER.DEFAULT;            // 100 — standard order
+  readonly order = PLUGIN_ORDER.SIM_DEFAULT;        // 100 — standard order
 }
 ```
 
 | Constant | Value | Intended Use |
 |----------|-------|-------------|
-| `PLUGIN_ORDER.CORE_PRE` | 0 | Infrastructure (DriveOrderPlugin) |
-| `PLUGIN_ORDER.INTERFACE_ADAPTER` | 10 | Signal/data exchange plugins |
-| `PLUGIN_ORDER.DEFAULT` | 100 | Most plugins (default) |
-| `PLUGIN_ORDER.DEBUG` | 990 | Debug/monitoring overlays |
-| `PLUGIN_ORDER.TEST` | 9999 | Test plugins |
+| `PLUGIN_ORDER.CORE_PRE` | 0 | Dependency-sort hooks (drive-order, etc.) |
+| `PLUGIN_ORDER.INTERFACE_MANAGER` | 5 | Industrial interface manager (lifecycle coordination) |
+| `PLUGIN_ORDER.INTERFACE_ADAPTER` | 10 | Live PLC signal flush from adapter to SignalStore |
+| `PLUGIN_ORDER.MULTIUSER` | 15 | Multiuser session sync (remote drive states, camera) |
+| `PLUGIN_ORDER.UI_CRITICAL` | 50 | UI-critical overlays and sim-controller HMI |
+| `PLUGIN_ORDER.SIM_DEFAULT` | 100 | Default order if not specified |
+| `PLUGIN_ORDER.DEMO` | 150 | Demo / process-specific plugins |
+| `PLUGIN_ORDER.UI_OVERLAY` | 250 | UI overlays (drive-gizmo, layout-planner, kiosk) |
+| `PLUGIN_ORDER.DEBUG` | 990 | Debug / telemetry endpoints (mcp-bridge, debug-endpoint) |
+| `PLUGIN_ORDER.TEST` | 9999 | Test / perf plugins |
 
 ### PluginContext — Narrower API for New Plugins
 
@@ -561,17 +567,23 @@ provides a narrower, more stable API surface than the full `RVViewer`:
 interface PluginContext {
   /** EventEmitter — typed by ViewerEvents */
   readonly events: EventEmitter<ViewerEvents>;
+  readonly connectionState: 'Connected' | 'Disconnected';
 
   // Sub-facades — always instantiated eagerly, safe to call from init():
   readonly scene: SceneFacade;       // eachNode, projectToScreen/Point
   readonly camera: CameraFacade;     // getState, animateTo, setConfig
   readonly controls: ControlsFacade; // setConfig (rotateSpeed, panSpeed, …)
   readonly simLoop: SimLoopFacade;   // onTick(stage, callback, order?)
+  readonly modes: ModeFacade;        // active workspace mode + request a switch
+
+  loadModel(url: string, opts?: { signalMap?: string }): Promise<void>;
+  clearModel(): void;
+  emit: EventEmitter<ViewerEvents>['emit'];
 
   // Live getters — may be null before model load; do NOT cache in init():
   readonly signals: SignalStore | null;
   readonly nodes: NodeRegistry | null;
-  readonly transport: TransportManager | null;
+  readonly transport: TransportFacade | null;
 }
 ```
 
@@ -588,7 +600,7 @@ import { TickStage } from '../core/rv-tick-stages';
 
 export class MyPlugin extends BaseViewerPlugin {
   readonly id = 'my-plugin';
-  readonly order = PLUGIN_ORDER.DEFAULT;
+  readonly order = PLUGIN_ORDER.SIM_DEFAULT;
 
   // init() is called by viewer.use() — context is stored in this.context automatically.
   // Call super.init(viewer, context) if you override.
@@ -1043,31 +1055,40 @@ Plugins can provide UI by declaring a `slots` array on `RVViewerPlugin`. Slot en
 
 ```
 +------------------------------------------------------------+
+| TopBar: [toolbar-button-leading] [Hierarchy][Settings…]    |
+|         [toolbar-button-center] [toolbar-button-trailing]  |
+|         [toolbar-button] [camera/view group]               |
 |           [kpi-bar] KPI cards, horizontal                  |
-| +--------+                                    +---------+  |
-| |        |                                    |         |  |
-| |[button-|                                    |[messages|  |
-| | group] |                                    | ]       |  |
-| |        |            3D Scene                |         |  |
-| |        |                                    |         |  |
-| +--------+                                    +---------+  |
-|                                    +-------------------+   |
-|                                    | [views]           |   |
-|                                    | Charts, tables    |   |
-|                                    +-------------------+   |
-|           [search-bar] Search field                        |
+| +-+ +------+                                   +---------+  |
+| |A| |[butt-|                                   |         |  |
+| |c| | on-  |                                   |[messages|  |
+| |t| |group]|                                   | ]       |  |
+| |i| +------+         3D Scene                  |         |  |
+| |v|  (floating tool toolbar)                   |         |  |
+| |i|                                            |         |  |
+| |t|                                            |         |  |
+| |y|                                +-------------------+   |
+| |-|                                | [views]           |   |
+| |b|                                | Charts, tables    |   |
+| |a|                                +-------------------+   |
+| |r|     [search-bar] Search field                          |
+| +-+ (left vertical icon strip: window openers)             |
 +------------------------------------------------------------+
 ```
 
 | Slot | Position | Typical Content |
 |------|----------|----------------|
 | `kpi-bar` | Top center | KPI badge cards |
-| `button-group` | Left sidebar | Navigation icon buttons |
+| `activity-bar` | Left sidebar | Window-opener buttons that open a left-docked window |
+| `button-group` | Floating left toolbar | Contextual mode tools (grid, snap, measurement) |
 | `search-bar` | Bottom center | Search/filter fields |
 | `messages` | Right sidebar | Notifications, status tiles |
 | `views` | Bottom right | Expandable panels, charts |
 | `settings-tab` | Settings dialog | Additional tabs |
-| `toolbar-button` | TopBar (right) | Extra toolbar buttons next to hierarchy/settings |
+| `toolbar-button-leading` | TopBar (left) | Primary simulation controls before Hierarchy |
+| `toolbar-button` | TopBar (right) | Extra action buttons (toggles/modals) |
+| `toolbar-button-center` | TopBar (center) | Center region toolbars (reserved) |
+| `toolbar-button-trailing` | TopBar (right) | Right region toolbars before the camera/view group |
 | `overlay` | Full-screen | Left panels, modals, custom overlays |
 
 ### UISlotEntry Type
@@ -1076,14 +1097,18 @@ Plugins can provide UI by declaring a `slots` array on `RVViewerPlugin`. Slot en
 // src/core/rv-ui-plugin.ts
 
 type UISlot =
-  | 'kpi-bar'        // Top center: KPI cards horizontal
-  | 'button-group'   // Left sidebar: nav buttons vertical
-  | 'search-bar'     // Bottom center: search field
-  | 'messages'       // Right sidebar: notifications / status tiles
-  | 'views'          // Bottom right: expandable panels (charts, tables)
-  | 'settings-tab'   // Settings dialog: tab registration
-  | 'toolbar-button' // TopBar: extra toolbar buttons
-  | 'overlay';       // Full-screen overlays (left panels, modals, etc.)
+  | 'kpi-bar'                 // Top center: KPI cards horizontal
+  | 'activity-bar'           // Left: window-opener buttons (open a left-docked window)
+  | 'button-group'           // Floating left: contextual mode tools (grid, snap, measurement)
+  | 'search-bar'             // Bottom center: search field
+  | 'messages'               // Right: notifications / status tiles
+  | 'views'                  // Bottom right: expandable panels (charts, tables)
+  | 'settings-tab'           // Settings dialog: tab registration
+  | 'toolbar-button-leading' // TopBar: primary sim controls before Hierarchy
+  | 'toolbar-button'         // TopBar: extra action buttons (toggles/modals)
+  | 'toolbar-button-center'  // TopBar: center region toolbars (reserved)
+  | 'toolbar-button-trailing'// TopBar: right region toolbars before the camera group
+  | 'overlay';               // Full-screen overlays (left panels, modals, etc.)
 
 interface UISlotEntry {
   pluginId?: string;      // Auto-stamped by UIPluginRegistry.register()
@@ -1582,9 +1607,9 @@ All left panel positioning uses shared constants from `core/hmi/layout-constants
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `LEFT_PANEL_TOP` | 44 | Top position (below TopBar) |
-| `LEFT_PANEL_LEFT` | 8 | Left margin on desktop |
-| `LEFT_PANEL_BOTTOM` | 8 | Bottom margin on desktop |
+| `LEFT_PANEL_TOP` | 0 | Top position (flush to viewport top) |
+| `LEFT_PANEL_LEFT` | 46 | Left margin (equals ACTIVITY_BAR_WIDTH) |
+| `LEFT_PANEL_BOTTOM` | 0 | Bottom position (flush to viewport bottom) |
 | `LEFT_PANEL_ZINDEX` | 1200 | z-index for all left panels |
 
 ---

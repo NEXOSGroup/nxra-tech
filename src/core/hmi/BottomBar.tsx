@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 realvirtual GmbH <https://realvirtual.io>
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
 import {
   TextField, InputAdornment, Box, Paper, IconButton,
   Popover, Switch, FormControlLabel, Typography, Divider,
@@ -38,6 +38,11 @@ export function BottomBar() {
   const [settings, setSettings] = useState<SearchSettings>(loadSearchSettings);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isMobile = useMobileLayout();
+  // Hide the mobile search FAB while the planner library strip is open — it docks
+  // bottom-right and would overlap the strip / its thumbnails.
+  const lpm = viewer.leftPanelManager;
+  const lpmSnap = useSyncExternalStore(lpm.subscribe, lpm.getSnapshot);
+  const libraryOpen = isMobile && lpmSnap.right.activePanel === 'layout-planner';
   // Center the search bar over the actual 3D view (between the docked windows),
   // not the whole window, so it tracks the viewport as panels open/resize.
   const insets = useViewportInsets();
@@ -58,6 +63,36 @@ export function BottomBar() {
   // Settings popover anchor
   const [settingsAnchor, setSettingsAnchor] = useState<HTMLElement | null>(null);
   const settingsOpen = Boolean(settingsAnchor);
+
+  // ─── Collapsible search bar (desktop) ───────────────────────────
+  // The bar shows only a magnifier by default and expands to the full
+  // search field on click/hover, collapsing again once the mouse leaves
+  // (unless it still has focus, text, or the settings popover is open).
+  const [searchExpanded, setSearchExpanded] = useState(false);
+  const collapseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const inputValueRef = useRef(inputValue);
+  inputValueRef.current = inputValue;
+  const settingsOpenRef = useRef(settingsOpen);
+  settingsOpenRef.current = settingsOpen;
+  const barExpanded = isMobile || searchExpanded;
+
+  const expandSearch = useCallback((focusInput: boolean) => {
+    if (collapseTimer.current) { clearTimeout(collapseTimer.current); collapseTimer.current = null; }
+    setSearchExpanded(true);
+    if (focusInput) setTimeout(() => inputRef.current?.focus(), 60);
+  }, []);
+
+  const scheduleCollapse = useCallback(() => {
+    if (collapseTimer.current) clearTimeout(collapseTimer.current);
+    collapseTimer.current = setTimeout(() => {
+      const hasFocus = !!inputRef.current && document.activeElement === inputRef.current;
+      if (hasFocus || inputValueRef.current || settingsOpenRef.current) return;
+      setSearchExpanded(false);
+    }, 200);
+  }, []);
+
+  useEffect(() => () => { if (collapseTimer.current) clearTimeout(collapseTimer.current); }, []);
 
   // Debounced filter
   const applyFilter = useCallback(
@@ -235,8 +270,8 @@ export function BottomBar() {
 
   return (
     <>
-    {/* Mobile: search toggle FAB */}
-    {isMobile && (
+    {/* Mobile: search toggle FAB (hidden while the library strip is open) */}
+    {isMobile && !libraryOpen && (
       <IconButton
         onClick={() => mobileSearchOpen ? handleClear() : setMobileSearchOpen(true)}
         sx={{
@@ -323,66 +358,93 @@ export function BottomBar() {
           </Paper>
         )}
 
-        {/* Search bar */}
+        {/* Search bar — collapses to a magnifier on desktop, expands on click/hover */}
         <Paper
           elevation={4}
           data-ui-panel
+          onMouseEnter={isMobile ? undefined : () => expandSearch(false)}
+          onMouseLeave={isMobile ? undefined : scheduleCollapse}
           sx={{
-            px: 1.5,
-            py: 0.5,
+            py: 0,
+            pl: 0,
+            pr: barExpanded ? 1.5 : 0,
             borderRadius: 2,
             pointerEvents: 'auto',
-            width: { xs: 'calc(100vw - 24px)', sm: 380 },
+            width: barExpanded ? { xs: 'calc(100vw - 24px)', sm: 380 } : 40,
+            height: 40,
             display: 'flex',
             alignItems: 'center',
+            overflow: 'hidden',
+            transition: 'width 0.25s cubic-bezier(0.4, 0, 0.2, 1), padding 0.25s',
           }}
         >
-          <TextField
-            placeholder="Search drives, sensors, objects..."
-            size="small"
-            fullWidth
-            variant="standard"
-            value={inputValue}
-            onChange={handleChange}
-            onKeyDown={handleKeyDown}
-            slotProps={{
-              input: {
-                disableUnderline: true,
-                startAdornment: (
-                  <InputAdornment position="start">
-                    <Search sx={{ color: filter ? 'primary.main' : 'text.secondary' }} />
-                  </InputAdornment>
-                ),
-                endAdornment: (
-                  <InputAdornment position="end">
-                    {badgeText && (
-                      <Typography variant="caption" sx={{ color: 'primary.main', mr: 0.5, whiteSpace: 'nowrap' }}>
-                        {badgeText}
-                      </Typography>
-                    )}
-                    {/* Focus button (touch alternative to Enter) */}
-                    {filter && filteredNodes.length > 0 && (
-                      <IconButton size="small" onClick={handleFocus} sx={{ p: 0.25 }} title="Focus camera (Enter)">
-                        <CenterFocusStrong sx={{ fontSize: 16, color: 'primary.main' }} />
-                      </IconButton>
-                    )}
-                    {filter && (
-                      <IconButton size="small" onClick={handleClear} sx={{ p: 0.25 }}>
-                        <Clear sx={{ fontSize: 16, color: 'text.secondary' }} />
-                      </IconButton>
-                    )}
-                  </InputAdornment>
-                ),
-              },
-            }}
-          />
+          {/* Magnifier — always visible; click to open + focus */}
           <IconButton
             size="small"
-            onClick={(e) => setSettingsAnchor(e.currentTarget)}
-            sx={{ ml: 0.5, p: 0.25 }}
+            aria-label="Search"
+            onClick={() => expandSearch(true)}
+            sx={{ width: 40, height: 40, flexShrink: 0, color: filter ? 'primary.main' : 'text.secondary' }}
           >
-            <MoreHoriz sx={{ fontSize: 18, color: 'text.secondary' }} />
+            <Search fontSize="small" />
           </IconButton>
+
+          {/* Collapsible content */}
+          <Box
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              flex: 1,
+              minWidth: 0,
+              opacity: barExpanded ? 1 : 0,
+              pointerEvents: barExpanded ? 'auto' : 'none',
+              transition: 'opacity 0.2s',
+            }}
+          >
+            <TextField
+              placeholder="Search drives, sensors, objects..."
+              size="small"
+              fullWidth
+              variant="standard"
+              value={inputValue}
+              inputRef={inputRef}
+              onChange={handleChange}
+              onKeyDown={handleKeyDown}
+              onFocus={() => expandSearch(false)}
+              onBlur={isMobile ? undefined : scheduleCollapse}
+              slotProps={{
+                input: {
+                  disableUnderline: true,
+                  endAdornment: (
+                    <InputAdornment position="end">
+                      {badgeText && (
+                        <Typography variant="caption" sx={{ color: 'primary.main', mr: 0.5, whiteSpace: 'nowrap' }}>
+                          {badgeText}
+                        </Typography>
+                      )}
+                      {/* Focus button (touch alternative to Enter) */}
+                      {filter && filteredNodes.length > 0 && (
+                        <IconButton size="small" onClick={handleFocus} sx={{ p: 0.25 }} title="Focus camera (Enter)">
+                          <CenterFocusStrong sx={{ fontSize: 16, color: 'primary.main' }} />
+                        </IconButton>
+                      )}
+                      {filter && (
+                        <IconButton size="small" onClick={handleClear} sx={{ p: 0.25 }}>
+                          <Clear sx={{ fontSize: 16, color: 'text.secondary' }} />
+                        </IconButton>
+                      )}
+                    </InputAdornment>
+                  ),
+                },
+              }}
+            />
+            <IconButton
+              size="small"
+              onClick={(e) => setSettingsAnchor(e.currentTarget)}
+              sx={{ ml: 0.5, p: 0.25 }}
+            >
+              <MoreHoriz sx={{ fontSize: 18, color: 'text.secondary' }} />
+            </IconButton>
+          </Box>
         </Paper>
       </Box>
 
@@ -395,7 +457,7 @@ export function BottomBar() {
       <Popover
         open={settingsOpen}
         anchorEl={settingsAnchor}
-        onClose={() => setSettingsAnchor(null)}
+        onClose={() => { setSettingsAnchor(null); if (!isMobile) scheduleCollapse(); }}
         anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
         transformOrigin={{ vertical: 'bottom', horizontal: 'center' }}
         slotProps={{ paper: { sx: { p: 2, minWidth: 220, pointerEvents: 'auto' } } }}

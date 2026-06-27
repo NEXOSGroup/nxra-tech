@@ -12,6 +12,7 @@
 import { useState, useEffect } from 'react';
 import { Box, Tabs, Tab } from '@mui/material';
 import { useViewer } from '../../hooks/use-viewer';
+import { useMobileLayout } from '../../hooks/use-mobile-layout';
 import { LeftPanel, clampWidth } from './LeftPanel';
 import { SETTINGS_PANEL_WIDTH } from './layout-constants';
 import { isTabLocked } from './rv-app-config';
@@ -20,6 +21,7 @@ import {
   MultiuserTab, McpTab, DevToolsTab, TestsTab, GroupsTab, LocalFolderTab,
 } from './settings';
 import { usePluginSettingsTabs, PluginSettingsTabContent } from './PluginSettingsTabs';
+import { useRequestedSettingsTab, clearRequestedSettingsTab } from './settings-tab-store';
 
 const LS_KEY_SETTINGS_WIDTH = 'rv-settings-panel-width';
 const SETTINGS_MIN_WIDTH = 360;
@@ -31,9 +33,20 @@ interface SettingsPanelProps {
 
 export function SettingsPanel({ onClose }: SettingsPanelProps) {
   const viewer = useViewer();
+  const isMobile = useMobileLayout();
   const [settingsTab, setSettingsTab] = useState(0);
   const pluginSettingsTabs = usePluginSettingsTabs(viewer);
   const muPlugin = viewer.getPlugin('multiuser');
+
+  // Honour an external "open on tab X" request (e.g. the AI activity button →
+  // the AI tab). Consumed once so a later manual tab change isn't overridden.
+  const requestedTab = useRequestedSettingsTab();
+  useEffect(() => {
+    if (requestedTab != null) {
+      setSettingsTab(requestedTab);
+      clearRequestedSettingsTab();
+    }
+  }, [requestedTab]);
 
   const [width, setWidth] = useState<number>(() => {
     const stored = Number(localStorage.getItem(LS_KEY_SETTINGS_WIDTH));
@@ -90,9 +103,10 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
         {!isTabLocked('visual') && <Tab label="Visual" value={1} />}
         {!isTabLocked('interfaces') && <Tab label="Interfaces" value={3} />}
         {!isTabLocked('multiuser') && muPlugin && <Tab label="Multiuser" value={4} />}
-        {!isTabLocked('mcp') && viewer.getPlugin('mcp-bridge') && <Tab label="AI" value={5} />}
-        {!isTabLocked('devtools') && <Tab label="Dev Tools" value={6} />}
-        {!isTabLocked('tests') && <Tab label="Tests" value={7} />}
+        {/* AI / Dev Tools / Tests are developer tabs — hidden on mobile. */}
+        {!isMobile && !isTabLocked('mcp') && viewer.getPlugin('mcp-bridge') && <Tab label="AI" value={5} />}
+        {!isMobile && !isTabLocked('devtools') && <Tab label="Dev Tools" value={6} />}
+        {!isMobile && !isTabLocked('tests') && <Tab label="Tests" value={7} />}
         {!isTabLocked('groups') && <Tab label="Groups" value={8} />}
         <Tab label="Local Folder" value={11} />
       </Tabs>

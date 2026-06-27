@@ -108,7 +108,7 @@ and [`src/core/hmi/scene/rv-scene-edits.ts`](src/core/hmi/scene/rv-scene-edits.t
 
 ### 2.1 Edit operations
 
-Every user edit produces an immutable `EditOp` record. There are six primitive
+Every user edit produces an immutable `EditOp` record. There are eight primitive
 op kinds plus a `composite` for transactions:
 
 | Kind | What it does | Inverse via |
@@ -119,6 +119,8 @@ op kinds plus a `composite` for transactions:
 | `removePlacement` | Remove a planner placement | Re-`addPlacement` carrying the snapshot |
 | `transformPlacement` | Move/rotate/scale a placement | `prev.{position,rotation,scale}` |
 | `setCamera` | Set or clear the per-scene camera start preset | `prev` preset |
+| `addNode` | Create a new node under an existing parent (e.g. an inserted IK path waypoint) | `removeNode` with the same node path |
+| `removeNode` | Remove a node created by an `addNode` op; carries the full spec so undo can re-create it | Re-`addNode` from the snapshot |
 | `composite` | Group several primitives into one undo unit | Each child inverse, in reverse order |
 
 Every primitive op carries its own inverse (`prev` field) so undo never
@@ -204,6 +206,24 @@ The **My Scenes** list in the UI is the set of saved scenes — it is **not** a
 view onto the autosave snapshots. Editing a built-in stays in the autosave
 snapshot only; it never appears in *My Scenes* until the user explicitly
 clicks **Save as…**.
+
+The Models panel has a third, read-only **Examples** section. Examples are
+curated demo scenes shipped with the build under `public/scenes/*.scene.json`,
+listed from the curated manifest `public/scenes/index.json`
+(`[{ file, name, mode }]`; a build-time glob of the folder is the fallback when
+the manifest is absent). They are **not** stored in localStorage:
+
+- Clicking an Example opens it **transiently** (`openPublishedExample` →
+  `openPublished`, which loads it as an unsaved working scene and writes
+  `?scene=published:<name>` to the URL — nothing is persisted). The example's
+  preferred workspace mode (e.g. `planner`) is applied from the manifest entry.
+- **Add to My Scenes** (`addPublishedToMyScenes`) materialises the example as a
+  fresh, fully editable **saved scene** with a new `scn_<…>` id (its display
+  name de-duplicated against existing scenes), then opens it — this is the path
+  for turning a demo into something the user owns and can edit.
+
+Examples are part of the public demo deploy only; the private-deploy staging
+step drops `dist/scenes/`, so customer/kiosk builds show no Examples section.
 
 This is why the UI shows two buttons:
 
@@ -310,6 +330,7 @@ the in-place overwrite.
 | `?scene=<scn_…>` | `openScene(id)` (highest priority) | `save()`, `saveAs()`, `openScene()` |
 | `?scene=builtin:<filename>` | `openBuiltin(url)` for the matching entry | `openBuiltin()` |
 | `?scene=empty` | `openEmpty()` (resume per-base empty draft if present) | `newEmpty()` and `openEmpty()` |
+| `?scene=published:<name>` | Fetches `public/scenes/<name>.scene.json` and opens it transiently (`openPublished`); the matching Examples catalogue entry's `mode` is applied unless `?mode=` overrides | `openPublished()` (no localStorage write) |
 | `?model=<url>` | Legacy alias — deprecated, falls through to default-model boot |  |
 | (no `scene` param) | Falls back to: saved active id (`rv-scenes/active`) → `?model=` → `LS_KEY_MODEL` → `defaultModel` from settings.json → first available | — |
 
@@ -506,11 +527,11 @@ Viewer persists a long tail of unrelated state. All keys live in
 | `rv-layout-rotation-snap` | Rotation snap in degrees |
 | `rv-layout-drop-to-surface` | Drop-to-surface mode |
 | `rv-layout-bbox-snap-enabled` | Magnetic bbox snap on/off |
-| `rv-layout-bbox-snap-mid` | MID-point bbox snap on/off ⚠️ |
-| `rv-layout-bbox-snap-side` | Side-edge bbox snap on/off ⚠️ |
-| `rv-layout-bbox-snap-tolerance` | Magnetic snap tolerance in mm ⚠️ |
-| `rv-layout-show-neighbor-distances` | Show neighbor-distance hints ⚠️ |
-| `rv-layout-neighbor-distance-max` | Max neighbor distance in mm ⚠️ |
+| `rv-layout-bbox-snap-mid` | MID-point bbox snap on/off |
+| `rv-layout-bbox-snap-side` | Side-edge bbox snap on/off |
+| `rv-layout-bbox-snap-tolerance` | Magnetic snap tolerance in mm |
+| `rv-layout-show-neighbor-distances` | Show neighbor-distance hints |
+| `rv-layout-neighbor-distance-max` | Max neighbor distance in mm |
 | `rv-layout-active-tab` | Last-active catalog tab URL |
 | `rv-layouts-index` | Layout meta index (legacy multi-layout registry, superseded by `rv-scenes-index`) |
 | `rv-layouts/<id>` | Layout body (legacy) |
@@ -519,12 +540,6 @@ The legacy multi-layout registry (`rv-layouts/<id>`) is no longer the active
 Scene container — saved scenes write to `rv-scenes/<id>` instead. The legacy
 keys exist only so that pre-unification users don't lose their layouts on
 upgrade. `migrateLegacyAutosave()` runs once on boot and is idempotent.
-
-> ⚠️ **Known gap:** The five entries marked ⚠️ above (`rv-layout-bbox-snap-mid`,
-> `-side`, `-tolerance`, `rv-layout-show-neighbor-distances`,
-> `rv-layout-neighbor-distance-max`) are not registered in
-> `rv-storage-keys.ts` and therefore survive `clearAllRVStorage()`
-> ("Reset all"). To fix, add them to `ALL_RV_STORAGE_KEYS`.
 
 ### 7.4 localStorage — dynamic prefixes (one entry per resource)
 

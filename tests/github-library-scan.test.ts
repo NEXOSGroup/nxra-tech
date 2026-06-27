@@ -12,6 +12,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   parseGitHubRepoUrl,
   isGitHubRepoScanUrl,
+  isGitHubCatalogUrl,
   buildCatalogFromGitHub,
 } from '../src/plugins/layout-planner/rv-layout-store';
 
@@ -69,6 +70,26 @@ describe('isGitHubRepoScanUrl', () => {
   it('does NOT scan a catalog.json (blob) URL — that is fetched as a manifest', () => {
     expect(isGitHubRepoScanUrl('https://github.com/acme/assets/blob/main/catalog.json')).toBe(false);
     expect(isGitHubRepoScanUrl('https://example.com/catalog.json')).toBe(false);
+  });
+});
+
+describe('isGitHubCatalogUrl (opt-in gate — never auto-loaded/persisted)', () => {
+  it('matches github.com repo and tree URLs', () => {
+    expect(isGitHubCatalogUrl('https://github.com/game4automation/realvirtual-Library')).toBe(true);
+    expect(isGitHubCatalogUrl('https://github.com/acme/assets/tree/main/lib')).toBe(true);
+  });
+  it('matches raw.githubusercontent.com URLs (incl. a direct catalog.json)', () => {
+    expect(isGitHubCatalogUrl('https://raw.githubusercontent.com/game4automation/realvirtual-Library/main/PalletHandling/RollConveyor2m.glb')).toBe(true);
+    expect(isGitHubCatalogUrl('https://raw.githubusercontent.com/acme/assets/main/catalog.json')).toBe(true);
+  });
+  it('tolerates surrounding whitespace', () => {
+    expect(isGitHubCatalogUrl('  https://github.com/acme/assets  ')).toBe(true);
+  });
+  it('does NOT match the bundled local library or other remote hosts', () => {
+    expect(isGitHubCatalogUrl('bundled://library')).toBe(false);
+    expect(isGitHubCatalogUrl('/models/library/catalog.json')).toBe(false);
+    expect(isGitHubCatalogUrl('https://example.com/lib/catalog.json')).toBe(false);
+    expect(isGitHubCatalogUrl('https://cdn.realvirtual.io/library/catalog.json')).toBe(false);
   });
 });
 

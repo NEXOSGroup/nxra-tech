@@ -26,6 +26,7 @@ import {
   mkdtempSync,
   copyFileSync,
   existsSync,
+  rmSync,
 } from 'node:fs';
 import { join, extname, basename, sep } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -46,6 +47,14 @@ export const ALWAYS_UPLOAD_FILES = new Set([
 const DEFAULT_REGION = 'storage.bunnycdn.com';
 const FETCH_TIMEOUT_MS = 300_000; // parity with C# HttpClient.Timeout = 5 min (R4)
 const MAX_ATTEMPTS = 3;
+
+//! Public-demo model allowlist prefix. On a PUBLIC deploy, only top-level
+//! `models/*.glb` whose filename starts with this prefix (case-insensitive) are
+//! published; the planner library under `models/library/**` is always kept.
+//! Every other top-level GLB (test fixtures, helper/MU GLBs, stray models) is
+//! pruned before upload so the public CDN ships only the official demo models.
+//! Override per-deploy via the RV_PUBLIC_MODEL_PREFIX env var.
+export const PUBLIC_MODEL_PREFIX = 'DemoRealvirtual';
 
 // ─── Path / URL helpers ──────────────────────────────────────────────────
 
@@ -456,11 +465,16 @@ export function stagePrivateProject({ distDir, projectDir, googleAnalyticsId = '
       copyFileSync(join(distDir, entry.name), join(stagingDir, entry.name));
     }
   }
-  // Copy dist/ subdirectories EXCEPT models/; strip .glb out of assets/.
+  // Copy dist/ subdirectories EXCEPT models/ and scenes/; strip .glb out of assets/.
+  // scenes/ holds realvirtual's curated "Example" demos (public/scenes/*.scene.json +
+  // index.json); they are intentional only on the public demo deploy. A private/kiosk
+  // customer build must not surface a generic realvirtual "Planner Demo" in its Models
+  // panel, so the scenes/ folder is dropped here (the Examples section then stays hidden).
   for (const entry of readdirSync(distDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
-    if (entry.name.toLowerCase() === 'models') continue;
-    const exclude = entry.name.toLowerCase() === 'assets' ? new Set(['.glb']) : null;
+    const name = entry.name.toLowerCase();
+    if (name === 'models' || name === 'scenes') continue;
+    const exclude = name === 'assets' ? new Set(['.glb']) : null;
     copyDirRecursive(join(distDir, entry.name), join(stagingDir, entry.name), exclude);
   }
 
@@ -488,4 +502,71 @@ export function stagePrivateProject({ distDir, projectDir, googleAnalyticsId = '
   );
 
   return stagingDir;
+}
+
+// ─── Public deploy: model allowlist ──────────────────────────────────────
+
+//! Enforces the public-demo model allowlist on a freshly built `dist/`:
+//!
+//!  1. top-level `dist/models/*.glb` — KEEP files whose name starts with
+//!     `prefix` (case-insensitive), DELETE the rest (test/helper/stray models).
+//!  2. `dist/models/library/**` — never touched (planner standard library).
+//!  3. `dist/assets/<stem>-<hash>.glb` — Vite emits a SECOND, content-hashed
+//!     copy of every globbed GLB here. Delete only the hashed copies of the
+//!     models removed in step 1 (matched by `<stem>-` with a hyphen boundary so
+//!     e.g. dropping `EuropalletEmpty` never hits the library's `Europallet`/
+//!     `EuropalletLoaded` assets). Library + any other bundled GLB stay.
+//!  4. `dist/models.json` — rewritten to the kept demo models so the model
+//!     selector lists exactly what is shipped (the build-time `import.meta.glob`
+//!     otherwise bakes in every dev GLB filename, leaving 404 ghost entries).
+//!
+//! Idempotent (safe to re-run on an already-pruned dist/, e.g. with --no-build).
+//! In `dryRun` mode nothing is written/deleted — only the report is computed.
+//! Returns { kept, dropped, droppedAssets } (filenames, sorted).
+export function applyPublicModelAllowlist(distDir, { prefix = PUBLIC_MODEL_PREFIX, dryRun = false } = {}) {
+  const modelsDir = join(distDir, 'models');
+  const kept = [];
+  const dropped = [];
+  const droppedAssets = [];
+  if (!existsSync(modelsDir)) return { kept, dropped, droppedAssets };
+
+  const pfx = String(prefix || PUBLIC_MODEL_PREFIX).toLowerCase();
+
+  // Step 1+2: prune top-level models/*.glb; subdirectories (incl. library/) skipped.
+  for (const entry of readdirSync(modelsDir, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    if (extname(entry.name).toLowerCase() !== '.glb') continue;
+    if (entry.name.toLowerCase().startsWith(pfx)) {
+      kept.push(entry.name);
+    } else {
+      dropped.push(entry.name);
+      if (!dryRun) rmSync(join(modelsDir, entry.name), { force: true });
+    }
+  }
+
+  // Step 3: prune the hashed assets/ duplicates of the dropped top-level models.
+  const droppedStems = dropped.map((n) => basename(n, extname(n)).toLowerCase());
+  const assetsDir = join(distDir, 'assets');
+  if (droppedStems.length > 0 && existsSync(assetsDir)) {
+    for (const entry of readdirSync(assetsDir, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      if (extname(entry.name).toLowerCase() !== '.glb') continue;
+      const lower = entry.name.toLowerCase();
+      if (droppedStems.some((stem) => lower.startsWith(`${stem}-`))) {
+        droppedAssets.push(entry.name);
+        if (!dryRun) rmSync(join(assetsDir, entry.name), { force: true });
+      }
+    }
+  }
+
+  // Step 4: authoritative model manifest for the selector (always-upload file).
+  if (!dryRun) {
+    writeFileSync(join(distDir, 'models.json'), JSON.stringify(kept.slice().sort()));
+  }
+
+  return {
+    kept: kept.sort(),
+    dropped: dropped.sort(),
+    droppedAssets: droppedAssets.sort(),
+  };
 }

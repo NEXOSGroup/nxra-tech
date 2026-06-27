@@ -43,6 +43,7 @@ import {
   GridOn,
   JoinInner,
   Link as LinkIcon,
+  MenuBook,
   Redo,
   Rotate90DegreesCcw,
   SettingsEthernet,
@@ -328,6 +329,37 @@ export function PlannerVanishMUsButton() {
         aria-label="Toggle vanish MUs at end of line"
       >
         <AutoDelete sx={{ fontSize: 18 }} />
+      </IconButton>
+    </Tooltip>
+  );
+}
+
+// ─── Documentation-mode button ───────────────────────────────────────────
+
+/**
+ * Toolbar button — toggles documentation mode. When on, component datasheets
+ * (the standard AAS drive docs attached by the transport library components)
+ * are shown on hover / selection while the planner is active; when off, the
+ * planner stays clean. Outside the planner the datasheets are always visible,
+ * so this toggle only matters in planner mode.
+ */
+export function PlannerDocModeButton() {
+  const { plugin, snapshot } = usePlannerToolbarState();
+  if (!plugin || !snapshot) return null;
+
+  const on = snapshot.docMode;
+  return (
+    <Tooltip title={on ? 'Documentation mode: ON (component datasheets visible)' : 'Documentation mode: OFF'} placement="right">
+      <IconButton
+        size="small"
+        onClick={() => plugin.store.setDocMode(!on)}
+        sx={{
+          p: 0.75,
+          color: on ? 'primary.main' : 'text.disabled',
+        }}
+        aria-label="Toggle documentation mode"
+      >
+        <MenuBook sx={{ fontSize: 18 }} />
       </IconButton>
     </Tooltip>
   );
