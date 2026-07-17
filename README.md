@@ -268,6 +268,14 @@ realvirtual.io follows a deliberate two-platform architecture:
 | **PLC connection** | Native protocol drivers | WebSocket / MQTT gateway |
 | **Target user** | Automation engineer, simulation expert | Operator, service tech, sales, customer |
 
+## Contributing
+
+Contributions are welcome. Please note that realvirtual WEB is **dual-licensed**
+(AGPL-3.0-only + commercial): by submitting a pull request or any other
+contribution, you agree to the grant of rights described in
+[CONTRIBUTING.md](CONTRIBUTING.md), which allows realvirtual GmbH to also
+license your contribution under its commercial license.
+
 ## License
 
 Copyright (C) 2025 [realvirtual GmbH](https://realvirtual.io)
