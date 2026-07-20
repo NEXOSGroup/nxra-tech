@@ -1,16 +1,8 @@
-name: Build & Deploy to Bunny CDN
+name: Build & Deploy to Plesk
 
-# Runs on the DEV repo (private) — secrets stay safe.
-# Push to public repo is done manually via /gitweb.
 on:
   push:
     branches: [main]
-
-env:
-  BUNNY_STORAGE_ZONE: realvitual-web
-  BUNNY_REGION: storage.bunnycdn.com
-  BUNNY_REMOTE_PATH: dev
-  BUNNY_PULL_ZONE_ID: '5489019'
 
 jobs:
   deploy:
@@ -25,17 +17,17 @@ jobs:
 
       - run: npm install --force
 
-      # Single deploy path: the CLI builds (public, VITE_PUBLIC_BUILD=1), then
-      # diff-uploads dist/ to {BUNNY_REMOTE_PATH}/ and purges the pull zone.
-      # GA4 id is injected into the deployed settings.json by the tool itself
-      # (committed settings.json stays empty for AGPL forks); no separate
-      # GA-injection or curl-upload step is needed any more.
-      - name: Build & deploy (public) to Bunny CDN
-        env:
-          BUNNY_STORAGE_KEY: ${{ secrets.BUNNY_STORAGE_KEY }}
-          BUNNY_ACCOUNT_KEY: ${{ secrets.BUNNY_ACCOUNT_KEY }}
-          GA_MEASUREMENT_ID: ${{ secrets.GA_MEASUREMENT_ID }}
-        run: npm run deploy
+      - name: Build
+        run: npm run build
 
-      - name: Public URL
-        run: echo "Deployed to https://web.realvirtual.io/${BUNNY_REMOTE_PATH}/"
+      - name: Deploy to nxra.tech
+        env:
+          PLESK_PASSWORD: ${{ secrets.PLESK_PASSWORD }}
+        run: |
+          cd dist
+          git init
+          git config user.email "ci@nexos.group"
+          git config user.name "NEXOS CI"
+          git add -A
+          git commit -m "deploy: ${{ github.sha }}"
+          git push --force "https://andreasd:${PLESK_PASSWORD}@nxra.tech/plesk-git/nxra.git" master
